@@ -67,6 +67,7 @@ impl Plugin for DiscoveryPlugin {
         event: BeforeAgentStartEvent,
     ) -> Result<BeforeAgentStartPatch, PluginError> {
         Ok(BeforeAgentStartPatch {
+            prompt_state: None,
             prompt_contributions: Vec::new(),
             system_prompt: Some(format!("{}:hook", event.system_prompt)),
             ..BeforeAgentStartPatch::default()
@@ -107,6 +108,8 @@ struct DiscoveryTool {
 impl Tool for DiscoveryTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
+            output_schema: None,
+            constrained_sampling: None,
             name: self.name.into(),
             label: self.name.into(),
             description: self.name.into(),
@@ -505,11 +508,18 @@ async fn a_failed_discovery_prompt_refresh_is_retried_before_the_next_provider_r
         "the discovery batch committed before rendering failed"
     );
     assert!(session.prompt("still invalid").await.is_err());
-    assert_eq!(requests.requests().len(), 2);
+    assert_eq!(
+        requests.requests().len(),
+        1,
+        "a stale prompt must not reach the continuation provider"
+    );
     fail_render.store(false, Ordering::SeqCst);
     session.prompt("retry after fixing renderer").await.unwrap();
     assert_eq!(
-        requests.requests()[2].system_prompt,
+        pi_core::SystemMessage::fold(
+            &requests.requests()[1].system_prompt,
+            &requests.requests()[1].messages
+        ),
         "discover,alpha,beta:hook"
     );
 }

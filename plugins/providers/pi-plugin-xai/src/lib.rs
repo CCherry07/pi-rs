@@ -10,7 +10,7 @@ use pi_plugin::{
     ProviderRegisterContext, ProviderRequest, ProviderStream,
 };
 use pi_plugin_openai::responses::{
-    request_body as responses_request_body, stream as responses_stream,
+    request_body as responses_request_body, stream_with_grammar as responses_stream,
 };
 use pi_provider::{
     HttpTransport, ReqwestTransport, TransportError, insert_header, post_json_with_provider_hooks,
@@ -156,8 +156,9 @@ impl Provider for XAiProvider {
         signal: AbortSignal,
     ) -> Result<ProviderStream, ProviderError> {
         let headers = self.headers(&request)?;
+        let grammar = pi_plugin_openai::responses::grammar_properties(&request)?;
         let payload = context
-            .before_provider_request(&signal, xai_request_body(&request))
+            .before_provider_request(&signal, xai_request_body(&request)?)
             .await?;
         let endpoint = request
             .model_spec
@@ -198,17 +199,18 @@ impl Provider for XAiProvider {
             API_NAME,
             response.body,
             signal,
+            grammar,
         ))
     }
 }
 
-fn xai_request_body(request: &ProviderRequest) -> Value {
-    let mut payload = responses_request_body(request);
+fn xai_request_body(request: &ProviderRequest) -> Result<Value, ProviderError> {
+    let mut payload = responses_request_body(request)?;
     payload["include"] = json!(["reasoning.encrypted_content"]);
     if payload.get("tools").is_some() {
         payload["parallel_tool_calls"] = Value::Bool(true);
     }
-    payload
+    Ok(payload)
 }
 
 fn responses_endpoint(base: &str) -> String {
@@ -269,7 +271,7 @@ mod tests {
             sampling_params: BTreeMap::new(),
             session_id: None,
         };
-        let payload = xai_request_body(&request);
+        let payload = xai_request_body(&request).unwrap();
         assert_eq!(payload["input"][0]["role"], "developer");
         assert_eq!(payload["reasoning"]["effort"], "xhigh");
         assert_eq!(payload["include"][0], "reasoning.encrypted_content");

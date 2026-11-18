@@ -125,7 +125,7 @@ async fn session_and_plugin_wait_cover_both_settlement_phases() {
         );
         assert!(
             !std::iter::from_fn(|| events.try_recv().ok())
-                .any(|event| matches!(event.event, AgentSessionEvent::AgentSettled))
+                .any(|event| matches!(event.event, AgentSessionEvent::AgentSettled { .. }))
         );
         release.notify_one();
         tokio::time::timeout(Duration::from_secs(2), run)
@@ -138,7 +138,7 @@ async fn session_and_plugin_wait_cover_both_settlement_phases() {
         assert!(session.is_idle());
         assert_eq!(
             std::iter::from_fn(|| events.try_recv().ok())
-                .filter(|event| matches!(event.event, AgentSessionEvent::AgentSettled))
+                .filter(|event| matches!(event.event, AgentSessionEvent::AgentSettled { .. }))
                 .count(),
             1
         );

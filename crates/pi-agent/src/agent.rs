@@ -6,10 +6,16 @@ use pi_core::{
     AbortHandle, AssistantStream, Message, ModelId, ProviderId, RunId, ThinkingBudgets,
     ThinkingLevel, ToolCallId, ToolExecutionMode, UserMessage,
 };
-use pi_plugin::{BeforeAgentStartEvent, FrozenRegistries, PluginDriver, ProviderPluginDriver};
+use pi_plugin::{
+    BeforeAgentStartEvent, FrozenRegistries, PluginDriver, ProviderPluginDriver, RunSystemPrompt,
+    SystemPromptResolver,
+};
 use pi_telemetry::TelemetryContext;
 use pi_utils::time::unix_timestamp_ms as now_ms;
 use tokio::sync::watch;
+
+mod model_configuration;
+pub use model_configuration::PreparedAgentModelConfiguration;
 
 use crate::agent_loop::emit_run_failure_lifecycle;
 use crate::event_dispatcher::{AgentEventDispatcher, AgentEventListener};
@@ -192,6 +198,11 @@ impl PreparedAgentConfiguration<'_> {
             if !preserve_activity_prompt {
                 *self
                     .inner
+                    .effective_prompt_state
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                *self
+                    .inner
                     .effective_prompt
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
@@ -244,6 +255,7 @@ impl WeakAgent {
 /// A new value can be installed between runs so registries and plugin hooks
 /// always move together as one generation.
 pub struct AgentRuntime {
+    prompt_resolver: Option<Arc<dyn SystemPromptResolver>>,
     prompt_contributions: Arc<Vec<pi_core::PromptContribution>>,
     default_stream_fn: StreamFn,
     generation: u64,
@@ -263,6 +275,7 @@ impl AgentRuntime {
     ) -> Self {
         Self {
             generation,
+            prompt_resolver: None,
             prompt_contributions: Arc::default(),
             default_stream_fn: StreamFn::from_registries(Arc::clone(&registries)),
             system_prompt: system_prompt.into(),
@@ -283,6 +296,19 @@ impl AgentRuntime {
 
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    #[must_use]
+    pub fn with_prompt_resolver(mut self, resolver: Option<Arc<dyn SystemPromptResolver>>) -> Self {
+        self.prompt_resolver = resolver;
+        self
+    }
+
+    fn run_prompt(&self, active: &[String]) -> Result<Option<RunSystemPrompt>, String> {
+        self.prompt_resolver
+            .as_ref()
+            .map(|resolver| RunSystemPrompt::new(Arc::clone(resolver), active))
+            .transpose()
     }
 
     /// Replaces the fallback captured by runs using this runtime generation.
@@ -314,6 +340,7 @@ impl AgentRuntime {
 
     fn with_system_prompt(&self, system_prompt: String) -> Self {
         Self {
+            prompt_resolver: self.prompt_resolver.clone(),
             prompt_contributions: self.prompt_contributions.clone(),
             default_stream_fn: self.default_stream_fn.clone(),
             generation: self.generation,
@@ -338,6 +365,7 @@ struct AgentInner {
     runtime: RwLock<Arc<AgentRuntime>>,
     session_id: RwLock<Option<String>>,
     effective_prompt: RwLock<Option<String>>,
+    effective_prompt_state: RwLock<Option<RunSystemPrompt>>,
     convert_to_llm: RwLock<ConvertToLlm>,
     composed_turn_control: RwLock<Option<Arc<dyn AgentTurnControl>>>,
     config: AgentOptions,
@@ -444,6 +472,7 @@ impl Agent {
                 runtime: RwLock::new(runtime),
                 session_id: RwLock::new(None),
                 effective_prompt: RwLock::new(None),
+                effective_prompt_state: RwLock::new(None),
                 convert_to_llm: RwLock::new(options.convert_to_llm.clone()),
                 composed_turn_control: RwLock::new(None),
                 config: options,
@@ -644,6 +673,17 @@ impl Agent {
 
     /// Last effective run prompt, including plugin contributions, without re-running hooks.
     pub fn effective_system_prompt(&self) -> String {
+        let state = self
+            .inner
+            .effective_prompt_state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(state) = state
+            && let Ok(state) = state.with_active_tools(&self.state().active_tools)
+        {
+            return state.text().to_string();
+        }
         let prompt = self
             .inner
             .effective_prompt
@@ -651,6 +691,25 @@ impl Agent {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         prompt.unwrap_or_else(|| self.runtime().system_prompt().to_string())
+    }
+
+    pub fn render_system_prompt_options(
+        &self,
+        options: serde_json::Value,
+    ) -> Result<String, AgentError> {
+        let state = self
+            .runtime()
+            .run_prompt(&self.state().active_tools)
+            .map_err(AgentError::InvalidConfiguration)?
+            .ok_or_else(|| {
+                AgentError::InvalidConfiguration(
+                    "This system prompt does not expose mutable rendering options".into(),
+                )
+            })?;
+        state
+            .with_options(options)
+            .map(|state| state.text().to_string())
+            .map_err(AgentError::InvalidConfiguration)
     }
 
     /// Returns whether a run is active without cloning transcript state.
@@ -733,6 +792,11 @@ impl Agent {
         state.context_request = None;
         state.snapshot.system_prompt = runtime.system_prompt().to_string();
         *published = runtime;
+        *self
+            .inner
+            .effective_prompt_state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         *self
             .inner
             .effective_prompt
@@ -869,6 +933,11 @@ impl Agent {
         state.snapshot = candidate;
         *self
             .inner
+            .effective_prompt_state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        *self
+            .inner
             .effective_prompt
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
@@ -917,6 +986,16 @@ impl Agent {
         state.snapshot.streaming_message = None;
         state.snapshot.pending_tool_calls.clear();
         state.snapshot.error_message = None;
+        *self
+            .inner
+            .effective_prompt_state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        *self
+            .inner
+            .effective_prompt
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         self.inner.steering.clear();
         self.inner.follow_up.clear();
         Ok(())
@@ -1016,6 +1095,21 @@ impl Agent {
         }
 
         let snapshot = self.state();
+        let prompt_state = if prepare_input {
+            match runtime.run_prompt(&snapshot.active_tools) {
+                Ok(state) => state,
+                Err(error) => {
+                    self.finish_active_run(&completion_sender);
+                    return Err(AgentError::InvalidConfiguration(error));
+                }
+            }
+        } else {
+            self.inner
+                .effective_prompt_state
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        };
         let input_messages = match &kind {
             RunKind::Prompt { messages, .. } => messages.clone(),
             RunKind::Continue => Vec::new(),
@@ -1028,7 +1122,11 @@ impl Agent {
                     &self.inner.config.cwd,
                     &abort_signal,
                     BeforeAgentStartEvent {
-                        system_prompt: runtime.system_prompt().to_string(),
+                        system_prompt: prompt_state.as_ref().map_or_else(
+                            || runtime.system_prompt().to_string(),
+                            |state| state.text().to_string(),
+                        ),
+                        prompt_state,
                         input_messages,
                         active_tools: snapshot.active_tools.clone(),
                         provider_id: snapshot.provider_id.clone(),
@@ -1047,6 +1145,7 @@ impl Agent {
             pi_plugin::BeforeAgentStartPatch {
                 prompt_contributions: Vec::new(),
                 system_prompt: Some(self.effective_system_prompt()),
+                prompt_state,
                 messages: Vec::new(),
             }
         };
@@ -1056,24 +1155,46 @@ impl Agent {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let mut contributions = runtime.prompt_contributions.as_ref().clone();
+            let mut contributions = hook.prompt_state.as_ref().map_or_else(
+                || runtime.prompt_contributions.as_ref().clone(),
+                |prompt| prompt.contributions().to_vec(),
+            );
             contributions.extend(hook.prompt_contributions);
             state.prompt_contributions = Arc::new(contributions);
         }
+        let active_tools = hook
+            .prompt_state
+            .as_ref()
+            .map_or(snapshot.active_tools, |state| state.active_tools().to_vec());
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .snapshot
+            .active_tools
+            .clone_from(&active_tools);
+        *self
+            .inner
+            .effective_prompt_state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = hook.prompt_state.clone();
         let context = AgentContext {
             system_prompt: hook
                 .system_prompt
                 .unwrap_or_else(|| runtime.system_prompt().to_string()),
             messages: snapshot.messages.as_ref().clone(),
-            active_tools: snapshot.active_tools,
+            active_tools,
         };
+        let selected = self.state();
+        let turn_control = self.live_model_turn_control(&selected);
         let config = AgentLoopConfig {
+            prompt_state: hook.prompt_state,
             stream_fn: self.inner.config.stream_fn.clone(),
             convert_to_llm: self.convert_to_llm(),
             transform_context: self.inner.config.transform_context.clone(),
-            provider_id: snapshot.provider_id,
-            model_id: snapshot.model_id,
-            thinking_level: snapshot.thinking_level,
+            provider_id: selected.provider_id,
+            model_id: selected.model_id,
+            thinking_level: selected.thinking_level,
             thinking_budgets: self.inner.config.thinking_budgets,
             block_images: self.inner.config.block_images,
             tool_execution: self.inner.config.tool_execution,
@@ -1107,7 +1228,7 @@ impl Agent {
             plugins: Arc::clone(runtime.plugins()),
             provider_plugins: Arc::clone(runtime.provider_plugins()),
             queues: queue_adapter,
-            turn_control: self.active_turn_control(),
+            turn_control,
             telemetry: self.inner.config.telemetry.clone(),
             events: Arc::clone(&events),
         };

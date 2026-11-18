@@ -273,6 +273,52 @@ test("RPC dialogs retain their semantic fields and correlate out-of-order answer
   app.ui.retire();
 });
 
+test("RPC text dialog omission remains distinct from explicitly empty values", async () => {
+  const app = rpcFrontend();
+  const answers = [app.ui.input("name"), app.ui.input("name", ""), app.ui.editor("draft"), app.ui.editor("draft", "")];
+  assert.deepEqual(app.calls.map(call => call.request), [
+    { method: "input", title: "name" },
+    { method: "input", title: "name", placeholder: "" },
+    { method: "editor", title: "draft" },
+    { method: "editor", title: "draft", prefill: "" },
+  ]);
+  for (let index = 0; index < answers.length; index++) app.answer(index, { type: "cancelled" });
+  assert.deepEqual(await Promise.all(answers), [undefined, undefined, undefined, undefined]);
+  app.ui.retire();
+});
+
+test("RPC presentation notifications preserve clear operations, placement and editor replacement", () => {
+  const app = rpcFrontend();
+  app.ui.setStatus("job", "running");
+  app.ui.setStatus("job", "");
+  app.ui.setStatus("job");
+  app.ui.setWidget("job", ["第一行", "second"]);
+  app.ui.setWidget("job", [], { placement: "aboveEditor" });
+  app.ui.setWidget("job", undefined, { placement: "belowEditor" });
+  app.ui.setTitle("项目");
+  app.ui.setEditorText("draft\nnext");
+  app.ui.pasteToEditor("replacement");
+  app.ui.notify("default");
+  app.ui.notify("explicit", "info");
+  assert.deepEqual(app.notices, [
+    { type: "uiNotification", notification: { type: "status", key: "job", text: "running" } },
+    { type: "uiNotification", notification: { type: "status", key: "job", text: "" } },
+    { type: "uiNotification", notification: { type: "status", key: "job" } },
+    { type: "uiNotification", notification: { type: "widget", key: "job", lines: ["第一行", "second"] } },
+    { type: "uiNotification", notification: { type: "widget", key: "job", lines: [], placement: "aboveEditor" } },
+    { type: "uiNotification", notification: { type: "widget", key: "job", placement: "belowEditor" } },
+    { type: "uiNotification", notification: { type: "title", title: "项目" } },
+    { type: "uiNotification", notification: { type: "editorText", text: "draft\nnext" } },
+    { type: "uiNotification", notification: { type: "editorText", text: "replacement" } },
+    { type: "uiNotification", notification: { type: "notify", message: "default" } },
+    { type: "uiNotification", notification: { type: "notify", message: "explicit", level: "info" } },
+  ]);
+  assert.deepEqual(app.calls, []);
+  assert.equal(app.ui.getEditorText(), "");
+  app.ui.retire();
+  assert.throws(() => app.ui.setTitle("late"), /retired/);
+});
+
 test("RPC cancellation, timeout and retirement release every dialog's native request", async () => {
   for (const method of ["confirm", "select", "input", "editor"] as const) {
     for (const reason of ["abort", "timeout", "retire", "cancelled"] as const) {
@@ -371,7 +417,11 @@ test("unsupported RPC surfaces leave semantic dialogs and notifications availabl
   app.answer(0, { type: "confirmed", value: true });
   assert.equal(await confirmation, true);
   app.ui.notify("ready");
-  assert.deepEqual(app.notices, [{ type: "uiNotify", message: "ready", level: "info" }]);
+  assert.deepEqual(app.notices, [
+    { type: "uiNotification", notification: { type: "status", key: "status", text: "ready" } },
+    { type: "uiNotification", notification: { type: "widget", key: "widget", lines: ["text"] } },
+    { type: "uiNotification", notification: { type: "notify", message: "ready" } },
+  ]);
   assert.equal(app.calls.length, 1);
   app.ui.retire();
 });

@@ -89,22 +89,22 @@ Use this EXACT format:
 
 Keep each section concise. Preserve exact identifiers, important references, and error messages."#;
 
-const TURN_PREFIX_SUMMARIZATION_PROMPT: &str = r#"This is the PREFIX of a turn that was too large to keep. The SUFFIX (recent work) is retained.
+const TURN_PREFIX_SUMMARIZATION_PROMPT: &str = r#"The messages above are earlier context from an ongoing conversation. Later messages are stored separately and do not need to be reconstructed.
 
-Summarize the prefix to provide context for the retained suffix:
+Create a concise checkpoint of the user's request and the progress shown above. This checkpoint will be placed before the later messages so the conversation can continue with the necessary context.
 
 ## Original Request
-[What did the user ask for in this turn?]
+[What did the user ask for?]
 
-## Early Progress
-- [Key decisions and work done in the prefix]
+## Progress So Far
+- [Key decisions and work completed in these messages]
 
-## Context for Suffix
-- [Information needed to understand the retained recent work]
+## Context Needed to Continue
+- [Information from these messages needed to understand the later work]
 
-Be concise. Focus on what's needed to understand the kept suffix."#;
+Only summarize information explicitly present above. Do not infer or recreate later messages."#;
 
-const BRANCH_SUMMARIZATION_PROMPT: &str = "Create a structured summary of this conversation branch for context when returning later.\n\nUse this EXACT format:\n\n## Goal\n[What was the user trying to accomplish in this branch?]\n\n## Constraints & Preferences\n- [Any constraints, preferences, or requirements mentioned]\n\n## Progress\n### Done\n- [x] [Completed tasks/changes]\n\n### In Progress\n- [ ] [Work that was started but not finished]\n\n### Blocked\n- [Issues preventing progress, if any]\n\n## Key Decisions\n- **[Decision]**: [Brief rationale]\n\n## Next Steps\n1. [What should happen next to continue this work]\n\nKeep each section concise. Preserve exact identifiers, important references, and error messages.";
+const BRANCH_SUMMARIZATION_PROMPT: &str = "Create a structured summary of this conversation branch for context when returning later.\n\nUse this EXACT format:\n\n## Goal\n[What was the user trying to accomplish in this branch?]\n\n## Constraints & Preferences\n- [Any constraints, preferences, or requirements mentioned]\n- [Or \"(none)\" if none were mentioned]\n\n## Progress\n### Done\n- [x] [Completed tasks/changes]\n\n### In Progress\n- [ ] [Work that was started but not finished]\n\n### Blocked\n- [Issues preventing progress, if any]\n\n## Key Decisions\n- **[Decision]**: [Brief rationale]\n\n## Next Steps\n1. [What should happen next to continue this work]\n\nKeep each section concise. Preserve exact identifiers, important references, and error messages.";
 
 /// Immutable summary policy selected while building a session generation.
 ///
@@ -134,6 +134,16 @@ pub trait SessionCompactionPolicy: Send + Sync {
 
     /// Enriches the prepared input before session lifecycle hooks see it.
     fn prepare(&self, _path_entries: &[SessionRecord], _preparation: &mut CompactionPreparation) {}
+
+    /// Enriches an abandoned branch before summarization. Domains can carry
+    /// branch-specific metadata without changing the generic session rules.
+    fn prepare_branch(
+        &self,
+        path_entries: &[SessionRecord],
+        preparation: &mut CompactionPreparation,
+    ) {
+        self.prepare(path_entries, preparation);
+    }
 
     /// Appends domain summary context and returns optional checkpoint details.
     fn finalize(
@@ -173,7 +183,9 @@ struct CutPointResult {
 pub struct CompactionCompletionRequest {
     pub system_prompt: String,
     pub prompt: String,
-    pub max_output_tokens: u64,
+    /// Leave unset to use the provider/model output limit, independently of
+    /// the context space reserved to trigger compaction.
+    pub max_output_tokens: Option<u64>,
     pub thinking_level: ThinkingLevel,
 }
 
@@ -240,54 +252,85 @@ impl CompactionCompleter for PiRuntime {
         request: CompactionCompletionRequest,
         signal: AbortSignal,
     ) -> Result<CompactionCompletion, CompactionError> {
-        let response = self
-            .complete(
-                RuntimeCompletionRequest {
-                    system_prompt: request.system_prompt,
-                    messages: vec![Message::User(UserMessage::text(
-                        request.prompt,
-                        crate::now_ms(),
-                    ))],
-                    model: None,
-                    thinking_level: request.thinking_level,
-                    thinking_budgets: self.agent().thinking_budgets(),
-                    max_output_tokens: Some(request.max_output_tokens),
-                },
-                signal,
-            )
-            .await
-            .map_err(|error| match error {
-                RuntimeError::Aborted => {
-                    CompactionError::Aborted("summarization aborted".to_string())
-                }
-                other => CompactionError::SummarizationFailed(other.to_string()),
-            })?;
-        match response.stop_reason {
-            StopReason::Aborted => Err(CompactionError::Aborted(
-                response
-                    .error_message
-                    .unwrap_or_else(|| "summarization aborted".to_string()),
-            )),
-            StopReason::Error => Err(CompactionError::SummarizationFailed(
-                response
-                    .error_message
-                    .unwrap_or_else(|| "unknown provider error".to_string()),
-            )),
-            _ => Ok(CompactionCompletion {
-                text: response
-                    .content
-                    .iter()
-                    .filter_map(|block| match block {
-                        ContentBlock::Text(text) => Some(text.text.as_str()),
-                        ContentBlock::Thinking(_)
-                        | ContentBlock::Image(_)
-                        | ContentBlock::ToolCall(_) => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                usage: response.usage,
-            }),
+        compaction_completion(
+            self.complete(compaction_request(self, request), signal)
+                .await,
+        )
+    }
+}
+
+pub(super) fn compaction_request(
+    runtime: &PiRuntime,
+    request: CompactionCompletionRequest,
+) -> RuntimeCompletionRequest {
+    RuntimeCompletionRequest {
+        system_prompt: request.system_prompt,
+        messages: vec![Message::User(UserMessage::text(
+            request.prompt,
+            crate::now_ms(),
+        ))],
+        model: None,
+        thinking_level: request.thinking_level,
+        thinking_budgets: runtime.agent().thinking_budgets(),
+        max_output_tokens: request.max_output_tokens,
+    }
+}
+
+pub(super) fn compaction_completion(
+    response: Result<pi_core::AssistantMessage, RuntimeError>,
+) -> Result<CompactionCompletion, CompactionError> {
+    let response = response.map_err(|error| match error {
+        RuntimeError::Aborted => CompactionError::Aborted("summarization aborted".into()),
+        other => CompactionError::SummarizationFailed(other.to_string()),
+    })?;
+    if response.stop_reason == StopReason::Aborted {
+        return Err(CompactionError::Aborted(
+            response
+                .error_message
+                .unwrap_or_else(|| "summarization aborted".into()),
+        ));
+    }
+    if let Some(error) = summarization_failure(&response, "Summarization") {
+        return Err(CompactionError::SummarizationFailed(error));
+    }
+    Ok(CompactionCompletion {
+        text: response
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        usage: response.usage,
+    })
+}
+
+pub(crate) fn summarization_failure(
+    response: &pi_core::AssistantMessage,
+    label: &str,
+) -> Option<String> {
+    match response.stop_reason {
+        StopReason::Error => Some(format!(
+            "{label} failed: {}",
+            response
+                .error_message
+                .as_deref()
+                .filter(|message| !message.is_empty())
+                .unwrap_or("Unknown error")
+        )),
+        StopReason::Length => Some(format!(
+            "{label} failed: generation hit the token cap and the summary is incomplete"
+        )),
+        _ if response
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolCall(_))) =>
+        {
+            Some(format!("{label} attempted to call a tool"))
         }
+        _ => None,
     }
 }
 
@@ -481,7 +524,7 @@ pub fn prepare_compaction(
             entry
                 .messages
                 .into_iter()
-                .filter(|message| message.role() != "compactionSummary")
+                .filter(|message| !matches!(message.role(), "compactionSummary" | "system"))
                 .map(|message| {
                     if message.role() == "branchSummary" {
                         CompactableEntry::BranchSummary(message)
@@ -528,6 +571,10 @@ pub fn prepare_compaction(
         });
     let retained_tail = messages_in(&compactable[cut.first_kept_entry_index..]);
 
+    if messages_to_summarize.is_empty() && turn_prefix_messages.is_empty() {
+        return None;
+    }
+
     let mut preparation = CompactionPreparation {
         messages_to_summarize,
         turn_prefix_messages,
@@ -572,14 +619,20 @@ pub async fn compact(
                 completer,
                 policy,
                 &preparation.turn_prefix_messages,
-                preparation.settings.reserve_tokens,
+                custom_instructions,
                 thinking_level,
                 signal.child(),
             )
             .await?;
-            let history_text = history
-                .as_ref()
-                .map_or("No prior history.", |value| value.text.as_str());
+            let history_text = history.as_ref().map_or_else(
+                || {
+                    preparation
+                        .previous_summary
+                        .as_deref()
+                        .unwrap_or("No prior history.")
+                },
+                |value| value.text.as_str(),
+            );
             let usage = history.as_ref().map_or(prefix.usage.clone(), |value| {
                 combine_usage(&value.usage, &prefix.usage)
             });
@@ -630,12 +683,10 @@ pub fn serialize_conversation(messages: &[AgentMessage]) -> String {
                 }
             }
             Message::Assistant(message) => {
-                let mut thinking = Vec::new();
                 let mut text = Vec::new();
                 let mut calls = Vec::new();
                 for block in &message.content {
                     match block {
-                        ContentBlock::Thinking(value) => thinking.push(value.thinking.clone()),
                         ContentBlock::Text(value) => text.push(value.text.clone()),
                         ContentBlock::ToolCall(call) => {
                             let args = call.arguments.as_object().map_or_else(
@@ -650,11 +701,8 @@ pub fn serialize_conversation(messages: &[AgentMessage]) -> String {
                             );
                             calls.push(format!("{}({args})", call.name));
                         }
-                        ContentBlock::Image(_) => {}
+                        ContentBlock::Thinking(_) | ContentBlock::Image(_) => {}
                     }
-                }
-                if !thinking.is_empty() {
-                    parts.push(format!("[Assistant thinking]: {}", thinking.join("\n")));
                 }
                 if !text.is_empty() {
                     parts.push(format!("[Assistant]: {}", text.join("\n")));
@@ -692,8 +740,12 @@ async fn generate_summary(
     thinking_level: ThinkingLevel,
     signal: AbortSignal,
 ) -> Result<CompactionCompletion, CompactionError> {
+    let previous_summary = preparation
+        .previous_summary
+        .as_deref()
+        .filter(|value| !value.is_empty());
     let mut base_prompt = policy
-        .summary_prompt(preparation.previous_summary.is_some())
+        .summary_prompt(previous_summary.is_some())
         .to_string();
     if let Some(instructions) = custom_instructions.filter(|value| !value.is_empty()) {
         base_prompt.push_str("\n\nAdditional focus: ");
@@ -703,17 +755,14 @@ async fn generate_summary(
         "<conversation>\n{}\n</conversation>\n\n",
         serialize_conversation(messages)
     );
-    if let Some(previous) = &preparation.previous_summary {
+    if let Some(previous) = previous_summary {
         prompt.push_str("<previous-summary>\n");
         prompt.push_str(previous);
         prompt.push_str("\n</previous-summary>\n\n");
     }
     prompt.push_str(&base_prompt);
     let capabilities = completer.model_capabilities();
-    let max_output_tokens = clamp_summary_tokens(
-        preparation.settings.reserve_tokens.saturating_mul(4) / 5,
-        capabilities,
-    );
+    let max_output_tokens = None;
     let thinking_level = compaction_thinking_level(thinking_level, capabilities);
     completer
         .complete_compaction(
@@ -732,17 +781,21 @@ async fn generate_turn_prefix_summary(
     completer: &dyn CompactionCompleter,
     policy: &dyn SessionCompactionPolicy,
     messages: &[AgentMessage],
-    reserve_tokens: u64,
+    custom_instructions: Option<&str>,
     thinking_level: ThinkingLevel,
     signal: AbortSignal,
 ) -> Result<CompactionCompletion, CompactionError> {
-    let prompt = format!(
-        "<conversation>\n{}\n</conversation>\n\n{}",
+    let mut prompt = format!(
+        "# Conversation\n{}\n\n# Instructions\n{}",
         serialize_conversation(messages),
         policy.turn_prefix_prompt()
     );
+    if let Some(instructions) = custom_instructions.filter(|value| !value.is_empty()) {
+        prompt.push_str("\n\nAdditional focus: ");
+        prompt.push_str(instructions);
+    }
     let capabilities = completer.model_capabilities();
-    let max_output_tokens = clamp_summary_tokens(reserve_tokens / 2, capabilities);
+    let max_output_tokens = None;
     let thinking_level = compaction_thinking_level(thinking_level, capabilities);
     completer
         .complete_compaction(
@@ -755,12 +808,6 @@ async fn generate_turn_prefix_summary(
             signal,
         )
         .await
-}
-
-fn clamp_summary_tokens(requested: u64, capabilities: CompactionModelCapabilities) -> u64 {
-    capabilities
-        .max_output_tokens
-        .map_or(requested, |maximum| requested.min(maximum))
 }
 
 fn compaction_thinking_level(
@@ -870,7 +917,9 @@ fn find_cut_point_compactable(
                 .iter()
                 .copied()
                 .find(|point| *point >= index)
-                .unwrap_or(first_cut);
+                // A trailing oversized result must retain its nearest assistant
+                // call, not force all history to remain (current Pi findCutPoint).
+                .unwrap_or(*cut_points.last().expect("nonempty cut points"));
             break;
         }
     }
@@ -991,19 +1040,25 @@ fn content_text(content: &[ContentBlock]) -> String {
         .iter()
         .filter_map(|block| match block {
             ContentBlock::Text(text) => Some(text.text.as_str()),
-            ContentBlock::Thinking(thinking) => Some(thinking.thinking.as_str()),
-            ContentBlock::Image(_) | ContentBlock::ToolCall(_) => None,
+            ContentBlock::Thinking(_) | ContentBlock::Image(_) | ContentBlock::ToolCall(_) => None,
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("")
 }
 
 fn truncate_for_summary(text: &str, max_chars: usize) -> String {
-    let char_count = text.chars().count();
+    let char_count = text.encode_utf16().count();
     if char_count <= max_chars {
         return text.to_string();
     }
-    let prefix = text.chars().take(max_chars).collect::<String>();
+    let mut units = 0;
+    let prefix = text
+        .chars()
+        .take_while(|character| {
+            units += character.len_utf16();
+            units <= max_chars
+        })
+        .collect::<String>();
     format!(
         "{prefix}\n\n[... {} more characters truncated]",
         char_count - max_chars
@@ -1335,6 +1390,120 @@ mod tests {
     }
 
     #[test]
+    fn summary_serialization_matches_legacy_visible_text_and_utf16_limits() {
+        let mut assistant = serde_json::to_value(assistant("", 10)).unwrap();
+        assistant["content"] = json!([
+            {"type":"thinking", "thinking":"omit this reasoning"},
+            {"type":"text", "text":"first"},
+            {"type":"text", "text":"second"},
+            {"type":"toolCall", "id":"call", "name":"lookup", "arguments":{"key":"42"}}
+        ]);
+        let messages = [
+            AgentMessage::custom(json!({"role":"user", "content":[
+                {"type":"text", "text":"hello"}, {"type":"text", "text":" world"}
+            ], "timestamp":0}))
+            .unwrap(),
+            AgentMessage::custom(assistant).unwrap(),
+            AgentMessage::custom(
+                json!({"role":"toolResult", "toolCallId":"call", "toolName":"lookup", "content":[
+                {"type":"text", "text":"found"}, {"type":"text", "text":" it"}
+            ], "isError":false, "timestamp":0}),
+            )
+            .unwrap(),
+        ];
+        assert_eq!(
+            serialize_conversation(&messages),
+            "[User]: hello world\n\n[Assistant]: first\nsecond\n\n[Assistant tool calls]: lookup(key=\"42\")\n\n[Tool result]: found it"
+        );
+
+        let result = AgentMessage::custom(
+            json!({"role":"toolResult", "toolCallId":"call", "toolName":"lookup", "content":[
+            {"type":"text", "text":format!("{}🦀tail", "x".repeat(1999))}
+        ], "isError":false, "timestamp":0}),
+        )
+        .unwrap();
+        assert_eq!(
+            serialize_conversation(&[result]),
+            format!(
+                "[Tool result]: {}\n\n[... 5 more characters truncated]",
+                "x".repeat(1999)
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn incomplete_or_tool_call_summaries_are_rejected() {
+        use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
+        let truncated = ScriptedTurn::Events(vec![
+            pi_core::StreamEvent::Start {
+                metadata: pi_core::ResponseMetadata::new(
+                    ProviderId::new("scripted"),
+                    ModelId::new("test"),
+                    "scripted",
+                    0,
+                ),
+            },
+            pi_core::StreamEvent::TextStart { content_index: 0 },
+            pi_core::StreamEvent::TextDelta {
+                content_index: 0,
+                delta: "unfinished checkpoint".to_string(),
+            },
+            pi_core::StreamEvent::TextEnd {
+                content_index: 0,
+                text_signature: None,
+            },
+            pi_core::StreamEvent::Done {
+                reason: StopReason::Length,
+                usage: Usage::default(),
+            },
+        ]);
+        for (turn, expected) in [
+            (
+                truncated,
+                "Summarization failed: generation hit the token cap and the summary is incomplete",
+            ),
+            (
+                ScriptedTurn::ToolCalls(vec![ToolCall::new("call", "lookup", json!({}))]),
+                "Summarization attempted to call a tool",
+            ),
+        ] {
+            let runtime = PiRuntime::builder()
+                .provider_plugin(ScriptedProviderPlugin::scripted([turn]))
+                .agent_options(pi_agent::AgentOptions {
+                    provider_id: ProviderId::new("scripted"),
+                    model_id: ModelId::new("test"),
+                    ..pi_agent::AgentOptions::default()
+                })
+                .build()
+                .unwrap();
+            let preparation = CompactionPreparation {
+                messages_to_summarize: vec![user("work")],
+                turn_prefix_messages: Vec::new(),
+                retained_tail: Vec::new(),
+                is_split_turn: false,
+                tokens_before: 10,
+                previous_summary: None,
+                file_ops: FileOperations::default(),
+                settings: CompactionSettings::default(),
+            };
+            let (_, signal) = pi_core::AbortHandle::new();
+            let error = compact(
+                &preparation,
+                &runtime,
+                &GenericCompactionPolicy,
+                None,
+                ThinkingLevel::Off,
+                signal,
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(error, CompactionError::SummarizationFailed(ref message) if message == expected)
+            );
+        }
+    }
+
+    #[test]
     fn serialize_truncates_tool_results() {
         let message: AgentMessage = Message::tool_result(ToolResultMessage {
             tool_call_id: ToolCallId::new("call-1"),
@@ -1391,7 +1560,7 @@ mod tests {
         let requests = completer.prompts.lock().unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].thinking_level, ThinkingLevel::High);
-        assert_eq!(requests[0].max_output_tokens, 80);
+        assert_eq!(requests[0].max_output_tokens, None);
         assert_eq!(requests[0].system_prompt, SUMMARIZATION_SYSTEM_PROMPT);
         assert!(
             requests[0]
@@ -1405,6 +1574,114 @@ mod tests {
         );
         assert_eq!(result.summary, "## Goal\nKeep working");
         assert_eq!(result.retained_tail, preparation.retained_tail);
+    }
+
+    #[tokio::test]
+    async fn split_turn_requests_wrap_prefix_and_forward_custom_focus() {
+        struct CheckpointPolicy;
+        impl SessionCompactionPolicy for CheckpointPolicy {
+            fn summary_prompt(&self, _updating: bool) -> &str {
+                "Summarize history."
+            }
+
+            fn turn_prefix_prompt(&self) -> &str {
+                "Summarize earlier messages."
+            }
+        }
+        let preparation = CompactionPreparation {
+            messages_to_summarize: vec![user("prior work")],
+            turn_prefix_messages: vec![user("current request"), assistant("early progress", 10)],
+            retained_tail: vec![assistant("later work", 10)],
+            is_split_turn: true,
+            tokens_before: 500,
+            previous_summary: None,
+            file_ops: FileOperations::default(),
+            settings: CompactionSettings::default(),
+        };
+        for (instructions, suffix) in [
+            (None, ""),
+            (Some(""), ""),
+            (
+                Some("preserve exact errors"),
+                "\n\nAdditional focus: preserve exact errors",
+            ),
+        ] {
+            let completer = FakeCompleter {
+                prompts: Mutex::new(Vec::new()),
+                capabilities: CompactionModelCapabilities::default(),
+            };
+            let (_, signal) = pi_core::AbortHandle::new();
+            compact(
+                &preparation,
+                &completer,
+                &CheckpointPolicy,
+                instructions,
+                ThinkingLevel::Off,
+                signal,
+            )
+            .await
+            .unwrap();
+            let requests = completer.prompts.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(
+                requests[0].prompt,
+                format!(
+                    "<conversation>\n[User]: prior work\n</conversation>\n\nSummarize history.{suffix}"
+                )
+            );
+            // The split-turn wrapper differs from the ordinary summary wrapper
+            // in legacy compaction.ts's generateTurnPrefixSummary.
+            assert_eq!(
+                requests[1].prompt,
+                format!(
+                    "# Conversation\n[User]: current request\n\n[Assistant]: early progress\n\n# Instructions\nSummarize earlier messages.{suffix}"
+                )
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn split_turn_without_new_history_preserves_previous_checkpoint() {
+        for (previous, history) in [
+            (None, "No prior history."),
+            (Some("previous checkpoint"), "previous checkpoint"),
+            (Some(""), ""),
+        ] {
+            let preparation = CompactionPreparation {
+                messages_to_summarize: Vec::new(),
+                turn_prefix_messages: vec![user("current request")],
+                retained_tail: vec![assistant("later work", 10)],
+                is_split_turn: true,
+                tokens_before: 500,
+                previous_summary: previous.map(str::to_string),
+                file_ops: FileOperations::default(),
+                settings: CompactionSettings::default(),
+            };
+            let completer = FakeCompleter {
+                prompts: Mutex::new(Vec::new()),
+                capabilities: CompactionModelCapabilities::default(),
+            };
+            let (_, signal) = pi_core::AbortHandle::new();
+            let result = compact(
+                &preparation,
+                &completer,
+                &GenericCompactionPolicy,
+                None,
+                ThinkingLevel::Off,
+                signal,
+            )
+            .await
+            .unwrap();
+            assert_eq!(completer.prompts.lock().unwrap().len(), 1);
+            assert_eq!(
+                result.summary,
+                format!(
+                    "{history}\n\n---\n\n**Turn Context (split turn):**\n\n## Goal\nKeep working"
+                )
+            );
+            assert_eq!(result.retained_tail, preparation.retained_tail);
+            assert_eq!(result.usage, Some(usage(25)));
+        }
     }
 
     struct FailingCompleter {
@@ -1477,7 +1754,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn summaries_respect_model_reasoning_and_output_capabilities() {
+    async fn summaries_leave_output_limits_to_provider_and_respect_reasoning() {
         let preparation = CompactionPreparation {
             messages_to_summarize: vec![user("history")],
             turn_prefix_messages: vec![user("large turn")],
@@ -1517,7 +1794,7 @@ mod tests {
         assert!(
             requests
                 .iter()
-                .all(|request| request.max_output_tokens == 128_000)
+                .all(|request| request.max_output_tokens.is_none())
         );
         assert!(
             requests

@@ -119,6 +119,26 @@ Environment variables are supported as an alternative, including `OPENAI_API_KEY
 `XAI_API_KEY`. Explicit `--api-key` takes precedence over stored credentials and provider
 environment variables for the selected run.
 
+## Tool selection
+
+New sessions start with `read`, `bash`, `edit`, and `write`, in that order. Optional `grep`,
+`find`, `ls`, `powershell`, and `codemode` tools are registered for explicit selection.
+PowerShell execution requires Windows. Set `defaultTools` in settings.json or pass `--tools`
+to choose the active tools. MCP configuration may enable its codemode or tool-search entry point.
+Enabling the `hashline`, `memory`, `subagents`, or `schedule` feature adds that capability's tools.
+
+```json
+{
+  "defaultTools": ["read", "bash", "edit", "write", "codemode"],
+  "codemode": { "mode": "on", "inlineBudget": 3000 },
+  "features": { "hashline": false, "memory": false, "subagents": false, "schedule": false }
+}
+```
+
+`codemode.mode` accepts `on` (direct tools remain declared) or `only` (their declarations move
+inside codemode). `inlineBudget` bounds the estimated tokens used for nested tool declarations.
+`features.hashline` adds `hashline_edit` and enables `hashline: true` on read/grep.
+
 ## Product modes
 
 | Mode            | Command                         | Best for                                                    |

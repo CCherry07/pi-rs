@@ -1,12 +1,18 @@
 #![forbid(unsafe_code)]
 
+mod operations;
+mod process_tree;
+pub use operations::{ShellOperations, ShellOperationsRequest, execute_with_operations};
+
+use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
 use pi_core::AbortSignal;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
@@ -38,15 +44,101 @@ pub struct ShellRequest {
     pub on_chunk: Option<ShellChunkSink>,
 }
 
+/// A shell adapter's executable and arguments. Process capture and
+/// cancellation remain shared across shell implementations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellConfiguration {
+    pub executable: PathBuf,
+    pub arguments: Vec<OsString>,
+    pub output_file_prefix: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FullShellOutput {
+    pub content: String,
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellResult {
     pub output: String,
     pub exit_code: Option<i32>,
     pub cancelled: bool,
     pub timed_out: bool,
+    /// On timeout, when the shell exited before the deadline but descendants
+    /// were still writing to its output pipes, retain the real exit timing.
+    pub shell_exit_after: Option<Duration>,
     pub truncated: bool,
     pub truncation: Option<ShellTruncation>,
     pub full_output_path: Option<PathBuf>,
+}
+
+impl ShellResult {
+    /// Reads the complete captured output for programmatic callers. Large
+    /// results retain both ends and link to the complete persisted file.
+    pub async fn read_full_output(&self, max_bytes: usize) -> Result<FullShellOutput, ShellError> {
+        let Some(path) = &self.full_output_path else {
+            return Ok(FullShellOutput {
+                content: self.output.clone(),
+                truncated: false,
+            });
+        };
+        let mut file = tokio::fs::File::open(path)
+            .await
+            .map_err(|error| ShellError::Process(error.to_string()))?;
+        let size = file
+            .metadata()
+            .await
+            .map_err(|error| ShellError::Process(error.to_string()))?
+            .len();
+        if size <= max_bytes as u64 {
+            let mut bytes = Vec::with_capacity(size as usize);
+            file.read_to_end(&mut bytes)
+                .await
+                .map_err(|error| ShellError::Process(error.to_string()))?;
+            return Ok(FullShellOutput {
+                content: String::from_utf8_lossy(&bytes).into_owned(),
+                truncated: false,
+            });
+        }
+        let head_bytes = max_bytes / 2;
+        let tail_bytes = max_bytes - head_bytes;
+        let mut head = vec![0; head_bytes];
+        let mut tail = vec![0; tail_bytes];
+        file.read_exact(&mut head)
+            .await
+            .map_err(|error| ShellError::Process(error.to_string()))?;
+        file.seek(std::io::SeekFrom::End(-(tail_bytes as i64)))
+            .await
+            .map_err(|error| ShellError::Process(error.to_string()))?;
+        file.read_exact(&mut tail)
+            .await
+            .map_err(|error| ShellError::Process(error.to_string()))?;
+        let mut offset = 0;
+        let head_end = loop {
+            match std::str::from_utf8(&head[offset..]) {
+                Ok(_) => break head.len(),
+                Err(error) => match error.error_len() {
+                    Some(length) => offset += error.valid_up_to() + length,
+                    None => break offset + error.valid_up_to(),
+                },
+            }
+        };
+        let tail_start = tail
+            .iter()
+            .position(|byte| byte & 0xc0 != 0x80)
+            .unwrap_or(tail.len());
+        let content = format!(
+            "{}\n\n[... {} bytes omitted ...]\n\n{}",
+            String::from_utf8_lossy(&head[..head_end]),
+            size - max_bytes as u64,
+            String::from_utf8_lossy(&tail[tail_start..])
+        );
+        Ok(FullShellOutput {
+            content,
+            truncated: true,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,12 +170,61 @@ pub enum ShellError {
 }
 
 pub async fn execute(request: ShellRequest) -> Result<ShellResult, ShellError> {
+    execute_with_environment(request, BTreeMap::new()).await
+}
+
+/// Executes with per-child environment overrides. `None` removes an inherited
+/// variable; values never modify the host process environment.
+pub async fn execute_with_environment(
+    request: ShellRequest,
+    environment: BTreeMap<OsString, Option<OsString>>,
+) -> Result<ShellResult, ShellError> {
+    let (shell, flag) = resolve_shell(request.shell_path.clone());
+    execute_configured(
+        request,
+        environment,
+        ShellConfiguration {
+            executable: shell,
+            arguments: vec![flag.into()],
+            output_file_prefix: "pi-bash-".into(),
+        },
+    )
+    .await
+}
+
+pub async fn execute_configured(
+    request: ShellRequest,
+    environment: BTreeMap<OsString, Option<OsString>>,
+    configuration: ShellConfiguration,
+) -> Result<ShellResult, ShellError> {
+    if request.abort_signal.is_aborted() {
+        return Ok(ShellResult {
+            output: String::new(),
+            exit_code: None,
+            cancelled: true,
+            timed_out: false,
+            shell_exit_after: None,
+            truncated: false,
+            truncation: None,
+            full_output_path: None,
+        });
+    }
     let cwd = std::fs::canonicalize(&request.cwd)
         .map_err(|error| ShellError::InvalidCwd(error.to_string()))?;
-    let (shell, flag) = resolve_shell(request.shell_path);
-    let mut child = Command::new(shell)
-        .arg(flag)
-        .arg(&request.command)
+    let mut command = Command::new(configuration.executable);
+    command.args(configuration.arguments);
+    command.arg(&request.command);
+    for (key, value) in environment {
+        match value {
+            Some(value) => command.env(key, value),
+            None => command.env_remove(key),
+        };
+    }
+    // Pi starts Unix shells in their own process group so cancellation also
+    // reaches descendants after the shell itself has already exited.
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -91,6 +232,8 @@ pub async fn execute(request: ShellRequest) -> Result<ShellResult, ShellError> {
         .kill_on_drop(true)
         .spawn()
         .map_err(|error| ShellError::Spawn(error.to_string()))?;
+    let started_at = std::time::Instant::now();
+    let mut process_tree = process_tree::ProcessTree::new(child.id());
     let stdout = child
         .stdout
         .take()
@@ -102,47 +245,65 @@ pub async fn execute(request: ShellRequest) -> Result<ShellResult, ShellError> {
     let (sender, mut receiver) = mpsc::channel::<(ShellStream, Vec<u8>)>(64);
     let stdout_task = tokio::spawn(read_chunks(stdout, ShellStream::Stdout, sender.clone()));
     let stderr_task = tokio::spawn(read_chunks(stderr, ShellStream::Stderr, sender.clone()));
+    let readers = process_tree::PipeReaders([stdout_task, stderr_task]);
     drop(sender);
 
     let deadline = request
         .timeout
         .map(|timeout| tokio::time::Instant::now() + timeout);
-    let mut capture = OutputCapture::default();
+    let mut capture = OutputCapture {
+        output_file_prefix: configuration.output_file_prefix,
+        ..Default::default()
+    };
     let mut cancelled = false;
     let mut timed_out = false;
     let mut chunks_open = true;
-    let status = loop {
+    let mut status = None;
+    let mut shell_exit_after = None;
+    let mut idle_deadline = None;
+    loop {
+        if status.is_some() && !chunks_open {
+            break;
+        }
         tokio::select! {
             biased;
-            () = request.abort_signal.wait() => {
+            () = request.abort_signal.wait(), if !cancelled && !timed_out => {
                 cancelled = true;
-                let _ = child.kill().await;
-                break child.wait().await.map_err(|error| ShellError::Process(error.to_string()))?;
+                process_tree.terminate();
+                let _ = child.start_kill();
             }
-            () = wait_deadline(deadline), if deadline.is_some() => {
+            () = wait_deadline(deadline), if deadline.is_some() && !cancelled && !timed_out => {
                 timed_out = true;
-                let _ = child.kill().await;
-                break child.wait().await.map_err(|error| ShellError::Process(error.to_string()))?;
+                process_tree.terminate();
+                let _ = child.start_kill();
+            }
+            result = child.wait(), if status.is_none() => {
+                status = Some(result.map_err(|error| ShellError::Process(error.to_string()))?);
+                if !cancelled && !timed_out {
+                    shell_exit_after = Some(started_at.elapsed());
+                }
+                idle_deadline = Some(tokio::time::Instant::now() + Duration::from_millis(100));
             }
             chunk = receiver.recv(), if chunks_open => {
                 match chunk {
                     Some((stream, bytes)) => {
                         record_chunk(&mut capture, request.on_chunk.as_ref(), stream, &bytes).await?;
+                        if status.is_some() {
+                            idle_deadline = Some(tokio::time::Instant::now() + Duration::from_millis(100));
+                        }
                     }
                     None => chunks_open = false,
                 }
             }
-            status = child.wait() => {
-                break status.map_err(|error| ShellError::Process(error.to_string()))?;
-            }
+            () = wait_deadline(idle_deadline), if idle_deadline.is_some() => break,
         }
-    };
-
-    while let Some((stream, bytes)) = receiver.recv().await {
-        record_chunk(&mut capture, request.on_chunk.as_ref(), stream, &bytes).await?;
     }
-    let _ = stdout_task.await;
-    let _ = stderr_task.await;
+    // A quiet inherited pipe must not keep an invocation open forever. Active
+    // writers rearm the grace period on every chunk, up to timeout/abort.
+    drop(readers);
+    process_tree.release();
+    let status = status.expect("the pipe grace timer starts only after shell exit");
+    cancelled |= request.abort_signal.is_aborted();
     capture.finish().await?;
     let truncation = capture.truncation();
     let output = truncation
@@ -151,7 +312,7 @@ pub async fn execute(request: ShellRequest) -> Result<ShellResult, ShellError> {
     let truncated = truncation.is_some();
     Ok(ShellResult {
         output,
-        exit_code: status.code(),
+        exit_code: shell_exit_code(status),
         cancelled,
         timed_out,
         shell_exit_after: shell_exit_after.filter(|_| timed_out),
@@ -159,6 +320,20 @@ pub async fn execute(request: ShellRequest) -> Result<ShellResult, ShellError> {
         truncation,
         full_output_path: capture.full_output_path,
     })
+}
+
+fn shell_exit_code(status: std::process::ExitStatus) -> Option<i32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        status
+            .code()
+            .or_else(|| status.signal().map(|signal| 128 + signal))
+    }
+    #[cfg(not(unix))]
+    {
+        status.code()
+    }
 }
 
 fn resolve_shell(shell_path: Option<PathBuf>) -> (PathBuf, &'static str) {
@@ -238,6 +413,7 @@ struct OutputCapture {
     newline_count: usize,
     last_byte: Option<u8>,
     last_line_bytes: usize,
+    output_file_prefix: String,
 }
 
 impl OutputCapture {
@@ -291,7 +467,11 @@ impl OutputCapture {
 
     async fn start_persisting(&mut self) -> Result<(), ShellError> {
         let temporary = tempfile::Builder::new()
-            .prefix("pi-bash-")
+            .prefix(if self.output_file_prefix.is_empty() {
+                "pi-bash-"
+            } else {
+                &self.output_file_prefix
+            })
             .suffix(".log")
             .tempfile()
             .map_err(|error| ShellError::Process(error.to_string()))?;
@@ -424,6 +604,148 @@ fn truncate_utf8_from_end(text: &str, max_bytes: usize) -> String {
 mod tests {
     use super::*;
     use pi_core::AbortHandle;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_request_does_not_spawn_a_process() {
+        let directory = tempfile::tempdir().unwrap();
+        let (abort, signal) = AbortHandle::new();
+        abort.abort();
+        let result = execute(ShellRequest {
+            command: "touch side-effect".into(),
+            cwd: directory.path().into(),
+            timeout: None,
+            shell_path: None,
+            abort_signal: signal,
+            on_chunk: None,
+        })
+        .await
+        .unwrap();
+        assert!(result.cancelled);
+        assert!(!directory.path().join("side-effect").exists());
+    }
+
+    // Oracle: legacy/pi/packages/coding-agent/src/utils/child-process.ts.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn quiet_inherited_pipes_release_after_the_shell_exits() {
+        let directory = tempfile::tempdir().unwrap();
+        let (_, signal) = AbortHandle::new();
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            execute(ShellRequest {
+                command: "sleep 2 & printf ready".into(),
+                cwd: directory.path().into(),
+                timeout: None,
+                shell_path: Some("/bin/sh".into()),
+                abort_signal: signal,
+                on_chunk: None,
+            }),
+        )
+        .await
+        .expect("quiet descendants must not hold the shell invocation open")
+        .unwrap();
+        assert_eq!(result.output, "ready");
+        assert_eq!(result.exit_code, Some(0));
+        assert!(!result.timed_out);
+    }
+
+    #[tokio::test]
+    async fn programmatic_output_retains_both_ends_with_utf8_boundaries() {
+        let text = format!("head{}tail", "🙂".repeat(300_000));
+        let mut capture = OutputCapture::default();
+        capture.push(text.as_bytes()).await.unwrap();
+        capture.finish().await.unwrap();
+        let result = ShellResult {
+            output: capture.tail_text(),
+            exit_code: Some(0),
+            cancelled: false,
+            timed_out: false,
+            shell_exit_after: None,
+            truncated: true,
+            truncation: capture.truncation(),
+            full_output_path: capture.full_output_path.clone(),
+        };
+        let limited = result.read_full_output(1024 * 1024 + 2).await.unwrap();
+        assert!(limited.truncated);
+        assert!(limited.content.starts_with("head🙂"));
+        assert!(limited.content.ends_with("🙂tail"));
+        assert!(limited.content.contains("bytes omitted"));
+        assert!(!limited.content.contains('\u{fffd}'));
+        let complete = result.read_full_output(text.len()).await.unwrap();
+        assert!(!complete.truncated);
+        assert_eq!(complete.content, text);
+        std::fs::remove_file(result.full_output_path.unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn configured_shell_uses_its_arguments_and_output_file_prefix() {
+        let directory = tempfile::tempdir().unwrap();
+        let (_, signal) = AbortHandle::new();
+        let result = execute_configured(
+            ShellRequest {
+                command: "seq 3000".into(),
+                cwd: directory.path().into(),
+                timeout: None,
+                shell_path: None,
+                abort_signal: signal,
+                on_chunk: None,
+            },
+            BTreeMap::new(),
+            ShellConfiguration {
+                executable: "/bin/sh".into(),
+                arguments: vec!["-c".into()],
+                output_file_prefix: "pi-configured-shell-".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.exit_code, Some(0));
+        assert!(
+            result
+                .full_output_path
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("pi-configured-shell-")
+        );
+        let complete = result.read_full_output(1024 * 1024).await.unwrap();
+        assert!(!complete.truncated);
+        assert!(complete.content.starts_with("1\n2\n"));
+        std::fs::remove_file(result.full_output_path.unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn environment_overrides_set_and_remove_only_child_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let original_home = std::env::var_os("HOME");
+        let (_, signal) = AbortHandle::new();
+        let result = execute_with_environment(
+            ShellRequest {
+                command: "printf '%s|%s' \"${HOME-unset}\" \"$PI_TEST_VALUE\"".into(),
+                cwd: directory.path().to_path_buf(),
+                timeout: Some(DEFAULT_TIMEOUT),
+                shell_path: Some("/bin/sh".into()),
+                abort_signal: signal,
+                on_chunk: None,
+            },
+            BTreeMap::from([
+                (OsString::from("HOME"), None),
+                (
+                    OsString::from("PI_TEST_VALUE"),
+                    Some(OsString::from("quoted ' value $()")),
+                ),
+            ]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.output, "unset|quoted ' value $()");
+        assert_eq!(std::env::var_os("HOME"), original_home);
+    }
 
     #[tokio::test]
     async fn captures_combined_output_and_status() {

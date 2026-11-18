@@ -18,7 +18,7 @@ use crate::eventstream::{EventFrame, EventStreamDecoder};
 const EMPTY_TEXT_PLACEHOLDER: &str = "<empty>";
 const REDACTED_THINKING_PLACEHOLDER: &str = "[Reasoning redacted]";
 
-pub fn request_body(request: &ProviderRequest) -> Value {
+pub fn request_body(request: &ProviderRequest) -> Result<Value, ProviderError> {
     let model = request.model_spec.as_ref();
     let mut body = Map::new();
     body.insert(
@@ -65,19 +65,18 @@ pub fn request_body(request: &ProviderRequest) -> Value {
     }
 
     if !request.tools.is_empty() {
-        let tools = request
-            .tools
-            .iter()
-            .map(|tool| {
-                json!({
-                    "toolSpec": {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "inputSchema": {"json": sanitize_document(tool.parameters.clone())}
-                    }
-                })
-            })
-            .collect::<Vec<_>>();
+        let supports = request
+            .model_spec
+            .as_ref()
+            .and_then(|model| model.compat.as_ref())
+            .and_then(|compat| compat["supportsStrictMode"].as_bool())
+            .unwrap_or(false);
+        let tools = request.tools.iter().map(|tool| {
+            let strict=pi_provider::resolve_json_schema_sampling(tool,supports).map_err(ProviderError::Protocol)?;
+            let mut spec=json!({"name":tool.name,"description":tool.description,"inputSchema":{"json":sanitize_document(strict.clone().unwrap_or_else(||tool.parameters.clone()))}});
+            if strict.is_some(){spec["strict"]=json!(true);}
+            Ok(json!({"toolSpec":spec}))
+        }).collect::<Result<Vec<_>,ProviderError>>()?;
         body.insert("toolConfig".to_string(), json!({"tools": tools}));
     }
 
@@ -91,7 +90,7 @@ pub fn request_body(request: &ProviderRequest) -> Value {
     {
         body.insert("requestMetadata".to_string(), metadata.clone());
     }
-    Value::Object(body)
+    Ok(Value::Object(body))
 }
 
 fn project_messages(request: &ProviderRequest) -> Vec<Value> {
@@ -814,6 +813,8 @@ mod tests {
             system_prompt: "system".to_string(),
             messages: Vec::new(),
             tools: vec![ToolSpec {
+                output_schema: None,
+                constrained_sampling: None,
                 name: "read".to_string(),
                 label: "Read".to_string(),
                 description: "Read a file".to_string(),
@@ -836,7 +837,7 @@ mod tests {
 
     #[test]
     fn builds_converse_request_with_tools_cache_and_adaptive_thinking() {
-        let body = request_body(&request());
+        let body = request_body(&request()).unwrap();
         assert_eq!(body["system"][0]["text"], "system");
         assert_eq!(body["system"][1]["cachePoint"]["type"], "default");
         assert_eq!(body["inferenceConfig"]["maxTokens"], 20_000);

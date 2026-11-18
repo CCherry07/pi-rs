@@ -131,6 +131,8 @@ impl Tool for HermesMemoryTool {
             ),
         };
         ToolSpec {
+            output_schema: None,
+            constrained_sampling: None,
             name: name.to_string(),
             label: label.to_string(),
             description,
@@ -893,6 +895,7 @@ fn render_memory_result(result: MemoryResult) -> ToolResult {
     };
     let details = serde_json::to_value(result).ok();
     ToolResult {
+        structured_content: None,
         content: vec![pi_core::ContentBlock::Text(pi_core::TextContent::new(text))],
         details,
         usage: None,
@@ -904,6 +907,7 @@ fn render_memory_result(result: MemoryResult) -> ToolResult {
 
 fn tool_json(text: impl Into<String>, details: Value, is_error: bool) -> ToolResult {
     ToolResult {
+        structured_content: None,
         content: vec![pi_core::ContentBlock::Text(pi_core::TextContent::new(text))],
         details: Some(details),
         usage: None,

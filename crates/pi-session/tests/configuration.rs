@@ -58,6 +58,7 @@ fn runtime_builder(cwd: &Path, provider: ScriptedProviderPlugin) -> PiRuntimeBui
                 Ok(PromptOutput {
                     system_prompt: tools.join(","),
                     options: Some(json!({ "tools": tools })),
+                    ..Default::default()
                 })
             }))
         }))
@@ -143,7 +144,7 @@ async fn invalid_selection_or_prompt_render_leaves_configuration_journal_and_eve
     let error = session
         .set_model(ProviderId::new("missing"), ModelId::new("plain"))
         .unwrap_err();
-    assert!(error.to_string().contains("provider not found"));
+    assert!(error.to_string().contains("missing"), "{error}");
     before.assert_unchanged(&session);
 
     let error = session.set_active_tools(["delay", "missing"]).unwrap_err();
@@ -333,7 +334,7 @@ async fn model_and_thinking_commit_in_order_with_immediate_snapshot_reload_and_r
 }
 
 #[tokio::test]
-async fn busy_and_closed_sessions_reject_configuration_without_mutations() {
+async fn streaming_accepts_model_selection_and_closed_sessions_reject_configuration() {
     let directory = tempfile::tempdir().unwrap();
     let provider = ScriptedProviderPlugin::scripted([ScriptedTurn::WaitForAbort]);
     let requests = provider.provider();
@@ -354,19 +355,51 @@ async fn busy_and_closed_sessions_reject_configuration_without_mutations() {
     let before = Observation::capture(&session);
     let mut events = session.subscribe().events;
     assert!(matches!(
-        session.set_model(ProviderId::new("scripted"), ModelId::new("plain")),
-        Err(SessionError::Busy)
-    ));
-    assert!(matches!(
-        session.set_thinking_level(ThinkingLevel::Low),
-        Err(SessionError::Busy)
-    ));
-    assert!(matches!(
         session.set_active_tools(["delay"]),
         Err(SessionError::Busy)
     ));
     before.assert_unchanged(&session);
     assert!(events.try_recv().is_err());
+
+    session.set_thinking_level(ThinkingLevel::Low).unwrap();
+    assert_eq!(session.snapshot().agent.thinking_level, ThinkingLevel::Low);
+    session
+        .set_model(ProviderId::new("scripted"), ModelId::new("plain"))
+        .unwrap();
+    let after = session.snapshot();
+    assert_eq!(after.agent.model_id.as_str(), "plain");
+    assert_eq!(after.agent.thinking_level, ThinkingLevel::Off);
+    assert_eq!(after.agent.active_tools, before.snapshot.agent.active_tools);
+    assert!(after.agent.is_running);
+    assert!(Arc::ptr_eq(
+        &after.agent.messages,
+        &before.snapshot.agent.messages
+    ));
+    assert_eq!(
+        session.history().load().unwrap().entries.len(),
+        before.document.entries.len() + 3
+    );
+    session
+        .set_session_name(Some("streaming session".into()))
+        .unwrap();
+    assert_eq!(
+        session.snapshot().name.as_deref(),
+        Some("streaming session")
+    );
+    let leaf = session.history().leaf_id().unwrap();
+    session
+        .set_label(&leaf, Some("live bookmark".into()))
+        .unwrap();
+    assert_eq!(
+        session
+            .history()
+            .load()
+            .unwrap()
+            .labels
+            .get(&leaf)
+            .map(String::as_str),
+        Some("live bookmark")
+    );
 
     session.abort();
     tokio::time::timeout(Duration::from_secs(2), run)

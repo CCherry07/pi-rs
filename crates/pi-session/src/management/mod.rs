@@ -82,6 +82,7 @@ enum SessionReplacementRequest {
         cwd: PathBuf,
         path: PathBuf,
         parent_session: Option<PathBuf>,
+        parent_reference: Option<String>,
     },
     Resume {
         path: PathBuf,
@@ -104,6 +105,7 @@ impl SessionReplacementRequest {
                 cwd,
                 path,
                 parent_session,
+                parent_reference,
             } => {
                 manager.ensure_path_available(owner, &path)?;
                 Ok(ResolvedSessionTransition::New {
@@ -113,6 +115,7 @@ impl SessionReplacementRequest {
                         .as_deref()
                         .map(|path| manager.resolve_parent_session_id(path))
                         .transpose()?,
+                    parent_reference,
                 })
             }
             Self::Resume { path } => {

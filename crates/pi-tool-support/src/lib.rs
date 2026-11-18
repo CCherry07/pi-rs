@@ -1,3 +1,6 @@
+mod file_mutation;
+pub use file_mutation::with_file_mutation_queue;
+
 use std::path::{Component, Path, PathBuf};
 
 use pi_core::{ToolExecutionMode, ToolSpec};
@@ -15,6 +18,8 @@ pub fn spec(name: &str, description: &str, parameters: Value) -> ToolSpec {
         label: name.to_string(),
         description: description.to_string(),
         parameters,
+        output_schema: None,
+        constrained_sampling: None,
         execution_mode: ToolExecutionMode::Parallel,
         prompt_snippet: None,
         prompt_guidelines: Vec::new(),
@@ -230,6 +235,25 @@ pub fn optional_positive_usize(
             }
         }
     }
+}
+
+/// Reads Pi's optional numeric arguments without imposing integer-only schema
+/// constraints. Individual tools own their range and rounding semantics.
+pub fn optional_number(value: &Value, key: &str) -> Result<Option<f64>, ToolError> {
+    match value.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_f64()
+            .filter(|number| number.is_finite())
+            .map(Some)
+            .ok_or_else(|| invalid(format!("`{key}` must be a finite number"))),
+    }
+}
+
+/// Pi's search/list tools floor numeric limits and always return at least one
+/// result when there is a match, including for zero or negative limits.
+pub fn optional_result_limit(value: &Value, key: &str, default: usize) -> Result<usize, ToolError> {
+    Ok(optional_number(value, key)?.map_or(default, |number| number.floor().max(1.0) as usize))
 }
 
 pub fn truncate_head(lines: impl IntoIterator<Item = String>, max_lines: usize) -> (String, bool) {

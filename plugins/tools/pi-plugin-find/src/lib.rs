@@ -5,7 +5,7 @@ use pi_core::{PluginId, ToolCallId, ToolResult, ToolSpec};
 use pi_plugin::{Plugin, RegisterContext, Tool, ToolContext, ToolError, ToolUpdateSink};
 use pi_tool_support::with_prompt;
 use pi_tool_support::{
-    execution, optional_positive_usize, require_str, resolve_to_cwd, spec, truncate_lines_by_bytes,
+    execution, optional_result_limit, require_str, resolve_to_cwd, spec, truncate_lines_by_bytes,
 };
 use serde_json::{Map, Value, json};
 use std::path::Path;
@@ -31,10 +31,10 @@ impl Tool for FindTool {
         with_prompt(
             spec(
                 "find",
-                "Search for files by glob pattern. Returns matching paths relative to the search directory. Respects .gitignore. Output is truncated to 1000 results or 50KB.",
+                "Search for files by glob pattern. Returns matching file paths relative to the search directory. Respects .gitignore. Output is truncated to 1000 results or 50KB (whichever is hit first).",
                 json!({
-                    "type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string","description":"Directory to search in (default: current directory)"},"limit":{"type":"integer","minimum":1}},
-                    "required":["pattern"],"additionalProperties":false
+                    "type":"object","properties":{"pattern":{"type":"string","description":"Glob pattern relative to the search directory, e.g. 'src/**/*.ts'. Without '/', e.g. '*.ts', it matches file names at any depth"},"path":{"type":"string","description":"Directory to search in (default: current directory)"},"limit":{"type":"number","description":"Maximum number of results (default: 1000)"}},
+                    "required":["pattern"]
                 }),
             ),
             "Find files by glob pattern (respects .gitignore)",
@@ -60,10 +60,10 @@ impl Tool for FindTool {
         if !metadata.is_dir() {
             return Err(execution(format!("Not a directory: {}", root.display())));
         }
-        let limit = optional_positive_usize(&input, "limit", DEFAULT_LIMIT)?;
+        let limit = optional_result_limit(&input, "limit", DEFAULT_LIMIT)?;
         let require_git = is_inside_git_repository(&root);
         let signal = context.signal().clone();
-        let entries = tokio::task::spawn_blocking(move || {
+        let mut entries = tokio::task::spawn_blocking(move || {
             let mut entries = Vec::new();
             let mut builder = WalkBuilder::new(&root);
             builder
@@ -83,8 +83,10 @@ impl Tool for FindTool {
                     continue;
                 }
                 let rel = entry.path().strip_prefix(&root).unwrap_or(entry.path());
-                let candidate = if matcher.full_path {
+                let candidate = if matcher.absolute_path {
                     entry.path()
+                } else if matcher.full_path {
+                    rel
                 } else {
                     entry.path().file_name().map(Path::new).unwrap_or(rel)
                 };
@@ -96,7 +98,8 @@ impl Tool for FindTool {
                     rendered.push('/');
                 }
                 entries.push(rendered);
-                if entries.len() >= limit {
+                // One extra result proves the limit actually cut something off.
+                if entries.len() > limit {
                     break;
                 }
             }
@@ -109,7 +112,8 @@ impl Tool for FindTool {
             return Ok(ToolResult::text("No files found matching pattern"));
         }
 
-        let result_limit_reached = entries.len() >= limit;
+        let result_limit_reached = entries.len() > limit;
+        entries.truncate(limit);
         let (mut text, truncation) = truncate_lines_by_bytes(&entries, MAX_OUTPUT_BYTES);
         let mut notices = Vec::new();
         let mut details = Map::new();
@@ -136,24 +140,30 @@ impl Tool for FindTool {
 struct FindMatcher {
     glob: GlobMatcher,
     full_path: bool,
+    absolute_path: bool,
 }
 
 fn build_glob(pattern: &str) -> Result<FindMatcher, ToolError> {
-    let full_path = pattern.contains('/');
-    let mut effective_pattern = pattern.to_string();
-    if full_path && !pattern.starts_with('/') && !pattern.starts_with("**/") && pattern != "**" {
-        effective_pattern = format!("**/{pattern}");
-    }
     #[cfg(windows)]
-    if full_path {
-        effective_pattern = effective_pattern.replace('/', "[/\\\\]");
-    }
-    let glob = GlobBuilder::new(&effective_pattern)
+    let normalized = pattern.replace('\\', "/");
+    #[cfg(windows)]
+    let pattern = normalized.as_str();
+    let pattern = pattern.trim_start_matches("./");
+    let full_path = pattern.contains('/');
+    let absolute_path = Path::new(pattern).is_absolute();
+    // fd's smart case is determined by the user's pattern, never the root's spelling.
+    let ignore_case = pattern == pattern.to_lowercase();
+    let glob = GlobBuilder::new(pattern)
         .literal_separator(true)
+        .case_insensitive(ignore_case)
         .build()
         .map_err(|error| pi_tool_support::invalid(format!("invalid glob: {error}")))?
         .compile_matcher();
-    Ok(FindMatcher { glob, full_path })
+    Ok(FindMatcher {
+        glob,
+        full_path,
+        absolute_path,
+    })
 }
 
 fn is_inside_git_repository(path: &Path) -> bool {
@@ -210,6 +220,87 @@ mod tests {
         };
         assert!(text.contains("visible.txt"));
         assert!(!text.contains("ignored.txt"));
+    }
+
+    #[tokio::test]
+    async fn does_not_report_a_limit_when_the_result_count_is_exact() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("one.txt"), "").unwrap();
+        let result = run_find(dir.path(), json!({"pattern":"*.txt", "limit":1}))
+            .await
+            .unwrap();
+        assert_eq!(result_text(&result), "one.txt");
+        assert!(result.details.is_none());
+    }
+
+    #[tokio::test]
+    async fn anchors_path_globs_at_the_search_root_and_strips_dot_slash() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "Root[1]/src/a.ts",
+            "Root[1]/pkg/src/b.ts",
+            "elsewhere/src/c.ts",
+        ] {
+            let path = dir.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        for pattern in ["src/*.ts", "./src/*.ts", "././src/*.ts"] {
+            let result = run_find(dir.path(), json!({"pattern":pattern, "path":"Root[1]"}))
+                .await
+                .unwrap();
+            assert_eq!(result_text(&result), "src/a.ts", "{pattern}");
+        }
+        let recursive = run_find(
+            dir.path(),
+            json!({"pattern":"**/src/*.ts", "path":"Root[1]"}),
+        )
+        .await
+        .unwrap();
+        assert!(result_text(&recursive).contains("src/a.ts"));
+        assert!(result_text(&recursive).contains("pkg/src/b.ts"));
+    }
+
+    #[tokio::test]
+    async fn smart_case_depends_on_the_pattern_not_the_search_root() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("UPPER/SRC")).unwrap();
+        std::fs::write(dir.path().join("UPPER/SRC/a.TS"), "").unwrap();
+        for pattern in ["*.ts", "src/*.ts", "**/*.ts"] {
+            let result = run_find(dir.path(), json!({"pattern":pattern, "path":"UPPER"}))
+                .await
+                .unwrap();
+            assert_eq!(result_text(&result), "SRC/a.TS", "{pattern}");
+        }
+        let sensitive = run_find(dir.path(), json!({"pattern":"src/*.TS", "path":"UPPER"}))
+            .await
+            .unwrap();
+        assert_eq!(result_text(&sensitive), "No files found matching pattern");
+        let exact = run_find(dir.path(), json!({"pattern":"SRC/*.TS", "path":"UPPER"}))
+            .await
+            .unwrap();
+        assert_eq!(result_text(&exact), "SRC/a.TS");
+    }
+
+    #[tokio::test]
+    async fn floors_numeric_result_limits_like_pi() {
+        let directory = tempfile::tempdir().unwrap();
+        for name in ["one.txt", "two.txt", "three.txt"] {
+            std::fs::write(directory.path().join(name), "").unwrap();
+        }
+        for limit in [-1.0, 0.0, 1.9] {
+            let result = run_find(directory.path(), json!({"pattern":"*.txt", "limit":limit}))
+                .await
+                .unwrap();
+            assert_eq!(result.details.as_ref().unwrap()["resultLimitReached"], 1);
+            assert_eq!(
+                result_text(&result)
+                    .lines()
+                    .filter(|line| line.ends_with(".txt"))
+                    .count(),
+                1
+            );
+        }
     }
 
     #[tokio::test]

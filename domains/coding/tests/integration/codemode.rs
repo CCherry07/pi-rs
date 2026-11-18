@@ -97,6 +97,8 @@ impl Tool for CleanupTool {
             "codemode_wait_started"
         };
         ToolSpec {
+            output_schema: None,
+            constrained_sampling: None,
             name: name.into(),
             label: name.into(),
             description: "Deterministic codemode cleanup fixture.".into(),
@@ -282,6 +284,12 @@ impl Fixture {
             json!({"mcpServers":{"docs":{"url":format!("{base}/mcp"),
                 "exposure":"codemode","toolExposure":{"hidden":"hidden"}}}})
             .to_string(),
+        )
+        .unwrap();
+        // The demo deliberately uses grep; current Pi does not activate it by default.
+        fs::write(
+            agent.join("settings.json"),
+            json!({"defaultTools":["read","bash","edit","write","grep"]}).to_string(),
         )
         .unwrap();
         let mut config = Config::new(cwd.clone(), agent.clone());

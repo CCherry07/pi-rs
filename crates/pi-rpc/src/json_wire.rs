@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use pi_core::{
     AgentEvent, AssistantMessage, AssistantStream, ContentBlock, StopReason, StreamEvent,
-    ToolResult, Usage,
+    ToolResult,
 };
 use pi_session::{
     AgentMessage, AgentSession, AgentSessionEvent, CompactionEntry, SessionDocument, SessionEntry,
@@ -27,13 +27,22 @@ pub fn session_header_json(header: &SessionHeader) -> Result<Value, String> {
     .map_err(|error| format!("invalid session timestamp: {error}"))?
     .format(&Rfc3339)
     .map_err(|error| format!("cannot format session timestamp: {error}"))?;
-    Ok(json!({
+    let mut value = json!({
         "type": "session",
         "version": 3,
         "id": header.id,
         "timestamp": timestamp,
         "cwd": header.cwd,
-    }))
+    });
+    if let Some(parent) = header
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("pi.coding-agent.parentSession"))
+        .and_then(Value::as_str)
+    {
+        value["parentSession"] = json!(parent);
+    }
+    Ok(value)
 }
 
 /// Returns `None` for Rust-only diagnostic/shell lifecycle events that have no
@@ -54,7 +63,9 @@ pub fn session_event_json(
             messages,
             will_retry,
         } => json!({"type":"agent_end","messages":messages,"willRetry":will_retry}),
-        AgentSessionEvent::AgentSettled => json!({"type":"agent_settled"}),
+        AgentSessionEvent::AgentSettled { aborted } => {
+            json!({"type":"agent_settled", "aborted":aborted})
+        }
         AgentSessionEvent::QueueUpdate {
             steering,
             follow_up,
@@ -112,6 +123,26 @@ pub fn session_event_json(
             insert_optional(&mut object, "finalError", final_error)?;
             Value::Object(object)
         }
+        AgentSessionEvent::SummarizationRetryScheduled {
+            attempt,
+            max_attempts,
+            delay_ms,
+            error_message,
+        } => json!({
+            "type":"summarization_retry_scheduled", "attempt":attempt, "maxAttempts":max_attempts,
+            "delayMs":delay_ms, "errorMessage":error_message,
+        }),
+        AgentSessionEvent::SummarizationRetryAttemptStart { source } => match source {
+            pi_session::SummarizationSource::Compaction { reason } => json!({
+                "type":"summarization_retry_attempt_start", "source":"compaction", "reason":compaction_reason(reason),
+            }),
+            pi_session::SummarizationSource::BranchSummary => {
+                json!({"type":"summarization_retry_attempt_start", "source":"branchSummary"})
+            }
+        },
+        AgentSessionEvent::SummarizationRetryFinished => {
+            json!({"type":"summarization_retry_finished"})
+        }
         AgentSessionEvent::EntryAppended { entry } => {
             let document = session
                 .history()
@@ -128,8 +159,14 @@ pub fn session_event_json(
         AgentSessionEvent::ThinkingLevelChanged { level } => {
             json!({"type":"thinking_level_changed","level":level})
         }
-        AgentSessionEvent::BashExecutionUpdate { id, delta, .. } => {
-            json!({"type":"bash_execution_update","id":id,"delta":delta})
+        AgentSessionEvent::BashExecutionUpdate {
+            request_id, delta, ..
+        } => {
+            let mut event = json!({"type":"bash_execution_update","delta":delta});
+            if let Some(id) = request_id {
+                event["id"] = json!(id);
+            }
+            event
         }
         AgentSessionEvent::PluginNotice { .. }
         | AgentSessionEvent::UsageRecorded { .. }
@@ -160,7 +197,11 @@ pub(crate) fn session_entry_json(
         && custom.custom_type.starts_with("pi.coding-agent.legacy.")
         && let Some(original @ Value::Object(_)) = &custom.data
     {
-        return Ok(original.clone());
+        let mut original = original.clone();
+        original["id"] = json!(record.id);
+        original["parentId"] = json!(record.parent_id);
+        original["timestamp"] = json!(timestamp_string(record.timestamp_ms)?);
+        return Ok(original);
     }
     let mut object = Map::new();
     object.insert("id".to_string(), json!(record.id));
@@ -366,7 +407,7 @@ fn message_update_json(
     stream: &AssistantStream,
     update: Arc<StreamEvent>,
 ) -> Result<Option<Value>, String> {
-    let mut usage = Usage::default();
+    let mut usage = stream_snapshot(stream)?.usage;
     let assistant_message_event = match update.as_ref() {
         StreamEvent::Start { .. } => json!({"type":"start"}),
         StreamEvent::Metadata { .. } | StreamEvent::ContentMetadata { .. } => return Ok(None),
@@ -621,7 +662,7 @@ mod tests {
             .unwrap(),
             Some(json!({
                 "type":"message_update",
-                "usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0.0,"output":0.0,"cacheRead":0.0,"cacheWrite":0.0,"total":0.0}},
+                "usage":{"input":1,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0.0,"output":0.0,"cacheRead":0.0,"cacheWrite":0.0,"total":0.0}},
                 "assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"lo"},
             }))
         );
@@ -657,6 +698,7 @@ mod tests {
             tool_name: "bash".to_string(),
             args: json!({"command":"pwd"}),
             partial_result: ToolResult {
+                structured_content: None,
                 content: vec![ContentBlock::Text(TextContent::new("/tmp"))],
                 details: Some(json!({"fullOutputPath":null})),
                 usage: None,

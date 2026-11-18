@@ -86,7 +86,15 @@ async fn tree_hook_replaces_summary_before_provider_and_publishes_immutable_hist
             break document;
         }
     };
-    assert_eq!(tree.leaf_id(MAIN_LANE).unwrap(), Some(id.as_str()));
+    let label_id = tree.leaf_id(MAIN_LANE).unwrap().unwrap();
+    let label = tree
+        .entries
+        .iter()
+        .find(|entry| entry.id == label_id)
+        .unwrap();
+    assert_eq!(label.parent_id.as_deref(), Some(id.as_str()));
+    assert!(matches!(&label.entry, SessionEntry::Custom(custom)
+        if custom.custom_type == "pi.coding-agent.legacy.label"));
     assert_eq!(tree.labels[&id], "plugin label");
     let entry = tree.entries.iter().find(|entry| entry.id == id).unwrap();
     assert_eq!(entry.parent_id.as_deref(), Some(target.as_str()));

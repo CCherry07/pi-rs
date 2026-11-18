@@ -41,6 +41,60 @@ impl ResourceOperation {
         }
     }
 
+    fn output_schema(self) -> Value {
+        if matches!(self, Self::Read) {
+            return json!({
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string"},
+                    "uri": {"type": "string"},
+                    "contents": {"type": "array", "items": {"anyOf": [
+                        {"type": "object", "properties": {
+                            "uri": {"type": "string"}, "mimeType": {"type": "string"}, "text": {"type": "string"}
+                        }, "required": ["uri", "text"]},
+                        {"type": "object", "properties": {
+                            "uri": {"type": "string"}, "mimeType": {"type": "string"},
+                            "blob": {"type": "string", "description": "base64"}
+                        }, "required": ["uri", "blob"]}
+                    ]}}
+                },
+                "required": ["server", "uri", "contents"]
+            });
+        }
+        let item = if matches!(self, Self::List) {
+            json!({
+                "type": "object", "properties": {
+                    "server": {"type": "string"}, "uri": {"type": "string"}, "name": {"type": "string"},
+                    "title": {"type": "string"}, "description": {"type": "string"},
+                    "mimeType": {"type": "string"}, "size": {"type": "number"}
+                }, "required": ["server", "uri", "name"]
+            })
+        } else {
+            json!({
+                "type": "object", "properties": {
+                    "server": {"type": "string"},
+                    "uriTemplate": {"type": "string", "description": "RFC 6570 URI template"},
+                    "name": {"type": "string"}, "title": {"type": "string"},
+                    "description": {"type": "string"}, "mimeType": {"type": "string"}
+                }, "required": ["server", "uriTemplate", "name"]
+            })
+        };
+        json!({
+            "type": "object", "properties": {
+                "server": {"type": "string"},
+                (self.key()): {"type": "array", "items": item},
+                "nextCursor": {"type": "string"},
+                "errors": {
+                    "type": "array", "description": "Servers that could not be listed",
+                    "items": {"type": "object", "properties": {
+                        "server": {"type": "string"}, "error": {"type": "string"}
+                    }, "required": ["server", "error"]}
+                }
+            },
+            "required": [self.key()]
+        })
+    }
+
     fn key(self) -> &'static str {
         match self {
             Self::List => "resources",
@@ -81,7 +135,7 @@ pub(crate) fn create_resource_tools(mut servers: Vec<Arc<ConnectedServer>>) -> V
 #[async_trait]
 impl Tool for ResourceTool {
     fn structured_output(&self, result: &ToolResult) -> Option<Value> {
-        result.details.clone()
+        result.structured_content.clone()
     }
 
     fn spec(&self) -> ToolSpec {
@@ -118,6 +172,8 @@ impl Tool for ResourceTool {
             })
         };
         ToolSpec {
+            output_schema: Some(self.operation.output_schema()),
+            constrained_sampling: None,
             name: name.into(),
             label: name.into(),
             description: description.into(),
@@ -392,6 +448,94 @@ fn is_mcp_app_resource(value: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resource_output_schemas_describe_complete_pi_payloads() {
+        // Oracle: extensions/mcp/resources.ts LIST*_OUTPUT_SCHEMA and READ_OUTPUT_SCHEMA.
+        for (operation, key, uri_key) in [
+            (ResourceOperation::List, "resources", "uri"),
+            (
+                ResourceOperation::Templates,
+                "resourceTemplates",
+                "uriTemplate",
+            ),
+        ] {
+            let tool = ResourceTool {
+                operation,
+                servers: Arc::new(Vec::new()),
+            };
+            let mut properties = json!({
+                "server":{"type":"string"}, "name":{"type":"string"},
+                "title":{"type":"string"}, "description":{"type":"string"},
+                "mimeType":{"type":"string"}
+            });
+            properties[uri_key] = if uri_key == "uriTemplate" {
+                json!({"type":"string","description":"RFC 6570 URI template"})
+            } else {
+                properties["size"] = json!({"type":"number"});
+                json!({"type":"string"})
+            };
+            assert_eq!(
+                tool.spec().output_schema,
+                Some(json!({
+                    "type":"object", "properties":{
+                        "server":{"type":"string"}, "nextCursor":{"type":"string"},
+                        (key):{"type":"array","items":{
+                            "type":"object", "properties":properties,
+                            "required":["server",uri_key,"name"]
+                        }},
+                        "errors":{"type":"array","description":"Servers that could not be listed","items":{
+                            "type":"object","properties":{"server":{"type":"string"},"error":{"type":"string"}},
+                            "required":["server","error"]
+                        }}
+                    },"required":[key]
+                }))
+            );
+            let payload = json!({(key):[], "errors":[{"server":"docs","error":"unavailable"}]});
+            assert_eq!(
+                tool.structured_output(&project_resource_listing(payload.clone())),
+                Some(payload)
+            );
+        }
+        let read = ResourceTool {
+            operation: ResourceOperation::Read,
+            servers: Arc::new(Vec::new()),
+        };
+        assert_eq!(
+            read.spec().output_schema,
+            Some(json!({
+                "type":"object", "properties":{
+                    "server":{"type":"string"}, "uri":{"type":"string"},
+                    "contents":{"type":"array","items":{"anyOf":[
+                        {"type":"object","properties":{
+                            "uri":{"type":"string"},"mimeType":{"type":"string"},"text":{"type":"string"}
+                        },"required":["uri","text"]},
+                        {"type":"object","properties":{
+                            "uri":{"type":"string"},"mimeType":{"type":"string"},"blob":{"type":"string","description":"base64"}
+                        },"required":["uri","blob"]}
+                    ]}}
+                },"required":["server","uri","contents"]
+            }))
+        );
+        let result = project_resource_read(
+            "docs",
+            "doc://guide",
+            serde_json::from_value(json!({
+                "contents":[{"uri":"doc://guide","text":"Guide","_meta":{"private":true}},
+                    {"uri":"doc://image","mimeType":"image/png","blob":"aW1hZ2U="}]
+            }))
+            .unwrap(),
+        );
+        assert_eq!(
+            read.structured_output(&result),
+            Some(json!({
+                "server":"docs","uri":"doc://guide","contents":[
+                    {"uri":"doc://guide","text":"Guide"},
+                    {"uri":"doc://image","mimeType":"image/png","blob":"aW1hZ2U="}
+                ]
+            }))
+        );
+    }
 
     #[test]
     fn listing_filters_ui_entries_and_private_metadata_for_resources_and_templates() {

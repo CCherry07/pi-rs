@@ -129,14 +129,12 @@ impl ContextUpdates {
         let record = self
             .store
             .append_session_record(SessionEntry::BranchSummary(summary))?;
-        if let Some(label) = label {
-            self.store.set_label(&record.id, Some(label))?;
-        }
-        self.activate_and_publish(
-            &self.current()?,
-            std::slice::from_ref(&record),
-            ContextActivation::Restore,
-        )?;
+        let label_record = label
+            .map(|label| self.store.set_label_with_entry(&record.id, Some(label)))
+            .transpose()?;
+        let mut records = vec![record.clone()];
+        records.extend(label_record);
+        self.activate_and_publish(&self.current()?, &records, ContextActivation::Restore)?;
         Ok(record)
     }
 
@@ -462,7 +460,14 @@ impl AgentSession {
     }
 
     pub fn set_label(&self, entry_id: &str, label: Option<String>) -> Result<(), SessionError> {
-        let _operation = self.try_begin_operation()?;
-        self.store.set_label(entry_id, label).map_err(Into::into)
+        self.ensure_open()?;
+        let _operation = if self.activity.accepts_live_messages() {
+            None
+        } else {
+            Some(self.try_begin_operation()?)
+        };
+        let entry = self.store.set_label_with_entry(entry_id, label)?;
+        self.events.publish_entry(entry);
+        Ok(())
     }
 }

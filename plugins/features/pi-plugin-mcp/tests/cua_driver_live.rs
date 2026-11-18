@@ -30,6 +30,7 @@ async fn cua_driver_mcp_discovers_guidance_and_executes_read_only_tools() {
             &cwd,
             &signal,
             BeforeAgentStartEvent {
+                prompt_state: None,
                 system_prompt: "base".into(),
                 input_messages: vec![],
                 active_tools: pool.tools().into_iter().map(|tool| tool.name).collect(),

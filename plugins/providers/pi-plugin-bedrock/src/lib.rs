@@ -277,60 +277,116 @@ impl Provider for AmazonBedrockProvider {
         signal: AbortSignal,
     ) -> Result<ProviderStream, ProviderError> {
         let (endpoint, region) = self.target(&request)?;
-        let payload = context
-            .before_provider_request(&signal, request_body(&request))
-            .await?;
-        let encoded = serde_json::to_vec(&payload).map_err(|error| {
-            ProviderError::Failure(format!("failed to encode Bedrock request: {error}"))
-        })?;
-        let mut headers = self.config.headers.clone();
-        insert_header(&mut headers, "Content-Type", "application/json");
-        insert_header(
-            &mut headers,
-            "x-amzn-bedrock-accept",
-            "application/vnd.amazon.eventstream",
-        );
-        for (name, value) in &request.headers {
-            if !is_reserved_header(name) {
-                insert_header(&mut headers, name, value);
-            }
+        let mut request = request;
+        let mut disabled =
+            pi_provider::has_exceeded_strict_tool_limits(request.session_id.as_deref());
+        if disabled {
+            pi_provider::disable_preferred_strict_tools(&mut request.tools);
         }
-        headers = context.before_provider_headers(&signal, headers).await;
-        remove_reserved_auth_headers(&mut headers);
-        if !self.config.skip_auth {
-            if let Some(token) = &self.config.bearer_token {
-                insert_header(&mut headers, "Authorization", format!("Bearer {token}"));
-            } else {
-                let credentials = self.credentials.resolve(&signal).await?;
-                sign_request(
-                    &mut headers,
-                    &endpoint,
-                    &encoded,
-                    &region,
-                    &credentials,
-                    OffsetDateTime::now_utc(),
+        let mut diagnostic = None;
+        let response = loop {
+            let body = request_body(&request)?;
+            let payload = context
+                .before_provider_request(&signal, body.clone())
+                .await?;
+            let encoded = serde_json::to_vec(&payload).map_err(|error| {
+                ProviderError::Failure(format!("failed to encode Bedrock request: {error}"))
+            })?;
+            let mut headers = self.config.headers.clone();
+            insert_header(&mut headers, "Content-Type", "application/json");
+            insert_header(
+                &mut headers,
+                "x-amzn-bedrock-accept",
+                "application/vnd.amazon.eventstream",
+            );
+            for (name, value) in &request.headers {
+                if !is_reserved_header(name) {
+                    insert_header(&mut headers, name, value);
+                }
+            }
+            headers = context.before_provider_headers(&signal, headers).await;
+            remove_reserved_auth_headers(&mut headers);
+            if !self.config.skip_auth {
+                if let Some(token) = &self.config.bearer_token {
+                    insert_header(&mut headers, "Authorization", format!("Bearer {token}"));
+                } else {
+                    let credentials = self.credentials.resolve(&signal).await?;
+                    sign_request(
+                        &mut headers,
+                        &endpoint,
+                        &encoded,
+                        &region,
+                        &credentials,
+                        OffsetDateTime::now_utc(),
+                    )
+                    .map_err(ProviderError::Failure)?;
+                }
+            }
+            let response = self
+                .transport
+                .post_json(&endpoint, &headers, &payload, signal.clone())
+                .await
+                .map_err(map_transport_error)?;
+            context
+                .after_provider_response(
+                    &signal,
+                    response.status,
+                    response.headers.iter().cloned().collect(),
                 )
-                .map_err(ProviderError::Failure)?;
+                .await;
+            if (200..300).contains(&response.status) {
+                break response;
             }
-        }
-        let response = self
-            .transport
-            .post_json(&endpoint, &headers, &payload, signal.clone())
-            .await
-            .map_err(map_transport_error)?;
-        context
-            .after_provider_response(
-                &signal,
-                response.status,
-                response.headers.iter().cloned().collect(),
-            )
-            .await;
-        if !(200..300).contains(&response.status) {
+            let status = response.status;
+            let error_type = response
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("x-amzn-errortype"))
+                .map(|(_, value)| value.clone());
             let message = read_error_response(response)
                 .await
                 .map_err(map_transport_error)?;
-            return Err(ProviderError::Failure(message));
-        }
+            let error_body = message
+                .split_once('\n')
+                .and_then(|(_, body)| serde_json::from_str::<serde_json::Value>(body).ok());
+            let validation = error_type
+                .as_deref()
+                .is_some_and(|kind| kind.split(':').next() == Some("ValidationException"))
+                || error_body
+                    .as_ref()
+                    .and_then(|body| body["__type"].as_str().or_else(|| body["type"].as_str()))
+                    .is_some_and(|kind| kind.rsplit('#').next() == Some("ValidationException"));
+            let has_preferred = request
+                .tools
+                .iter()
+                .filter(|tool| pi_provider::prefers_json_schema_sampling(tool))
+                .any(|tool| {
+                    body["toolConfig"]["tools"].as_array().is_some_and(|tools| {
+                        tools.iter().any(|entry| {
+                            entry["toolSpec"]["name"] == tool.name
+                                && entry["toolSpec"]["strict"] == true
+                        })
+                    })
+                });
+            if disabled
+                || !has_preferred
+                || signal.is_aborted()
+                || status != 400
+                || !validation
+                || !pi_provider::is_strict_tool_limit_error(&message)
+            {
+                return Err(ProviderError::Failure(message));
+            }
+            disabled = true;
+            pi_provider::mark_strict_tool_limits_exceeded(request.session_id.as_deref());
+            pi_provider::disable_preferred_strict_tools(&mut request.tools);
+            diagnostic = Some(serde_json::json!({
+                "type": "bedrock_strict_tools_fallback",
+                "timestamp": pi_utils::time::unix_timestamp_ms(),
+                "error": {"message": message},
+                "details": {"reason": "strict_tool_limits_exceeded"}
+            }));
+        };
         if !response.content_type.as_deref().is_some_and(|value| {
             value
                 .to_ascii_lowercase()
@@ -346,12 +402,15 @@ impl Provider for AmazonBedrockProvider {
             .as_ref()
             .map(|model| model.cost.clone())
             .unwrap_or_default();
-        Ok(stream_response(
-            self.config.provider_id.clone(),
-            request.model,
-            cost,
-            response.body,
-            signal,
+        Ok(pi_provider::with_provider_diagnostic(
+            stream_response(
+                self.config.provider_id.clone(),
+                request.model,
+                cost,
+                response.body,
+                signal,
+            ),
+            diagnostic,
         ))
     }
 }
@@ -503,6 +562,99 @@ mod tests {
                 body: Box::pin(stream::iter([Ok(frames)])),
             })
         }
+    }
+
+    struct StrictLimitTransport(Mutex<Vec<Value>>);
+    #[async_trait]
+    impl HttpTransport for StrictLimitTransport {
+        async fn post_json(
+            &self,
+            _: &str,
+            _: &BTreeMap<String, String>,
+            body: &Value,
+            _: AbortSignal,
+        ) -> Result<HttpResponse, TransportError> {
+            let mut requests = self.0.lock().unwrap();
+            requests.push(body.clone());
+            let rejected = requests.len() == 1;
+            let body = if rejected {
+                json!({"message":"The compiled grammar is too large"})
+                    .to_string()
+                    .into_bytes()
+            } else {
+                Vec::new()
+            };
+            Ok(HttpResponse {
+                status: if rejected { 400 } else { 200 },
+                headers: vec![("x-amzn-errortype".into(), "ValidationException".into())],
+                content_type: Some(
+                    if rejected {
+                        "application/json"
+                    } else {
+                        "application/vnd.amazon.eventstream"
+                    }
+                    .into(),
+                ),
+                body: Box::pin(stream::iter([Ok(body)])),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn strict_limit_retry_rebuilds_payload_and_keeps_required_tools_strict() {
+        use pi_core::ToolSchemaStrict::{Prefer, Require};
+        let transport = Arc::new(StrictLimitTransport(Mutex::new(vec![])));
+        let provider = AmazonBedrockProvider::with_transport(
+            BedrockConfig::with_bearer_token(DEFAULT_BEDROCK_BASE_URL, "fixture"),
+            transport.clone(),
+        )
+        .unwrap();
+        let mut request = empty_request("us.anthropic.claude-sonnet-4-6");
+        request.model_spec.as_mut().unwrap().compat = Some(json!({"supportsStrictMode":true}));
+        request.tools = [Prefer, Require]
+            .into_iter()
+            .enumerate()
+            .map(|(index, strict)| pi_core::ToolSpec {
+                name: format!("tool_{index}"),
+                label: String::new(),
+                description: String::new(),
+                parameters: json!({"type":"object","properties":{"optional":{"type":"string"}}}),
+                output_schema: None,
+                constrained_sampling: Some(pi_core::ConstrainedSampling::JsonSchema { strict }),
+                execution_mode: pi_core::ToolExecutionMode::Parallel,
+                prompt_snippet: None,
+                prompt_guidelines: vec![],
+            })
+            .collect();
+        let (_, signal) = AbortHandle::new();
+        let context = ProviderCallContext::without_plugins(
+            "/",
+            AMAZON_BEDROCK_PROVIDER_ID.into(),
+            request.model.clone(),
+        );
+        let mut stream = provider.stream(request, context, signal).await.unwrap();
+        let pi_core::StreamEvent::Start { metadata } = stream.next().await.unwrap().unwrap() else {
+            panic!("missing start")
+        };
+        assert_eq!(
+            metadata.diagnostics.unwrap()[0]["type"],
+            "bedrock_strict_tools_fallback"
+        );
+        let bodies = transport.0.lock().unwrap();
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(
+            bodies[0]["toolConfig"]["tools"][0]["toolSpec"]["strict"],
+            true
+        );
+        assert!(
+            bodies[1]["toolConfig"]["tools"][0]["toolSpec"]
+                .get("strict")
+                .is_none()
+        );
+        assert_eq!(
+            bodies[1]["toolConfig"]["tools"][1]["toolSpec"]["strict"],
+            true
+        );
     }
 
     #[tokio::test]

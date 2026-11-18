@@ -121,6 +121,7 @@ pub(crate) struct ResolvedOpenAiCompletionsCompat {
     supports_thinking_token_budget: bool,
     thinking_token_budget_field: Option<ThinkingTokenBudgetField>,
     supports_strict_mode: bool,
+    pub(crate) supports_open_ai_grammar_tools: bool,
     send_session_affinity_headers: bool,
     deferred_tools_mode: Option<DeferredToolsMode>,
     session_affinity_format: SessionAffinityFormat,
@@ -196,6 +197,9 @@ impl ResolvedOpenAiCompletionsCompat {
                         .unwrap_or(detected.supports_thinking_token_budget)
                         .then_some(ThinkingTokenBudgetField::TokenBudget)
                 }),
+            supports_open_ai_grammar_tools: configured
+                .supports_open_ai_grammar_tools
+                .unwrap_or(false),
             supports_strict_mode: configured
                 .supports_strict_mode
                 .unwrap_or(detected.supports_strict_mode),
@@ -215,9 +219,9 @@ impl ResolvedOpenAiCompletionsCompat {
     }
 }
 
-pub(crate) fn request_body(request: &ProviderRequest) -> Value {
+pub(crate) fn request_body(request: &ProviderRequest) -> Result<Value, pi_plugin::ProviderError> {
     let compat = ResolvedOpenAiCompletionsCompat::for_request(request);
-    let mut messages = messages(request, &compat);
+    let mut messages = messages(request, &compat)?;
     let deferred_tool_names = if compat.deferred_tools_mode == Some(DeferredToolsMode::Kimi) {
         request
             .messages
@@ -237,7 +241,7 @@ pub(crate) fn request_body(request: &ProviderRequest) -> Value {
         .iter()
         .filter(|tool| !deferred_tool_names.contains(&tool.name))
         .map(|tool| tool_value(tool, &compat))
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
     let mut body = json!({
         "model":request.model.as_str(), "messages":messages, "stream":true
     });
@@ -322,7 +326,7 @@ pub(crate) fn request_body(request: &ProviderRequest) -> Value {
     if let Value::Object(body) = &mut body {
         body.extend(request.sampling_params.clone());
     }
-    body
+    Ok(body)
 }
 
 pub(crate) fn affinity_headers(request: &ProviderRequest) -> BTreeMap<String, String> {
@@ -350,7 +354,10 @@ pub(crate) fn affinity_headers(request: &ProviderRequest) -> BTreeMap<String, St
     }
 }
 
-fn messages(request: &ProviderRequest, compat: &ResolvedOpenAiCompletionsCompat) -> Vec<Value> {
+fn messages(
+    request: &ProviderRequest,
+    compat: &ResolvedOpenAiCompletionsCompat,
+) -> Result<Vec<Value>, pi_plugin::ProviderError> {
     let mut messages = Vec::new();
     let mut pending_tool_images = Vec::new();
     let mut last_was_tool_result = false;
@@ -405,7 +412,7 @@ fn messages(request: &ProviderRequest, compat: &ResolvedOpenAiCompletionsCompat)
                 last_was_tool_result = false;
             }
             Message::Assistant(message) => {
-                if let Some(message) = assistant_message(message, request, compat) {
+                if let Some(message) = assistant_message(message, request, compat)? {
                     messages.push(message);
                 }
                 last_was_tool_result = false;
@@ -435,7 +442,7 @@ fn messages(request: &ProviderRequest, compat: &ResolvedOpenAiCompletionsCompat)
                         .iter()
                         .filter(|tool| names.contains(&tool.name))
                         .map(|tool| tool_value(tool, compat))
-                        .collect::<Vec<_>>();
+                        .collect::<Result<Vec<_>, _>>()?;
                     if !tools.is_empty() {
                         messages.push(json!({"role": "system", "tools": tools}));
                     }
@@ -449,14 +456,19 @@ fn messages(request: &ProviderRequest, compat: &ResolvedOpenAiCompletionsCompat)
         &mut pending_tool_images,
         compat.requires_assistant_after_tool_result,
     );
-    messages
+    Ok(messages)
 }
 
 fn assistant_message(
     message: &pi_core::AssistantMessage,
     request: &ProviderRequest,
     compat: &ResolvedOpenAiCompletionsCompat,
-) -> Option<Value> {
+) -> Result<Option<Value>, pi_plugin::ProviderError> {
+    let grammar = pi_provider::grammar_tool_input_properties(
+        &request.tools,
+        compat.supports_open_ai_grammar_tools,
+    )
+    .map_err(pi_plugin::ProviderError::Protocol)?;
     let text = message
         .content
         .iter()
@@ -476,17 +488,17 @@ fn assistant_message(
             _ => None,
         })
         .collect::<Vec<_>>();
-    let calls = message
-        .content
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::ToolCall(call) => Some(json!({
-                "id":call.id.as_str(), "type":"function",
-                "function":{"name":call.name, "arguments":call.arguments.to_string()}
-            })),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    let calls = message.content.iter().filter_map(|block| match block {
+        ContentBlock::ToolCall(call) => Some((|| {
+            if let Some(property) = grammar.get(&call.name) {
+                let input = call.arguments.get(property).and_then(Value::as_str).ok_or_else(|| pi_plugin::ProviderError::Protocol(format!("Grammar tool call \"{}\" requires argument \"{property}\" to be a string.", call.name)))?;
+                Ok(json!({"id":call.id.as_str(),"type":"custom","custom":{"name":call.name,"input":input}}))
+            } else {
+                Ok(json!({"id":call.id.as_str(),"type":"function","function":{"name":call.name,"arguments":call.arguments.to_string()}}))
+            }
+        })()),
+        _ => None,
+    }).collect::<Result<Vec<_>, pi_plugin::ProviderError>>()?;
     let mut value = json!({
         "role": "assistant",
         "content": if compat.requires_assistant_after_tool_result {
@@ -542,7 +554,7 @@ fn assistant_message(
         Value::Array(content) => !content.is_empty(),
         _ => false,
     });
-    (has_content || value.get("tool_calls").is_some()).then_some(value)
+    Ok((has_content || value.get("tool_calls").is_some()).then_some(value))
 }
 
 fn flush_tool_images(messages: &mut Vec<Value>, images: &mut Vec<Value>, requires_bridge: bool) {
@@ -563,16 +575,25 @@ fn assistant_tool_bridge() -> Value {
     json!({"role": "assistant", "content": "I have processed the tool results."})
 }
 
-fn tool_value(tool: &ToolSpec, compat: &ResolvedOpenAiCompletionsCompat) -> Value {
-    let mut function = json!({
-        "name": tool.name,
-        "description": tool.description,
-        "parameters": tool.parameters
-    });
-    if compat.supports_strict_mode {
-        function["strict"] = Value::Bool(false);
+fn tool_value(
+    tool: &ToolSpec,
+    compat: &ResolvedOpenAiCompletionsCompat,
+) -> Result<Value, pi_plugin::ProviderError> {
+    if let Some(grammar) =
+        pi_provider::resolve_grammar_sampling(tool, compat.supports_open_ai_grammar_tools)
+            .map_err(pi_plugin::ProviderError::Protocol)?
+    {
+        return Ok(
+            json!({"type":"custom","custom":{"name":tool.name,"description":tool.description,"format":{"type":"grammar","grammar":{"syntax":grammar.format,"definition":grammar.definition}}}}),
+        );
     }
-    json!({"type": "function", "function": function})
+    let strict = pi_provider::resolve_json_schema_sampling(tool, compat.supports_strict_mode)
+        .map_err(pi_plugin::ProviderError::Protocol)?;
+    let mut function = json!({"name":tool.name,"description":tool.description,"parameters":strict.as_ref().unwrap_or(&tool.parameters)});
+    if compat.supports_strict_mode {
+        function["strict"] = Value::Bool(strict.is_some());
+    }
+    Ok(json!({"type":"function","function":function}))
 }
 
 fn user_content(blocks: &[ContentBlock]) -> Value {
@@ -973,7 +994,8 @@ fn detect_compat(model: Option<&ModelSpec>) -> ResolvedOpenAiCompletionsCompat {
         zai_tool_stream: false,
         supports_thinking_token_budget: false,
         thinking_token_budget_field: None,
-        supports_strict_mode: !(is_moonshot || is_together || is_cloudflare_gateway || is_nvidia),
+        supports_open_ai_grammar_tools: false,
+        supports_strict_mode: false,
         send_session_affinity_headers: false,
         deferred_tools_mode: None,
         session_affinity_format: if is_openrouter {
@@ -997,6 +1019,42 @@ mod tests {
         Usage, UserMessage,
     };
     use std::sync::Arc;
+
+    #[test]
+    fn grammar_and_strict_tool_projection_follow_explicit_capabilities() {
+        let mut tool = ToolSpec {
+            name: "execute".into(),
+            label: "Execute".into(),
+            description: "Execute source".into(),
+            parameters: json!({"type":"object","properties":{"source":{"type":"string"}},"required":["source"]}),
+            output_schema: None,
+            constrained_sampling: Some(pi_core::ConstrainedSampling::Grammar {
+                variants: BTreeMap::from([(pi_core::GrammarFormat::OpenAiRegex, ".*".into())]),
+            }),
+            execution_mode: ToolExecutionMode::Parallel,
+            prompt_snippet: None,
+            prompt_guidelines: vec![],
+        };
+        let mut compat = detect_compat(None);
+        assert_eq!(tool_value(&tool, &compat).unwrap()["type"], "function");
+        compat.supports_open_ai_grammar_tools = true;
+        let custom = tool_value(&tool, &compat).unwrap();
+        assert_eq!(
+            custom["custom"]["format"]["grammar"],
+            json!({"syntax":"regex","definition":".*"})
+        );
+        tool.constrained_sampling = Some(pi_core::ConstrainedSampling::JsonSchema {
+            strict: pi_core::ToolSchemaStrict::Require,
+        });
+        assert!(tool_value(&tool, &compat).is_err());
+        compat.supports_strict_mode = true;
+        let strict = tool_value(&tool, &compat).unwrap();
+        assert_eq!(strict["function"]["strict"], true);
+        assert_eq!(
+            strict["function"]["parameters"]["additionalProperties"],
+            false
+        );
+    }
 
     #[test]
     fn converts_user_image_to_data_url() {
@@ -1025,7 +1083,7 @@ mod tests {
                 timestamp_ms: 0,
             })],
         };
-        let body = request_body(&request);
+        let body = request_body(&request).unwrap();
         assert_eq!(body["max_completion_tokens"], 123);
         assert_eq!(body["temperature"], 0.4);
         assert_eq!(body["messages"][0]["content"][1]["type"], "image_url");
@@ -1075,7 +1133,7 @@ mod tests {
                 })),
             ],
         };
-        let body = request_body(&request);
+        let body = request_body(&request).unwrap();
         assert_eq!(body["messages"][0]["role"], "tool");
         assert_eq!(body["messages"][1]["role"], "tool");
         assert_eq!(body["messages"][2]["role"], "user");
@@ -1129,6 +1187,8 @@ mod tests {
                 Message::User(UserMessage::text("continue", 0)),
             ],
             tools: vec![ToolSpec {
+                output_schema: None,
+                constrained_sampling: None,
                 name: "lookup".to_string(),
                 label: "Lookup".to_string(),
                 description: "lookup".to_string(),
@@ -1144,7 +1204,7 @@ mod tests {
             sampling_params: BTreeMap::new(),
             session_id: Some("session-1".to_string()),
         };
-        let body = request_body(&request);
+        let body = request_body(&request).unwrap();
         let headers = affinity_headers(&request);
 
         assert_eq!(body["messages"][0]["role"], "system");
@@ -1201,7 +1261,7 @@ mod tests {
             sampling_params: BTreeMap::new(),
             session_id: None,
         };
-        let body = request_body(&request);
+        let body = request_body(&request).unwrap();
 
         assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
         assert_eq!(body["chat_template_kwargs"]["effort"], "medium");

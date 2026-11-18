@@ -3,7 +3,7 @@ use pi_core::{
 };
 use pi_plugin::ProviderError;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
@@ -18,6 +18,7 @@ struct Slot {
     signature: Option<Value>,
     ended: bool,
     done: bool,
+    grammar: Option<(String, pi_provider::GrammarInputBuffer)>,
 }
 pub(super) struct StreamState {
     slots: Vec<Slot>,
@@ -26,6 +27,7 @@ pub(super) struct StreamState {
     requested_model: String,
     terminal: bool,
     pending_error: Option<ProviderError>,
+    grammar_properties: BTreeMap<String, String>,
 }
 impl StreamState {
     pub(super) fn new(model: &ModelId) -> Self {
@@ -36,7 +38,12 @@ impl StreamState {
             requested_model: model.to_string(),
             terminal: false,
             pending_error: None,
+            grammar_properties: BTreeMap::new(),
         }
+    }
+    pub(super) fn with_grammar(mut self, properties: BTreeMap<String, String>) -> Self {
+        self.grammar_properties = properties;
+        self
     }
     pub(super) fn take_pending_error(&mut self) -> Option<ProviderError> {
         self.pending_error.take()
@@ -97,6 +104,17 @@ impl StreamState {
             signature: None,
             ended: false,
             done: false,
+            grammar: if item["type"] == "custom_tool_call" {
+                let name = item["name"].as_str().unwrap_or_default();
+                let property = self.grammar_properties.get(name).ok_or_else(|| {
+                    ProviderError::Protocol(format!(
+                        "Received custom tool call for unconfigured grammar tool {name}"
+                    ))
+                })?;
+                Some((property.clone(), pi_provider::GrammarInputBuffer::default()))
+            } else {
+                None
+            },
         });
         events.push(match kind {
             Kind::Text => StreamEvent::TextStart {
@@ -161,6 +179,27 @@ impl StreamState {
                 "Responses final content contradicts streamed deltas".into(),
             ))
         }
+    }
+    fn grammar_input(
+        &mut self,
+        index: usize,
+        input: Option<&str>,
+        done: bool,
+        events: &mut Vec<StreamEvent>,
+    ) -> Result<(), ProviderError> {
+        let (property, buffer) = self.slots[index].grammar.as_mut().ok_or_else(|| {
+            ProviderError::Protocol("Responses custom input references a non-grammar tool".into())
+        })?;
+        let delta = if done {
+            buffer.close(property, input)
+        } else {
+            buffer.append(property, input.unwrap_or_default())
+        }
+        .map_err(ProviderError::Protocol)?;
+        if let Some(delta) = delta {
+            self.append(index, &delta, events);
+        }
+        Ok(())
     }
     fn end(&mut self, index: usize, events: &mut Vec<StreamEvent>) {
         let slot = &mut self.slots[index];
@@ -229,7 +268,7 @@ impl StreamState {
                 let kind = match item["type"].as_str() {
                     Some("message") => Kind::Text,
                     Some("reasoning") => Kind::Thinking,
-                    Some("function_call") => Kind::Tool,
+                    Some("function_call" | "custom_tool_call") => Kind::Tool,
                     _ => return Ok(events),
                 };
                 let index = self.slot(&value, kind, &mut events)?;
@@ -242,7 +281,14 @@ impl StreamState {
                             },
                         });
                     }
-                    if let Some(args) = item["arguments"].as_str() {
+                    if item["type"] == "custom_tool_call" {
+                        self.grammar_input(
+                            index,
+                            item["input"].as_str(),
+                            value["type"] == "response.output_item.done",
+                            &mut events,
+                        )?;
+                    } else if let Some(args) = item["arguments"].as_str() {
                         self.final_text(index, args, &mut events)?;
                     }
                 }
@@ -315,7 +361,10 @@ impl StreamState {
                 // supply them from the completed item when later deltas are absent.
                 self.slots[index].pending_summary_separators += 1;
             }
-            "response.function_call_arguments.delta" | "response.function_call_arguments.done" => {
+            "response.function_call_arguments.delta"
+            | "response.function_call_arguments.done"
+            | "response.custom_tool_call_input.delta"
+            | "response.custom_tool_call_input.done" => {
                 let index = value["output_index"]
                     .as_u64()
                     .and_then(|i| self.outputs.get(&i).copied())
@@ -330,7 +379,19 @@ impl StreamState {
                             "Responses tool delta references a non-tool item".into(),
                         ));
                     }
-                    if kind.ends_with(".done") {
+                    if kind.contains("custom_tool_call_input") {
+                        self.grammar_input(
+                            index,
+                            value[if kind.ends_with(".done") {
+                                "input"
+                            } else {
+                                "delta"
+                            }]
+                            .as_str(),
+                            kind.ends_with(".done"),
+                            &mut events,
+                        )?;
+                    } else if kind.ends_with(".done") {
                         self.final_text(
                             index,
                             value["arguments"].as_str().unwrap_or_default(),

@@ -667,6 +667,10 @@ pub trait SessionContextAccess: Send + Sync {
         unbound()
     }
 
+    fn render_system_prompt(&self, _options: Value) -> PluginContextResult<String> {
+        unbound()
+    }
+
     fn session_cwd(&self) -> PluginContextResult<PathBuf> {
         unbound()
     }

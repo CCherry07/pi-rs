@@ -31,6 +31,8 @@ struct SyntheticTool {
 impl Tool for SyntheticTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
+            output_schema: None,
+            constrained_sampling: None,
             name: "synthetic".into(),
             label: "Synthetic read".into(),
             description: "Return a fixed-size payload after an optional delay.".into(),

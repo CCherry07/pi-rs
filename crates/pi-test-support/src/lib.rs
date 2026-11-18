@@ -356,6 +356,8 @@ impl Tool for WaitForAbortTool {
 
 fn test_tool_spec(name: &str, execution_mode: ToolExecutionMode) -> ToolSpec {
     ToolSpec {
+        output_schema: None,
+        constrained_sampling: None,
         name: name.to_string(),
         label: name.to_string(),
         description: format!("Test tool {name}"),

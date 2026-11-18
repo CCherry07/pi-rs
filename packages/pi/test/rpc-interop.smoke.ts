@@ -4,7 +4,7 @@ import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:f
 import { createServer, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { createInterface } from "node:readline";
+import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
 
@@ -77,9 +77,15 @@ async function fixture(t: TestContext, tool: FixtureTool = false) {
     const waiters = new Set<() => void>();
     const wake = () => { for (const waiter of waiters) waiter(); };
     child.stderr.on("data", bytes => { errorOutput += bytes.toString(); });
-    const lines = createInterface({ input: child.stdout });
-    lines.on("line", line => {
-      try { records.push(JSON.parse(line)); } catch { parseError = new Error(`Non-JSON RPC output: ${line}`); }
+    const decoder = new StringDecoder("utf8");
+    let outputBuffer = "";
+    child.stdout.on("data", bytes => {
+      outputBuffer += decoder.write(bytes);
+      for (let newline = outputBuffer.indexOf("\n"); newline !== -1; newline = outputBuffer.indexOf("\n")) {
+        const line = outputBuffer.slice(0, newline);
+        outputBuffer = outputBuffer.slice(newline + 1);
+        try { records.push(JSON.parse(line)); } catch { parseError = new Error(`Non-JSON RPC output: ${line}`); }
+      }
       wake();
     });
     child.on("error", error => { parseError = error; wake(); });
@@ -89,7 +95,6 @@ async function fixture(t: TestContext, tool: FixtureTool = false) {
     children.push(async () => {
       if (!exited) child.kill("SIGKILL");
       await closed;
-      lines.close();
     });
     function send(value: RecordValue) { child.stdin.write(JSON.stringify(value) + "\n"); }
     async function wait(predicate: (record: RecordValue) => boolean, from = 0): Promise<RecordValue> {
@@ -116,10 +121,15 @@ async function fixture(t: TestContext, tool: FixtureTool = false) {
       assert.equal(answer.success, true, JSON.stringify(answer));
       return answer.data;
     }
-    async function waitForExit() {
-      assert.equal(await closed, 0, errorOutput);
+    async function waitForExit(expectedCode = 0) {
+      assert.equal(await closed, expectedCode, errorOutput);
     }
-    return { records, wait, request, send, waitForExit, async close(batch: RecordValue[] = []) {
+    return { records, wait, request, send, waitForExit,
+      diagnostics: () => errorOutput,
+      sendRaw: (value: string) => child.stdin.write(value),
+      signal: (signal: NodeJS.Signals) => child.kill(signal),
+      endInput: (value?: string) => child.stdin.end(value),
+      async close(batch: RecordValue[] = []) {
       child.stdin.end(batch.map(value => JSON.stringify(value) + "\n").join(""));
       await waitForExit();
     } };
@@ -528,19 +538,236 @@ test("RPC extension-requested shutdown flushes the last lifecycle notification",
   const extension = join(f.root, "requested-shutdown.ts");
   await writeFile(extension, `export default function (pi) {
     pi.on("session_shutdown", (event, ctx) => ctx.ui.notify("last shutdown notice: " + event.reason, "warning"));
-    pi.registerCommand("rpc-shutdown", { handler: (_args, ctx) => {
+    pi.registerCommand("rpc-shutdown", { handler: async (_args, ctx) => {
       ctx.ui.notify("shutdown requested");
       ctx.shutdown();
+      await new Promise(resolve => setTimeout(resolve, 30));
+      ctx.ui.notify("shutdown command finished");
     } });
   }`);
   const rpc = f.start(["--extension", extension]);
   await rpc.request("get_state");
   rpc.send({ type: "prompt", id: "shutdown-command", message: "/rpc-shutdown" });
   await rpc.waitForExit();
+  const responseIndex = rpc.records.findIndex(record => record.type === "response" && record.id === "shutdown-command");
+  assert.ok(responseIndex >= 0, "the requesting command must receive its response before exit");
+  assert.deepEqual(rpc.records[responseIndex]!.data, { disposition: "handled" });
+  assert.ok(rpc.records.findIndex(record => record.message === "shutdown command finished") < responseIndex);
+  assert.ok(responseIndex < rpc.records.findIndex(record => record.message === "last shutdown notice: quit"));
   const notices = rpc.records.filter(record => record.method === "notify"
     && ["shutdown requested", "last shutdown notice: quit"].includes(record.message));
   assert.deepEqual(notices.map(record => record.message), ["shutdown requested", "last shutdown notice: quit"]);
   assert.equal(notices.at(-1)?.notifyType, "warning");
+});
+
+test("RPC forwards extension display notifications and keeps extension logs on stderr", { timeout: 30_000 }, async t => {
+  const f = await fixture(t);
+  const extension = join(f.root, "display-notifications.ts");
+  await writeFile(extension, `export default function (pi) {
+    pi.on("session_start", (_event, ctx) => {
+      console.log("extension console fixture");
+      process.stdout.write("extension stdout fixture\\n");
+      ctx.ui.setStatus("build", "running");
+      ctx.ui.setStatus("build", "");
+      ctx.ui.setStatus("build", undefined);
+      ctx.ui.setWidget("progress", ["line one", "文本"], { placement: "belowEditor" });
+      ctx.ui.setWidget("progress", undefined);
+      ctx.ui.setTitle("RPC fixture");
+      ctx.ui.setEditorText("first");
+      ctx.ui.pasteToEditor("replacement");
+      ctx.ui.notify("default notification");
+    });
+  }`);
+  const rpc = f.start(["--extension", extension]);
+  await rpc.request("get_state");
+  const records = rpc.records.filter(record => record.type === "extension_ui_request")
+    .map(({ id: _id, type: _type, ...record }) => record);
+  assert.deepEqual(records, [
+    { method: "setStatus", statusKey: "build", statusText: "running" },
+    { method: "setStatus", statusKey: "build", statusText: "" },
+    { method: "setStatus", statusKey: "build" },
+    { method: "setWidget", widgetKey: "progress", widgetLines: ["line one", "文本"], widgetPlacement: "belowEditor" },
+    { method: "setWidget", widgetKey: "progress" },
+    { method: "setTitle", title: "RPC fixture" },
+    { method: "set_editor_text", text: "first" },
+    { method: "set_editor_text", text: "replacement" },
+    { method: "notify", message: "default notification" },
+  ]);
+  await rpc.close();
+  assert.match(rpc.diagnostics(), /extension console fixture/);
+  assert.match(rpc.diagnostics(), /extension stdout fixture/);
+});
+
+test("RPC input hooks and extension commands run before streaming admission checks", { timeout: 40_000 }, async t => {
+  const f = await fixture(t, true);
+  const extension = join(f.root, "streaming-input.ts");
+  await writeFile(extension, `export default function (pi) {
+    pi.on("input", (event, ctx) => {
+      ctx.ui.notify(JSON.stringify({ text: event.text, source: event.source }));
+      if (event.text === "handled input") return { action: "handled" };
+    });
+    pi.registerCommand("during-run", { handler: (_args, ctx) => ctx.ui.notify("command handled") });
+    pi.on("tool_call", async (_event, ctx) => {
+      await ctx.ui.confirm("hold tool", "Continue?", { signal: ctx.signal });
+      return { block: true, reason: "fixture only" };
+    });
+    pi.on("agent_settled", (event, ctx) => ctx.ui.notify(JSON.stringify({ settled: true, aborted: event.aborted })));
+  }`);
+  const rpc = f.start(["--extension", extension]);
+  assert.deepEqual(await rpc.request("prompt", { message: "start fixture" }), { disposition: "started" });
+  await rpc.wait(record => record.method === "confirm" && record.title === "hold tool");
+  assert.deepEqual(await rpc.request("prompt", { message: "/during-run" }), { disposition: "handled" });
+  assert.deepEqual(await rpc.request("prompt", { message: "handled input" }), { disposition: "handled" });
+  assert.deepEqual(await rpc.request("steer", { message: "steering fixture" }), { disposition: "queued" });
+  assert.deepEqual(await rpc.request("follow_up", { message: "follow-up fixture" }), { disposition: "queued" });
+  assert.deepEqual(await rpc.request("clear_queue"), { steering: ["steering fixture"], followUp: ["follow-up fixture"] });
+  await rpc.request("abort");
+  assert.equal((await rpc.request("get_state")).isStreaming, false, "abort acknowledges an idle session");
+  assert.equal((await rpc.wait(record => record.type === "agent_settled")).aborted, true);
+  assert.deepEqual(JSON.parse((await rpc.wait(record => record.method === "notify" && record.message.includes('"settled"'))).message),
+    { settled: true, aborted: true });
+  const inputs = rpc.records.filter(record => record.method === "notify" && record.message.startsWith('{"text"'))
+    .map(record => JSON.parse(record.message));
+  assert.deepEqual(inputs.map(record => record.text), ["start fixture", "handled input", "steering fixture", "follow-up fixture"]);
+  assert.ok(inputs.every(record => record.source === "rpc"));
+  await rpc.close();
+});
+
+test("RPC queues idle user input and rejects extension commands in explicit queues", { timeout: 30_000 }, async t => {
+  const f = await fixture(t);
+  const extension = join(f.root, "idle-queue.ts");
+  await writeFile(extension, `export default function (pi) {
+    pi.registerCommand("queue-command", { handler: (_args, ctx) => ctx.ui.notify("must not execute") });
+  }`);
+  const rpc = f.start(["--no-session", "--extension", extension]);
+  assert.deepEqual(await rpc.request("steer", { message: "next steering" }), { disposition: "queued" });
+  assert.deepEqual(await rpc.request("follow_up", { message: "next follow-up" }), { disposition: "queued" });
+  assert.equal((await rpc.request("get_state")).pendingMessageCount, 2);
+  rpc.send({ id: "queued-command", type: "steer", message: "/queue-command" });
+  assert.equal((await rpc.wait(record => record.id === "queued-command")).success, false);
+  assert.deepEqual(await rpc.request("clear_queue"), { steering: ["next steering"], followUp: ["next follow-up"] });
+  assert.equal(f.requests.length, 0);
+  assert.ok(!rpc.records.some(record => record.message === "must not execute"));
+  await rpc.close();
+});
+
+for (const signal of ["SIGTERM", "SIGHUP"] as const) {
+  test(`RPC ${signal} waits for shutdown hooks`, { timeout: 30_000, skip: process.platform === "win32" }, async t => {
+    const f = await fixture(t);
+    const marker = join(f.root, "signal-cleanup.txt");
+    const extension = join(f.root, "signal-cleanup.ts");
+    await writeFile(extension, `import { writeFile } from "node:fs/promises";
+      export default function (pi) {
+        pi.on("session_shutdown", async () => {
+          await new Promise(resolve => setTimeout(resolve, 50));
+          await writeFile(${JSON.stringify(marker)}, "finished");
+        });
+      }`);
+    const rpc = f.start(["--extension", extension]);
+    await rpc.request("get_state");
+    rpc.signal(signal);
+    await rpc.waitForExit(signal === "SIGTERM" ? 143 : 129);
+    assert.equal(await readFile(marker, "utf8"), "finished");
+  });
+}
+
+test("RPC EOF and one following SIGTERM finish the same shutdown", { timeout: 30_000, skip: process.platform === "win32" }, async t => {
+  const f = await fixture(t);
+  const marker = join(f.root, "eof-cleanup.txt");
+  const extension = join(f.root, "eof-cleanup.ts");
+  await writeFile(extension, `import { writeFile } from "node:fs/promises";
+    export default function (pi) {
+      pi.on("session_shutdown", async (_event, ctx) => {
+        ctx.ui.notify("disposal started");
+        await new Promise(resolve => setTimeout(resolve, 150));
+        await writeFile(${JSON.stringify(marker)}, "finished");
+      });
+    }`);
+  const rpc = f.start(["--extension", extension]);
+  await rpc.request("get_state");
+  rpc.endInput();
+  await rpc.wait(record => record.message === "disposal started");
+  rpc.signal("SIGTERM");
+  await rpc.waitForExit();
+  assert.equal(await readFile(marker, "utf8"), "finished");
+});
+
+test("RPC extension shutdown lets its active prompt settle", { timeout: 30_000 }, async t => {
+  const f = await fixture(t);
+  const extension = join(f.root, "settled-shutdown.ts");
+  await writeFile(extension, `export default function (pi) {
+    pi.on("before_agent_start", (_event, ctx) => { ctx.shutdown(); });
+  }`);
+  const rpc = f.start(["--extension", extension]);
+  rpc.send({ type: "prompt", id: "final-prompt", message: "finish before exiting" });
+  await rpc.waitForExit();
+  assert.deepEqual(rpc.records.find(record => record.id === "final-prompt")?.data, { disposition: "started" });
+  const settled = rpc.records.find(record => record.type === "agent_settled");
+  assert.equal(settled?.aborted, false);
+  assert.ok(rpc.records.some(record => record.type === "message_end" && record.message?.role === "assistant"
+    && record.message.content.some((block: RecordValue) => block.text === "fixture finished")));
+});
+
+test("RPC a repeated signal exits during pending disposal", { timeout: 30_000, skip: process.platform === "win32" }, async t => {
+  const f = await fixture(t);
+  const extension = join(f.root, "repeated-signal.ts");
+  await writeFile(extension, `export default function (pi) {
+    pi.on("session_shutdown", async (_event, ctx) => {
+      ctx.ui.notify("pending disposal");
+      await new Promise(() => {});
+    });
+  }`);
+  const rpc = f.start(["--extension", extension]);
+  await rpc.request("get_state");
+  rpc.signal("SIGTERM");
+  await rpc.wait(record => record.message === "pending disposal");
+  rpc.signal("SIGTERM");
+  await rpc.waitForExit(143);
+});
+
+test("RPC bash output only correlates supplied command IDs", { timeout: 30_000 }, async t => {
+  const f = await fixture(t);
+  const rpc = f.start(["--no-session"]);
+  rpc.send({ type: "bash", command: "printf uncorrelated" });
+  await rpc.wait(record => record.type === "response" && record.command === "bash");
+  const update = await rpc.wait(record => record.type === "bash_execution_update");
+  assert.equal(Object.hasOwn(update, "id"), false);
+  const from = rpc.records.length;
+  rpc.send({ id: "correlated-bash", type: "bash", command: "printf correlated" });
+  await rpc.wait(record => record.type === "response" && record.id === "correlated-bash", from);
+  assert.equal((await rpc.wait(record => record.type === "bash_execution_update", from)).id, "correlated-bash");
+  await rpc.close();
+});
+
+test("RPC framing preserves Unicode separators, CRLF, large commands and a final unterminated record", { timeout: 30_000 }, async t => {
+  const f = await fixture(t);
+  const rpc = f.start(["--no-session"]);
+  const name = "RPC\u2028line\u2029paragraph";
+  rpc.sendRaw("invalid JSON\n");
+  const parse = await rpc.wait(record => record.command === "parse");
+  assert.equal(parse.success, false);
+  assert.equal(Object.hasOwn(parse, "id"), false);
+  rpc.send({ type: "unrecognized", id: "unknown-request" });
+  assert.deepEqual(await rpc.wait(record => record.id === "unknown-request"), {
+    type: "response", id: "unknown-request", command: "unrecognized", success: false,
+    error: "Unknown command: unrecognized",
+  });
+  rpc.sendRaw(JSON.stringify({ id: "name", type: "set_session_name", name }) + "\r\n");
+  assert.equal((await rpc.wait(record => record.id === "name")).success, true);
+  assert.equal((await rpc.request("get_state")).sessionName, name);
+  rpc.send({ id: "large", type: "get_state", padding: "x".repeat(17 * 1024 * 1024) });
+  assert.equal((await rpc.wait(record => record.id === "large")).success, true);
+  rpc.endInput(JSON.stringify({ id: "final-record", type: "get_state" }));
+  await rpc.waitForExit();
+  assert.equal(rpc.records.find(record => record.id === "final-record")?.success, true);
+});
+
+test("RPC rejects startup file arguments", { timeout: 30_000 }, async t => {
+  const f = await fixture(t);
+  const rpc = f.start(["@missing-input.txt"]);
+  await rpc.waitForExit(1);
+  assert.match(rpc.diagnostics(), /@file arguments are not supported in RPC mode/);
+  assert.equal(f.requests.length, 0);
 });
 
 for (const decision of ["allow", "deny", "abort", "disconnect"] as const) {

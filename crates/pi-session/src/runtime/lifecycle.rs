@@ -276,6 +276,10 @@ impl AgentSession {
             generation: runtime.generation(),
         };
         let session = Arc::new(Self {
+            scoped_models: crate::resolve_model_scope(
+                &options.model_switch.scope_patterns,
+                &runtime.available_models(),
+            ),
             context_updates: ContextUpdates::new(
                 runtime.clone(),
                 store.clone(),
@@ -285,7 +289,10 @@ impl AgentSession {
             runtime,
             store,
             runtime_inventory: options.runtime_inventory,
+            model_switch: options.model_switch,
+            settings_writer: options.settings_writer,
             plugin_driver,
+            executor: tokio::runtime::Handle::current(),
             session_dispatch_context,
             compaction_settings: Arc::new(RwLock::new(options.compaction)),
             context_window: options.context_window,

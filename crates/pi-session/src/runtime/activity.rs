@@ -25,6 +25,9 @@ struct PendingSessionMessage {
     display_text: String,
     message: Message,
     target: ProvisionedEntry,
+    /// Live idle steer/follow-up submissions attach to the next explicit prompt.
+    /// Recovered next-run items keep their explicit admission policy.
+    deliver_on_prompt: bool,
 }
 
 #[derive(Debug)]
@@ -57,6 +60,7 @@ pub(super) enum ActivityPhase {
     Running,
     RetryWait,
     Compacting,
+    Summarizing,
     BeforeSettle,
     Settling,
     Shell,
@@ -210,6 +214,7 @@ impl SessionActivity {
                     id: next_unique_id("entry"),
                     entry: SessionEntry::message(wire),
                 },
+                deliver_on_prompt: false,
             })
             .collect::<Vec<_>>();
         self.store.append_record(NewLaneRecord {
@@ -304,7 +309,9 @@ impl SessionActivity {
         input: QueuedInput,
     ) -> Result<PromptOutcome, SessionError> {
         let mut state = self.lock();
-        let (pending, run_id) = if input.kind == QueueKind::NextRun {
+        let idle_delivery =
+            input.kind != QueueKind::NextRun && state.active_run.is_none() && expected.is_none();
+        let (pending, run_id) = if input.kind == QueueKind::NextRun || idle_delivery {
             (&mut state.recovered_queue, None)
         } else {
             let run = state.active_run.as_mut().ok_or(SessionError::Busy)?;
@@ -319,7 +326,16 @@ impl SessionActivity {
             id: next_unique_id("entry"),
             entry: input.entry,
         };
-        append_queue_enqueued(&self.store, input.kind, run_id.clone(), &target)?;
+        append_queue_enqueued(
+            &self.store,
+            if idle_delivery {
+                QueueKind::NextRun
+            } else {
+                input.kind
+            },
+            run_id.clone(),
+            &target,
+        )?;
         let entry_id = target.id.clone();
         pending.push(PendingSessionMessage {
             kind: Some(input.kind),
@@ -327,11 +343,13 @@ impl SessionActivity {
             display_text: input.display_text,
             message: input.message.clone(),
             target,
+            deliver_on_prompt: idle_delivery,
         });
         // Keep closing/clearing delivery excluded until the Agent has received
         // this already-durable item. Product queue state precedes consumption.
         self.events.publish_queue(state.queue_snapshot());
         match input.kind {
+            _ if idle_delivery => {}
             QueueKind::Steer => agent.enqueue_identified(
                 entry_id.clone(),
                 input.message,
@@ -348,6 +366,68 @@ impl SessionActivity {
             kind: input.kind,
             entry_id,
         })
+    }
+
+    /// Binds idle queued input to the newly admitted run before the Agent can consume it.
+    pub(super) fn activate_idle_queue(&self, agent: &Agent) -> Result<(), SessionError> {
+        let mut state = self.lock();
+        let run_id = state
+            .active_run
+            .as_ref()
+            .ok_or(SessionError::Busy)?
+            .id
+            .clone();
+        let mut entries = Vec::new();
+        let mut pending = Vec::new();
+        for item in state
+            .recovered_queue
+            .iter()
+            .filter(|item| item.deliver_on_prompt)
+        {
+            entries.push(NewLaneRecord {
+                id: next_unique_id("queue-cancel"),
+                lane: MAIN_LANE.into(),
+                record: LaneRecordEntry::QueueCancelled {
+                    run_id: None,
+                    entry_id: item.target.id.clone(),
+                },
+            });
+            let mut item = item.clone();
+            item.target.id = next_unique_id("entry");
+            item.run_id = Some(run_id.clone());
+            item.deliver_on_prompt = false;
+            entries.push(NewLaneRecord {
+                id: next_unique_id("queue"),
+                lane: MAIN_LANE.into(),
+                record: LaneRecordEntry::QueueEnqueued {
+                    queue: item.kind.expect("idle input has a queue"),
+                    run_id: Some(run_id.clone()),
+                    target: item.target.clone(),
+                },
+            });
+            pending.push(item);
+        }
+        if pending.is_empty() {
+            return Ok(());
+        }
+        self.store.append_records_batch(entries)?;
+        state.recovered_queue.retain(|item| !item.deliver_on_prompt);
+        state
+            .active_run
+            .as_mut()
+            .expect("admitted run")
+            .pending
+            .extend(pending.clone());
+        self.events.publish_queue(state.queue_snapshot());
+        for item in pending {
+            let destination = match item.kind {
+                Some(QueueKind::Steer) => pi_agent::QueueDestination::Steering,
+                Some(QueueKind::FollowUp) => pi_agent::QueueDestination::FollowUp,
+                _ => unreachable!("idle live delivery is steer or follow-up"),
+            };
+            agent.enqueue_identified(item.target.id, item.message, destination);
+        }
+        Ok(())
     }
 
     pub(super) fn display_text(&self, event: &AgentEvent) -> Option<String> {
@@ -621,6 +701,13 @@ impl SessionActivity {
 
     pub(super) fn is_idle(&self) -> bool {
         *self.phase.borrow() == ActivityPhase::Idle
+    }
+
+    pub(super) fn is_summarizing(&self) -> bool {
+        matches!(
+            *self.phase.borrow(),
+            ActivityPhase::Compacting | ActivityPhase::Summarizing
+        )
     }
 
     pub(super) async fn wait_for_idle(&self) {
@@ -958,6 +1045,7 @@ fn pending_session_message(
         display_text,
         message,
         target,
+        deliver_on_prompt: false,
     })
 }
 
@@ -1002,7 +1090,7 @@ fn queue_snapshot<'a>(items: impl IntoIterator<Item = &'a PendingSessionMessage>
         if let Some(kind) = item.kind {
             snapshot.items.push(crate::QueuedMessageSnapshot {
                 entry_id: item.target.id.clone(),
-                kind: if item.run_id.is_none() {
+                kind: if item.run_id.is_none() && !item.deliver_on_prompt {
                     QueueKind::NextRun
                 } else {
                     kind

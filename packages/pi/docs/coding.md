@@ -1,0 +1,134 @@
+# pi-coding
+
+`pi-coding` is the headless product integration layer for embedding Pi in the CLI,
+desktop application, and other presentation adapters.
+
+It owns the product runtime composition: providers and model catalogs, built-in
+tools, skills, memory, subagents, settings, project trust, plugin generations,
+and session construction. This is selection, settings adaptation, cross-plugin wiring,
+and transactional generation activation—not ownership of each component's implementation.
+Domain configuration and validation stay with the corresponding crates, whose APIs accept
+their own typed inputs rather than `pi_coding::Config`. It does not own terminal, Tauri, RPC,
+or other presentation behavior; Desktop extension package discovery lives in the Desktop app.
+MCP client, local configuration management and `/mcp` commands live together in `pi-plugin-mcp`.
+The Coding composition only supplies the resolved trust decision and prepares/registers the candidate plugin;
+callers managing MCP files use `pi_plugin_mcp::McpLibrary` directly.
+
+```rust
+use pi_plugin::PresentationMode;
+use pi_coding::{Pi, Config};
+use pi_session::CreateSessionOptions;
+
+let config = Config::new(cwd, agent_dir);
+let pi = Pi::builder(config)
+    .presentation_mode(PresentationMode::Rpc)
+    .build()?;
+let session = pi.sessions()
+    .create_session(CreateSessionOptions::new(cwd, session_path))
+    .await?;
+```
+
+## Internal responsibilities
+
+- `generation`: complete generation preparation, trust gates, context binding and staged
+  product activation/rollback.
+- `composition`: plugin selection and registration order, cross-plugin wiring, memory
+  preparation and default/extension tool activation policy.
+- `configuration`: settings and explicit-selection adapters into domain-owned options; no
+  resource discovery or plugin activation.
+- `runtime_inventory`: labels for resolved JavaScript sources and loaded configured native plugins.
+
+Runtime and session registration share one borrowed `GenerationComponents` view of already-prepared
+native/JavaScript/MCP/memory/subagent components. It carries no credentials, configuration or
+activation state. Runtime capabilities and overlays remain explicit inputs; built-in provider
+preparation owns the shared transport and keeps test credential overrides out of the runtime seam.
+
+These modules are private. `Pi`, `Config`, and `ProductSessionFactory` moved from `pi-sdk`
+to `pi-coding`; managed-session operations retain their existing behavior. Configuration/registration tests live beside their owners; factory tests focus
+on lifecycle, trust and transactional preparation.
+
+## Runtime features
+
+`settings.json` selects first-party features for CLI, Desktop, and other Coding entry points.
+The interactive `/features` command chooses a scope and edits these flags. `/features global`
+and `/features project` open a scope directly. `Space` toggles the focused capability; `Enter`
+saves and reloads the current session; `Esc` cancels. Cancellation
+keeps the current settings. Only edited flags are written, preserving other settings and
+project inheritance. The command remains registered when every optional feature is disabled.
+
+Global settings live in `<agent-dir>/settings.json` (normally `~/.pi/agent/settings.json`);
+trusted `<cwd>/.pi/settings.json` overrides individual fields:
+
+```json
+{
+  "features": {
+    "memory": true,
+    "subagents": true,
+    "schedule": false,
+    "skills": true,
+    "promptTemplates": true,
+    "sessionTransfer": true
+  }
+}
+```
+
+Omitted fields default to `true`. Fields must be booleans; invalid values produce settings
+diagnostics and fall back to defaults, without discarding valid sibling fields. New sessions
+read current settings. Existing sessions apply changes when reloaded (TUI `/reload` or the
+managed session reload API); editing a file does not change live registries or other sessions.
+Malformed JSON retains that scope's last valid in-process document. If candidate generation
+construction fails, the previous session remains active. Disabling a feature retains its data.
+
+Rust embedders may additionally restrict features through `Config::features`. This host ceiling
+defaults to all enabled; settings cannot re-enable a feature explicitly disabled by the host:
+
+```rust
+use pi_coding::{Config, Features, Pi};
+
+let mut config = Config::new(cwd, agent_dir);
+config.features = Features {
+    memory: true,
+    skills: true,
+    ..Features::none()
+};
+let pi = Pi::builder(config).build()?;
+```
+
+The available flags are `memory`, `subagents`, `schedule`, `skills`,
+`prompt_templates`, and `session_transfer` (export/import/share commands).
+`Features::all()` is equivalent to `Features::default()`; `Features::none()` disables
+these six features while retaining providers, filesystem/shell tools, core session
+management, and independently configured native/JavaScript/MCP plugins.
+
+Disabling a feature omits its built-in registration and corresponding session hooks,
+not just its tools. Disabled memory does not load `memory.json` or start memory work;
+disabled scheduling does not start its scheduler. Skills remain usable without
+subagents or memory. Feature-specific settings still apply when enabled.
+The host captures its ceiling and intersects it with the freshly loaded settings for each
+new/resumed/forked session and reload. The feature selection is not stored in session history.
+
+These are **runtime flags, not Cargo features**: dependencies are still compiled.
+They select first-party composition, not a security boundary for explicitly loaded
+plugins. Existing extension/MCP configuration remains independent. Read-only Desktop
+skill-file management also remains available independently of session features.
+Disabling `skills` or `prompt_templates` removes the corresponding built-in plugin
+entirely, including explicit resource paths; this is a deliberate pi-rs product policy,
+not Pi's automatic-discovery-only `noSkills`/`noPromptTemplates` behavior.
+AGENTS.md/CLAUDE.md and general system-prompt resources are unaffected.
+
+The crate is currently workspace-internal (`publish = false`). `pi-plugin`
+is the separate authoring interface for native plugins.
+
+## Framework integration
+
+Use `pi-sdk::AgentHarness` for explicit domain-neutral embedding and this crate for the complete
+Coding product. Project values remain in `pi_sdk::projects` (also re-exported here).
+Both entry points share `SessionGenerationFactory`, `MultiSessionManager`, the v4 journal and
+the unified plugin lifecycle.
+
+`session::CodingShellExecutor` supplies local shell execution and configured defaults;
+`session::CodingCompactionPolicy` supplies Coding summary prompts and file-operation tracking.
+`composition` chooses the private `prompt::CodingSystemPrompt` adapter; `prompt` and `resources`
+own Coding prompt assembly and project-context rules within this crate. Generic sessions do not
+select these policies implicitly. `settings/` remains the independent `pi-settings` crate shared
+with CLI and JS package management; it preserves the existing settings API and file format.

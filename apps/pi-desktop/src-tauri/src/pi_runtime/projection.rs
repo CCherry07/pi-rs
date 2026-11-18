@@ -154,7 +154,7 @@ impl ContextRefresh {
         // Idle mutations may predate the subscription, and end hooks may remove
         // streamed blocks. Both prompt boundaries publish authoritative Agent state.
         if matches!(event, AgentSessionEvent::Agent(event) if matches!(event.as_ref(), AgentEvent::AgentStart))
-            || matches!(event, AgentSessionEvent::AgentSettled)
+            || matches!(event, AgentSessionEvent::AgentSettled { .. })
         {
             self.after_context_change = false;
             return true;
@@ -189,7 +189,7 @@ impl ContextRefresh {
                 event,
                 AgentSessionEvent::Agent(_)
                     | AgentSessionEvent::AgentEnd { .. }
-                    | AgentSessionEvent::AgentSettled
+                    | AgentSessionEvent::AgentSettled { .. }
             )
         {
             self.after_context_change = false;
@@ -467,7 +467,7 @@ async fn project_event(
                 }
             }
         }
-        AgentSessionEvent::AgentSettled => {
+        AgentSessionEvent::AgentSettled { .. } => {
             state.turn_id = None;
             let (method, params) = turn_notification(thread_id, false);
             emit(app, workspace_id, method, params);
@@ -1353,6 +1353,21 @@ mod tests {
         assert!(item.get("newThreadId").is_none());
     }
 
+    #[test]
+    fn settled_events_refresh_context_even_when_aborted_or_covered_by_a_snapshot() {
+        for aborted in [false, true] {
+            for after_context_change in [false, true] {
+                let event = AgentSessionEvent::AgentSettled { aborted };
+                let mut refresh = ContextRefresh {
+                    after_context_change,
+                };
+                assert!(!snapshot_covers_event(&event));
+                assert!(refresh.before_event(&event));
+                assert!(!refresh.after_context_change);
+            }
+        }
+    }
+
     #[tokio::test]
     async fn snapshot_rebase_keeps_turn_notifications_and_fast_provider_errors() {
         use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
@@ -1390,7 +1405,7 @@ mod tests {
                 {
                     notifications.push(turn_notification("child", true))
                 }
-                AgentSessionEvent::AgentSettled => {
+                AgentSessionEvent::AgentSettled { .. } => {
                     notifications.push(turn_notification("child", false))
                 }
                 AgentSessionEvent::AgentEnd { messages, .. } => {

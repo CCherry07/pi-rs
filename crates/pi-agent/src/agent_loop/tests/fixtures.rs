@@ -230,6 +230,7 @@ impl TestLoop {
                 active_tools,
             },
             config: AgentLoopConfig {
+                prompt_state: None,
                 stream_fn: Some(provider.stream_fn()),
                 convert_to_llm: ConvertToLlm::new(|messages| async move {
                     messages
@@ -414,6 +415,8 @@ impl EchoTool {
 impl Tool for EchoTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
+            output_schema: None,
+            constrained_sampling: None,
             name: self.name.to_string(),
             label: self.name.to_string(),
             description: "Echo tool".to_string(),

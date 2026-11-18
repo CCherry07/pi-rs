@@ -3,7 +3,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::responses::{replay_input, stream as responses_stream, tools as response_tools};
+use crate::responses::{
+    codex_tools as response_tools, replay_input, stream_with_grammar as responses_stream,
+};
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use pi_core::{AbortSignal, ProviderId};
@@ -232,8 +234,9 @@ impl Provider for OpenAiCodexProvider {
         context: ProviderCallContext,
         signal: AbortSignal,
     ) -> Result<ProviderStream, ProviderError> {
+        let grammar = crate::responses::grammar_properties(&request)?;
         let payload = context
-            .before_provider_request(&signal, responses_request_body(&request))
+            .before_provider_request(&signal, responses_request_body(&request)?)
             .await?;
         let mut credentials = self.credentials.current(false).await?;
         let responses_url = self.responses_url();
@@ -265,6 +268,7 @@ impl Provider for OpenAiCodexProvider {
                         API_NAME,
                         body,
                         signal,
+                        grammar,
                     ));
                 }
                 Err(TransportError::Aborted) => return Err(ProviderError::Aborted),
@@ -317,6 +321,7 @@ impl Provider for OpenAiCodexProvider {
             API_NAME,
             response.body,
             signal,
+            grammar,
         ))
     }
 }
@@ -671,6 +676,18 @@ fn normalized_response_output(response: &Value) -> Vec<Value> {
                     value
                 })
             }
+            Some("custom_tool_call") => {
+                let mut value = json!({
+                    "type": "custom_tool_call",
+                    "call_id": item.get("call_id").and_then(Value::as_str).unwrap_or_default(),
+                    "name": item.get("name").and_then(Value::as_str).unwrap_or_default(),
+                    "input": item.get("input").and_then(Value::as_str).unwrap_or_default()
+                });
+                if let Some(namespace) = item.get("namespace") {
+                    value["namespace"] = namespace.clone();
+                }
+                Some(value)
+            }
             Some("function_call") => {
                 let mut value = json!({
                     "type": "function_call",
@@ -809,9 +826,9 @@ fn next_websocket_request_id() -> String {
     format!("pi-rs-{timestamp:x}-{sequence:x}")
 }
 
-pub(crate) fn responses_request_body(request: &ProviderRequest) -> Value {
-    let input = replay_input(request);
-    let tools = response_tools(&request.tools);
+pub(crate) fn responses_request_body(request: &ProviderRequest) -> Result<Value, ProviderError> {
+    let input = replay_input(request)?;
+    let tools = response_tools(request)?;
     let mut body = json!({
         "model": request.model.as_str(),
         "input": input,
@@ -844,7 +861,7 @@ pub(crate) fn responses_request_body(request: &ProviderRequest) -> Value {
     if let Value::Object(body) = &mut body {
         body.extend(request.sampling_params.clone());
     }
-    body
+    Ok(body)
 }
 
 fn map_transport_error(error: TransportError) -> ProviderError {
@@ -915,21 +932,21 @@ mod tests {
             sampling_params: BTreeMap::new(),
             session_id: None,
         };
-        let body = responses_request_body(&request);
+        let body = responses_request_body(&request).unwrap();
         assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
         assert_eq!(body["reasoning"]["effort"], "high");
         assert!(body.get("max_output_tokens").is_none());
 
         request.thinking_level = pi_core::ThinkingLevel::Minimal;
-        let body = responses_request_body(&request);
+        let body = responses_request_body(&request).unwrap();
         assert_eq!(body["reasoning"]["effort"], "low");
 
         request.thinking_level = pi_core::ThinkingLevel::Max;
-        let body = responses_request_body(&request);
+        let body = responses_request_body(&request).unwrap();
         assert_eq!(body["reasoning"]["effort"], "max");
 
         request.thinking_level = pi_core::ThinkingLevel::Off;
-        let body = responses_request_body(&request);
+        let body = responses_request_body(&request).unwrap();
         assert!(body.get("reasoning").is_none());
     }
 
@@ -956,15 +973,15 @@ mod tests {
             session_id: None,
         };
 
-        let body = responses_request_body(&request);
+        let body = responses_request_body(&request).unwrap();
         assert_eq!(body["reasoning"]["effort"], "low");
 
         request.thinking_level = pi_core::ThinkingLevel::Low;
-        let body = responses_request_body(&request);
+        let body = responses_request_body(&request).unwrap();
         assert_eq!(body["reasoning"]["effort"], "low");
 
         request.thinking_level = pi_core::ThinkingLevel::Max;
-        let body = responses_request_body(&request);
+        let body = responses_request_body(&request).unwrap();
         assert_eq!(body["reasoning"]["effort"], "max");
     }
 
@@ -1101,6 +1118,46 @@ mod tests {
         assert_eq!(requests[1]["input"].as_array().unwrap().len(), 1);
         assert_eq!(requests[1]["input"][0]["role"], "user");
         assert_eq!(requests[1]["input"][0]["content"][0]["text"], "next");
+    }
+
+    #[test]
+    fn codex_strict_sampling_defaults_and_custom_continuations_match_pi() {
+        let mut request = request_with_messages(vec![]);
+        request.tools = vec![pi_core::ToolSpec {
+            name: "execute".into(),
+            label: String::new(),
+            description: String::new(),
+            parameters: json!({"type":"object"}),
+            output_schema: None,
+            constrained_sampling: None,
+            execution_mode: pi_core::ToolExecutionMode::Parallel,
+            prompt_snippet: None,
+            prompt_guidelines: vec![],
+        }];
+        assert_eq!(
+            responses_request_body(&request).unwrap()["tools"][0].get("strict"),
+            Some(&Value::Null)
+        );
+        request.tools[0].constrained_sampling = Some(pi_core::ConstrainedSampling::JsonSchema {
+            strict: pi_core::ToolSchemaStrict::Require,
+        });
+        assert_eq!(
+            responses_request_body(&request).unwrap()["tools"][0]["strict"],
+            true
+        );
+        let prompt = json!({"model":"model","input":[]});
+        let custom = json!({"type":"custom_tool_call","id":"ctc_1","call_id":"call_1","status":"completed","name":"execute","input":"text(1)"});
+        let continuation = WebSocketContinuation {
+            last_request_body: prompt.clone(),
+            last_response_id: "response".into(),
+            last_response_items: normalized_response_output(&json!({"output":[custom]})),
+        };
+        let mut next = prompt;
+        next["input"] =
+            json!([custom,{"type":"custom_tool_call_output","call_id":"call_1","output":"done"}]);
+        let continued = cached_websocket_request_body(&next, &continuation);
+        assert_eq!(continued["previous_response_id"], "response");
+        assert_eq!(continued["input"].as_array().unwrap().len(), 1);
     }
 
     #[test]

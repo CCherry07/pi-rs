@@ -55,10 +55,11 @@ pub use capabilities::{
     UiDialogRequest, UiDialogResponse, UiFocusTarget, UiHostOperation, UiHostRequest,
     UiInteraction, UiMouseButton, UiMouseEvent, UiMouseEventKind, UiMouseResult,
     UiMultiSelectAction, UiMultiSelectOption, UiMultiSelectRequest, UiMultiSelectResponse, UiNode,
-    UiNodeKind, UiOverlayAnchor, UiOverlayMargin, UiOverlayOptions, UiOverlayPosition,
-    UiProductCommand, UiRegion, UiRegionBounds, UiRegionPlacement, UiRegionSnapshot, UiShortcut,
-    UiSurfaceArea, UiSurfaceCommand, UiSurfaceEvent, UiSurfaceFrame, UiSurfaceSnapshot, UiTone,
-    UiTranscriptItem, UiTranscriptRender, UnavailablePluginContext,
+    UiNodeKind, UiNotification, UiOverlayAnchor, UiOverlayMargin, UiOverlayOptions,
+    UiOverlayPosition, UiProductCommand, UiRegion, UiRegionBounds, UiRegionPlacement,
+    UiRegionSnapshot, UiShortcut, UiSurfaceArea, UiSurfaceCommand, UiSurfaceEvent, UiSurfaceFrame,
+    UiSurfaceSnapshot, UiTone, UiTranscriptItem, UiTranscriptRender, UiWidgetPlacement,
+    UnavailablePluginContext,
 };
 pub use provider::{
     AfterProviderResponseEvent, BeforeProviderHeadersEvent, BeforeProviderRequestEvent,

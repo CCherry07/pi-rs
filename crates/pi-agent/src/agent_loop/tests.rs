@@ -310,6 +310,8 @@ mod agent_loop_with_agent_message {
         impl Tool for EditTool {
             fn spec(&self) -> ToolSpec {
                 ToolSpec {
+                    output_schema: None,
+                    constrained_sampling: None,
                     name: "edit".to_string(),
                     parameters: json!({"type": "object", "properties": {"edits": {"type": "array", "items": {"type": "object", "properties": {"oldText": {"type": "string"}, "newText": {"type": "string"}}, "required": ["oldText", "newText"]}}}, "required": ["edits"]}),
                     ..EchoTool::new(&self.0).spec()

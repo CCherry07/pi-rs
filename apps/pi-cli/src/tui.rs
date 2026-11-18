@@ -986,7 +986,7 @@ impl App {
             AgentSessionEvent::AgentEnd { messages, .. } => {
                 self.apply_agent_event(AgentEvent::AgentEnd { messages });
             }
-            AgentSessionEvent::AgentSettled => {
+            AgentSessionEvent::AgentSettled { .. } => {
                 self.awaiting_assistant = false;
                 self.working_started_at = None;
                 if let Some(index) = self.streaming_assistant.take()

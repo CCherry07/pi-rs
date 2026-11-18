@@ -403,6 +403,7 @@ impl AgentEventSink for NestedEvents {
                     tool_name: self.parent.name.clone(),
                     args: self.parent.arguments.clone(),
                     partial_result: ToolResult {
+                        structured_content: None,
                         content: Vec::new(),
                         details: Some(serde_json::json!({
                             "nested_call": { "id": id, "name": name, "status": status }

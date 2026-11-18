@@ -62,6 +62,8 @@ struct ResolvedOpenAiResponsesCompat {
     session_affinity_format: SessionAffinityFormat,
     supports_long_cache_retention: bool,
     supports_strict_mode: bool,
+    default_strict_null: bool,
+    supports_open_ai_grammar_tools: bool,
     supports_additional_tools: bool,
     supports_tool_search: bool,
     supports_explicit_prompt_cache_mode: bool,
@@ -72,6 +74,18 @@ struct ResolvedOpenAiResponsesCompat {
 }
 
 impl ResolvedOpenAiResponsesCompat {
+    fn for_codex_request(request: &ProviderRequest) -> Self {
+        let mut compat = Self::for_request(request);
+        compat.supports_strict_mode = request
+            .model_spec
+            .as_ref()
+            .and_then(|model| model.compat.as_ref())
+            .and_then(|config| config["supportsStrictMode"].as_bool())
+            .unwrap_or(true);
+        compat.default_strict_null = true;
+        compat
+    }
+
     fn for_request(request: &ProviderRequest) -> Self {
         let configured = request
             .model_spec
@@ -95,6 +109,10 @@ impl ResolvedOpenAiResponsesCompat {
             }),
             supports_long_cache_retention: configured.supports_long_cache_retention.unwrap_or(true),
             supports_strict_mode: configured.supports_strict_mode.unwrap_or(false),
+            default_strict_null: false,
+            supports_open_ai_grammar_tools: configured
+                .supports_open_ai_grammar_tools
+                .unwrap_or(false),
             supports_additional_tools: configured.supports_additional_tools.unwrap_or(false),
             supports_tool_search: configured.supports_tool_search.unwrap_or(false),
             supports_explicit_prompt_cache_mode: configured
@@ -209,7 +227,7 @@ impl Provider for OpenAiResponsesCompatibleProvider {
         let payload = context
             .before_provider_request(
                 &signal,
-                request_body_with_options(&request, cache_retention, chatgpt_sign_in),
+                request_body_with_options(&request, cache_retention, chatgpt_sign_in)?,
             )
             .await?;
         let response = post_json_with_provider_hooks(
@@ -239,14 +257,16 @@ impl Provider for OpenAiResponsesCompatibleProvider {
             )));
         }
 
+        let grammar = grammar_properties(&request)?;
         let effort = configuration_effort(&request, chatgpt_sign_in);
         Ok(Box::pin(
-            stream(
+            stream_with_grammar(
                 self.config.provider_id.clone(),
                 request.model,
                 OPENAI_RESPONSES_API,
                 response.body,
                 signal,
+                grammar,
             )
             .map(move |event| {
                 event.map(|mut event| {
@@ -288,44 +308,61 @@ pub fn input_items(messages: &[Message]) -> Vec<Value> {
 
 /// Model-aware replay for sibling Responses transports. Their system prompt
 /// remains in the transport-owned instructions field; explicit updates stay in input.
-pub(crate) fn replay_input(request: &ProviderRequest) -> Vec<Value> {
-    let mut compat = ResolvedOpenAiResponsesCompat::for_request(request);
+pub(crate) fn replay_input(request: &ProviderRequest) -> Result<Vec<Value>, ProviderError> {
+    let mut compat = ResolvedOpenAiResponsesCompat::for_codex_request(request);
     compat.supports_mid_convo_system_messages = true;
     input_items_with_deferred_tools(request, &compat, None)
 }
 
 /// Projects semantic tools into OpenAI Responses function definitions.
-pub fn tools(tools: &[ToolSpec]) -> Vec<Value> {
-    tools_with_compat(tools, false, false)
+pub fn tools(tools: &[ToolSpec]) -> Result<Vec<Value>, ProviderError> {
+    tools_with_compat(tools, true, false, false, false)
+}
+
+pub fn grammar_properties(
+    request: &ProviderRequest,
+) -> Result<BTreeMap<String, String>, ProviderError> {
+    pi_provider::grammar_tool_input_properties(
+        &request.tools,
+        ResolvedOpenAiResponsesCompat::for_request(request).supports_open_ai_grammar_tools,
+    )
+    .map_err(ProviderError::Protocol)
+}
+
+pub(crate) fn codex_tools(request: &ProviderRequest) -> Result<Vec<Value>, ProviderError> {
+    let compat = ResolvedOpenAiResponsesCompat::for_codex_request(request);
+    tools_with_compat(
+        &request.tools,
+        compat.supports_strict_mode,
+        compat.supports_open_ai_grammar_tools,
+        false,
+        true,
+    )
 }
 
 fn tools_with_compat(
     tools: &[ToolSpec],
     supports_strict_mode: bool,
+    supports_grammar: bool,
     defer_loading: bool,
-) -> Vec<Value> {
-    tools
-        .iter()
-        .map(|tool| {
-            let mut value = json!({
-                "type": "function",
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.parameters
-            });
-            if supports_strict_mode {
-                value["strict"] = Value::Bool(false);
-            }
-            if defer_loading {
-                value["defer_loading"] = Value::Bool(true);
-            }
+    strict_null: bool,
+) -> Result<Vec<Value>, ProviderError> {
+    tools.iter().map(|tool| {
+        let mut value = if let Some(grammar) = pi_provider::resolve_grammar_sampling(tool, supports_grammar).map_err(ProviderError::Protocol)? {
+            json!({"type":"custom","name":tool.name,"description":tool.description,"format":{"type":"grammar","syntax":grammar.format,"definition":grammar.definition}})
+        } else {
+            let strict = pi_provider::resolve_json_schema_sampling(tool, supports_strict_mode).map_err(ProviderError::Protocol)?;
+            let mut value = json!({"type":"function","name":tool.name,"description":tool.description,"parameters":strict.as_ref().unwrap_or(&tool.parameters)});
+            if supports_strict_mode { value["strict"] = if strict.is_some() { Value::Bool(true) } else if strict_null { Value::Null } else { Value::Bool(false) }; }
             value
-        })
-        .collect()
+        };
+        if defer_loading { value["defer_loading"] = Value::Bool(true); }
+        Ok(value)
+    }).collect()
 }
 
 /// Projects a semantic request into an OpenAI Responses payload.
-pub fn request_body(request: &ProviderRequest) -> Value {
+pub fn request_body(request: &ProviderRequest) -> Result<Value, ProviderError> {
     request_body_with_options(request, cache_retention(), false)
 }
 
@@ -333,7 +370,7 @@ fn request_body_with_options(
     request: &ProviderRequest,
     cache_retention: CacheRetention,
     chatgpt_sign_in: bool,
-) -> Value {
+) -> Result<Value, ProviderError> {
     let compat = ResolvedOpenAiResponsesCompat::for_request(request);
     let mut input = Vec::new();
     let system_prompt = if compat.supports_mid_convo_system_messages {
@@ -359,7 +396,7 @@ fn request_body_with_options(
         request,
         &compat,
         configuration_effort.as_deref(),
-    ));
+    )?);
     if let Some(effort) = &configuration_effort {
         input.push(json!({"type":"configuration_update","reasoning":{"effort":effort}}));
     }
@@ -370,7 +407,13 @@ fn request_body_with_options(
         .filter(|tool| !deferred_names.contains(&tool.name))
         .cloned()
         .collect::<Vec<_>>();
-    let tools = tools_with_compat(&immediate_tools, compat.supports_strict_mode, false);
+    let tools = tools_with_compat(
+        &immediate_tools,
+        compat.supports_strict_mode,
+        compat.supports_open_ai_grammar_tools,
+        false,
+        false,
+    )?;
     let mut payload = json!({
         "model": request.model.as_str(),
         "input": input,
@@ -444,7 +487,7 @@ fn request_body_with_options(
     if let Value::Object(payload) = &mut payload {
         payload.extend(request.sampling_params.clone());
     }
-    payload
+    Ok(payload)
 }
 
 fn configuration_effort(request: &ProviderRequest, chatgpt_sign_in: bool) -> Option<String> {
@@ -490,7 +533,7 @@ fn input_items_with_deferred_tools(
     request: &ProviderRequest,
     compat: &ResolvedOpenAiResponsesCompat,
     configuration_effort: Option<&str>,
-) -> Vec<Value> {
+) -> Result<Vec<Value>, ProviderError> {
     let mut items = Vec::new();
     let mut loaded = std::collections::HashSet::new();
     let by_name = request
@@ -570,7 +613,7 @@ fn input_items_with_deferred_tools(
             items.push(json!({
                 "type": "additional_tools",
                 "role": "developer",
-                "tools": tools_with_compat(&deferred, compat.supports_strict_mode, false)
+                "tools": tools_with_compat(&deferred, compat.supports_strict_mode, compat.supports_open_ai_grammar_tools, false, compat.default_strict_null)?
             }));
         } else if compat.supports_tool_search {
             let names = deferred
@@ -590,11 +633,71 @@ fn input_items_with_deferred_tools(
                 "call_id": call_id,
                 "execution": "client",
                 "status": "completed",
-                "tools": tools_with_compat(&deferred, compat.supports_strict_mode, true)
+                "tools": tools_with_compat(&deferred, compat.supports_strict_mode, compat.supports_open_ai_grammar_tools, true, compat.default_strict_null)?
             }));
         }
     }
-    items
+    apply_grammar_replay(&mut items, request, &grammar_properties(request)?)?;
+    Ok(items)
+}
+
+fn apply_grammar_replay(
+    items: &mut [Value],
+    request: &ProviderRequest,
+    properties: &BTreeMap<String, String>,
+) -> Result<(), ProviderError> {
+    let mut calls = std::collections::HashSet::new();
+    for message in &request.messages {
+        if let Message::ToolResult(result) = message
+            && properties.contains_key(&result.tool_name)
+        {
+            calls.insert(
+                result
+                    .tool_call_id
+                    .as_str()
+                    .split('|')
+                    .next()
+                    .unwrap_or_default()
+                    .to_string(),
+            );
+        }
+    }
+    for item in items {
+        if item["type"] == "function_call" {
+            let name = item["name"].as_str().unwrap_or_default();
+            if let Some(property) = properties.get(name) {
+                let arguments: Value =
+                    serde_json::from_str(item["arguments"].as_str().unwrap_or("{}"))
+                        .map_err(|error| ProviderError::Protocol(error.to_string()))?;
+                let input = arguments[property].as_str().ok_or_else(||ProviderError::Protocol(format!("Grammar tool call \"{name}\" requires argument \"{property}\" to be a string.")))?.to_string();
+                calls.insert(item["call_id"].as_str().unwrap_or_default().to_string());
+                let object = item
+                    .as_object_mut()
+                    .expect("projected tool calls are objects");
+                object.remove("arguments");
+                if object
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| !id.starts_with("ctc_"))
+                {
+                    object.remove("id");
+                }
+                object.insert("type".into(), json!("custom_tool_call"));
+                object.insert("input".into(), json!(input));
+            } else if item["id"].as_str().is_some_and(|id| !id.starts_with("fc_")) {
+                item.as_object_mut()
+                    .expect("projected tool calls are objects")
+                    .remove("id");
+            }
+        } else if item["type"] == "function_call_output"
+            && item["call_id"]
+                .as_str()
+                .is_some_and(|id| calls.contains(id))
+        {
+            item["type"] = json!("custom_tool_call_output");
+        }
+    }
+    Ok(())
 }
 
 /// Adapts an accepted OpenAI Responses SSE body into the semantic provider stream.
@@ -602,8 +705,19 @@ pub fn stream(
     provider: ProviderId,
     model: pi_core::ModelId,
     api: impl Into<String>,
+    body: HttpBodyStream,
+    signal: AbortSignal,
+) -> ProviderStream {
+    stream_with_grammar(provider, model, api, body, signal, BTreeMap::new())
+}
+
+pub fn stream_with_grammar(
+    provider: ProviderId,
+    model: pi_core::ModelId,
+    api: impl Into<String>,
     mut body: HttpBodyStream,
     signal: AbortSignal,
+    grammar: BTreeMap<String, String>,
 ) -> ProviderStream {
     let api = api.into();
     Box::pin(stream! {
@@ -611,7 +725,7 @@ pub fn stream(
             metadata: ResponseMetadata::new(provider, model.clone(), api, now_ms()),
         });
         let mut decoder = SseDecoder::new();
-        let mut state = StreamState::new(&model);
+        let mut state = StreamState::new(&model).with_grammar(grammar);
         loop {
             let next = tokio::select! {
                 _ = signal.wait() => { yield Err(ProviderError::Aborted); return; }
@@ -792,7 +906,7 @@ mod tests {
             session_id: Some("session-1".to_string()),
         };
 
-        let body = request_body_with_options(&request, CacheRetention::None, false);
+        let body = request_body_with_options(&request, CacheRetention::None, false).unwrap();
         assert_eq!(body["prompt_cache_options"]["mode"], "explicit");
         assert!(body.get("prompt_cache_key").is_none());
         assert_eq!(

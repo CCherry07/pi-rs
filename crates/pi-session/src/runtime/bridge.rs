@@ -26,9 +26,10 @@ pub(super) fn attach(session: &AgentSession) {
                 let committed = if let AgentEvent::MessageEnd { message } = &event {
                     let discovered = matches!(message, Message::ToolResult(result)
                         if !result.is_error && result.added_tool_names.as_ref().is_some_and(|names| !names.is_empty()));
+                    let captures_selection = discovered || matches!(message, Message::System(_) | Message::Assistant(_));
                     Some(
                         activity
-                            .message_ended(message, discovered.then_some(state.active_tools.as_slice()))
+                            .message_ended(message, captures_selection.then_some(state.active_tools.as_slice()))
                             .map_err(|error| EventError(error.to_string()))?,
                     )
                 } else {

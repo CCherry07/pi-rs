@@ -8,6 +8,8 @@ pub(crate) struct ChunkState {
     text_index: Option<usize>,
     thinking_index: Option<usize>,
     tools: BTreeMap<usize, usize>,
+    grammar_properties: BTreeMap<String, String>,
+    grammar_calls: BTreeMap<usize, (String, pi_provider::GrammarInputBuffer)>,
     next_index: usize,
     reason: Option<StopReason>,
     thinking_signature: Option<String>,
@@ -32,6 +34,8 @@ impl ChunkState {
             text_index: None,
             thinking_index: None,
             tools: BTreeMap::new(),
+            grammar_properties: BTreeMap::new(),
+            grammar_calls: BTreeMap::new(),
             next_index: 0,
             reason: None,
             thinking_signature: None,
@@ -43,6 +47,11 @@ impl ChunkState {
             response_id: None,
             response_model: None,
         }
+    }
+
+    pub(crate) fn with_grammar(mut self, properties: BTreeMap<String, String>) -> Self {
+        self.grammar_properties = properties;
+        self
     }
 
     pub(crate) fn for_model(supports_finish_reason: bool, model: &ModelId) -> Self {
@@ -151,7 +160,23 @@ impl ChunkState {
         if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
             for call in calls {
                 let source = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let custom = call.get("custom");
                 if !self.tools.contains_key(&source) {
+                    let name = custom
+                        .and_then(|custom| custom["name"].as_str())
+                        .or_else(|| call.pointer("/function/name").and_then(Value::as_str))
+                        .unwrap_or_default();
+                    if custom.is_some() || call["type"] == "custom" {
+                        let property = self.grammar_properties.get(name).ok_or_else(|| {
+                            ProviderError::Protocol(format!(
+                                "Received custom tool call for unconfigured grammar tool {name}"
+                            ))
+                        })?;
+                        self.grammar_calls.insert(
+                            source,
+                            (property.clone(), pi_provider::GrammarInputBuffer::default()),
+                        );
+                    }
                     let index = self.next_index;
                     self.next_index += 1;
                     events.push(StreamEvent::ToolCallStart {
@@ -159,13 +184,22 @@ impl ChunkState {
                         id: ToolCallId::new(
                             call.get("id").and_then(Value::as_str).unwrap_or_default(),
                         ),
-                        name: call
-                            .pointer("/function/name")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
+                        name: name.to_string(),
                     });
                     self.tools.insert(source, index);
+                }
+                if let Some((property, buffer)) = self.grammar_calls.get_mut(&source) {
+                    if let Some(input) = custom.and_then(|custom| custom["input"].as_str())
+                        && let Some(delta) = buffer
+                            .append(property, input)
+                            .map_err(ProviderError::Protocol)?
+                    {
+                        events.push(StreamEvent::ToolCallDelta {
+                            content_index: self.tools[&source],
+                            arguments_delta: delta,
+                        });
+                    }
+                    continue;
                 }
                 if let Some(value) = call
                     .pointer("/function/arguments")
@@ -193,14 +227,14 @@ impl ChunkState {
                     ..ResponseMetadataPatch::default()
                 },
             });
-            events.extend(self.close());
+            events.extend(self.close()?);
         }
         Ok(events)
     }
 
-    fn close(&mut self) -> Vec<StreamEvent> {
+    fn close(&mut self) -> Result<Vec<StreamEvent>, ProviderError> {
         if self.closed {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         self.closed = true;
         let mut events = Vec::new();
@@ -216,13 +250,23 @@ impl ChunkState {
                 text_signature: None,
             });
         }
-        for index in self.tools.values() {
+        for (source, index) in &self.tools {
+            if let Some((property, buffer)) = self.grammar_calls.get_mut(source)
+                && let Some(delta) = buffer
+                    .close(property, None)
+                    .map_err(ProviderError::Protocol)?
+            {
+                events.push(StreamEvent::ToolCallDelta {
+                    content_index: *index,
+                    arguments_delta: delta,
+                });
+            }
             events.push(StreamEvent::ToolCallEnd {
                 content_index: *index,
                 thought_signature: None,
             });
         }
-        events
+        Ok(events)
     }
 
     pub(crate) fn finish(&mut self) -> Result<Vec<StreamEvent>, ProviderError> {
@@ -238,7 +282,7 @@ impl ChunkState {
                 StopReason::ToolUse
             });
         }
-        let mut events = self.close();
+        let mut events = self.close()?;
         events.push(StreamEvent::Done {
             reason: self.reason.unwrap_or(StopReason::Stop),
             usage: self.usage.clone(),
@@ -296,6 +340,33 @@ fn truncate(value: &str, max: usize) -> &str {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn custom_tool_chunks_escape_input_and_close_empty_input() {
+        for source in ["", "text(\"你好\");\n"] {
+            let mut state = ChunkState::default()
+                .with_grammar(BTreeMap::from([("execute".into(), "source".into())]));
+            let mut events = state.consume(&json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call","type":"custom","custom":{"name":"execute","input":""}}]}}]})).unwrap();
+            events.extend(state.consume(&json!({"choices":[{"delta":{"tool_calls":[{"index":0,"custom":{"input":source}}]},"finish_reason":"tool_calls"}]})).unwrap());
+            let arguments = events
+                .iter()
+                .filter_map(|event| match event {
+                    StreamEvent::ToolCallDelta {
+                        arguments_delta, ..
+                    } => Some(arguments_delta.as_str()),
+                    _ => None,
+                })
+                .collect::<String>();
+            assert_eq!(
+                serde_json::from_str::<Value>(&arguments).unwrap(),
+                json!({"source":source})
+            );
+            assert!(matches!(
+                events.last(),
+                Some(StreamEvent::ToolCallEnd { .. })
+            ));
+        }
+    }
 
     #[test]
     fn parses_text_tools_and_cached_usage() {

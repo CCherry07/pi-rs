@@ -308,13 +308,10 @@ async fn extension_messages_and_entries_update_live_and_resumed_session_state() 
     };
 
     let custom_id = session.append_custom_message(custom.clone()).unwrap();
-    assert_eq!(
-        session
-            .set_name_immediate(Some("  Core\r\n\n session  ".to_string()))
-            .unwrap()
-            .as_deref(),
-        Some("Core  session")
-    );
+    session
+        .set_session_name(Some("  Core\r\n\n session  ".to_string()))
+        .unwrap();
+    assert_eq!(session.snapshot().name.as_deref(), Some("Core  session"));
     assert!(session.runtime().agent().state().messages.iter().any(
         |message| matches!(message, Message::Custom(value)
                 if value.custom_type == custom.custom_type
@@ -468,11 +465,21 @@ async fn new_session_options_preserve_an_exact_session_id_without_materializing(
 #[tokio::test]
 async fn summarized_tree_navigation_uses_a_standalone_provider_completion() {
     let directory = tempfile::tempdir().unwrap();
-    let runtime = scripted_runtime([
+    let plugin = ScriptedProviderPlugin::scripted([
         ScriptedTurn::Text("root answer".to_string()),
         ScriptedTurn::Text("branch answer".to_string()),
         ScriptedTurn::Text("## Goal\nPreserve the branch".to_string()),
     ]);
+    let provider = plugin.provider();
+    let runtime = PiRuntime::builder()
+        .provider_plugin(plugin)
+        .agent_options(AgentOptions {
+            provider_id: ProviderId::new("scripted"),
+            model_id: ModelId::new("test"),
+            ..AgentOptions::default()
+        })
+        .build()
+        .unwrap();
     let session = AgentSession::create(
         runtime,
         directory.path().join("session.jsonl"),
@@ -493,6 +500,13 @@ async fn summarized_tree_navigation_uses_a_standalone_provider_completion() {
         )
         .await
         .unwrap();
+    let requests = provider.requests();
+    assert_eq!(requests[2].max_output_tokens, None);
+    assert!(requests[2].tools.is_empty());
+    assert!(matches!(&requests[2].messages[..], [Message::User(user)]
+        if matches!(&user.content[..], [ContentBlock::Text(text)]
+            if text.text.starts_with("<conversation>\n[User]: branch work\n\n[Assistant]: branch answer\n</conversation>\n\n")
+                && text.text.ends_with("Additional focus: Focus on decisions"))));
     let document = session.store().load().unwrap();
     assert_eq!(
         document.labels.get(&summary_id).map(String::as_str),
@@ -505,6 +519,52 @@ async fn summarized_tree_navigation_uses_a_standalone_provider_completion() {
                     "The user explored a different conversation branch"
                 ) && summary.summary.contains("Preserve the branch"))
     }));
+}
+
+#[tokio::test]
+async fn truncated_branch_summary_is_rejected_without_changing_the_branch() {
+    let ScriptedTurn::Events(mut events) = text_turn_with_usage("unfinished checkpoint", 1) else {
+        unreachable!("fixture yields events");
+    };
+    for event in &mut events {
+        if let pi_core::StreamEvent::Done { reason, .. } = event {
+            *reason = StopReason::Length;
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let session = AgentSession::create(
+        scripted_runtime([
+            ScriptedTurn::Text("root answer".to_string()),
+            ScriptedTurn::Text("branch answer".to_string()),
+            ScriptedTurn::Events(events),
+        ]),
+        directory.path().join("session.jsonl"),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    session.prompt("root").await.unwrap();
+    let target = session.store().leaf_id().unwrap();
+    session.prompt("branch work").await.unwrap();
+    let previous_leaf = session.store().leaf_id();
+    let error = session
+        .summarize_branch_and_checkout(&target, None, false, None)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains(
+        "Branch summarization failed: generation hit the token cap and the summary is incomplete"
+    ));
+    assert_eq!(session.store().leaf_id(), previous_leaf);
+    assert!(
+        !session
+            .store()
+            .load()
+            .unwrap()
+            .entries
+            .iter()
+            .any(|record| matches!(record.entry, SessionEntry::BranchSummary(_)))
+    );
+    session.shutdown().await;
 }
 
 struct ExpandingCommandPlugin;
@@ -610,6 +670,7 @@ impl Plugin for BeforeStartInjectionPlugin {
         event: BeforeAgentStartEvent,
     ) -> Result<BeforeAgentStartPatch, PluginError> {
         Ok(BeforeAgentStartPatch {
+            prompt_state: None,
             prompt_contributions: Vec::new(),
             system_prompt: Some(format!("{}|injected", event.system_prompt)),
             messages: vec![Message::custom(CustomMessage {
@@ -815,7 +876,10 @@ async fn agent_settled_hooks_finish_before_the_product_event_and_isolate_failure
         .await
         .unwrap();
     while let Ok(event) = subscription.events.try_recv() {
-        assert!(!matches!(event.event, AgentSessionEvent::AgentSettled));
+        assert!(!matches!(
+            event.event,
+            AgentSessionEvent::AgentSettled { .. }
+        ));
     }
 
     release.notify_one();
@@ -826,7 +890,7 @@ async fn agent_settled_hooks_finish_before_the_product_event_and_isolate_failure
         .unwrap();
     let mut saw_settled = false;
     while let Ok(event) = subscription.events.try_recv() {
-        saw_settled |= matches!(event.event, AgentSessionEvent::AgentSettled);
+        saw_settled |= matches!(event.event, AgentSessionEvent::AgentSettled { .. });
     }
     assert!(saw_settled);
     assert!(
@@ -1236,6 +1300,7 @@ impl SessionShellExecutor for FixtureShellExecutor {
             exit_code: Some(0),
             cancelled: false,
             timed_out: false,
+            shell_exit_after: None,
             truncated: false,
             truncation: None,
             full_output_path: None,
@@ -1429,22 +1494,14 @@ async fn isolated_seed_is_deferred_and_does_not_bill_ancestor_responses() {
         crate::estimate_session_context_tokens(&document.entries, &context.messages);
     assert_eq!(inherited_estimate.usage_tokens, 0);
     assert!(crate::current_session_context_tokens(&document.entries, &context.messages).is_none());
-    let preparation = prepare_compaction(
-        &document.entries,
-        CompactionSettings::default(),
-        &Default::default(),
-        &GenericCompactionPolicy,
-    )
-    .unwrap();
-    let compacted_messages = preparation
-        .messages_to_summarize
-        .iter()
-        .chain(&preparation.turn_prefix_messages)
-        .chain(&preparation.retained_tail)
-        .collect::<Vec<_>>();
-    assert_eq!(
-        compacted_messages,
-        context.messages.iter().collect::<Vec<_>>()
+    assert!(
+        prepare_compaction(
+            &document.entries,
+            CompactionSettings::default(),
+            &Default::default(),
+            &GenericCompactionPolicy,
+        )
+        .is_none()
     );
     let child = prepared
         .activate(SessionStartEvent {
@@ -1459,6 +1516,27 @@ async fn isolated_seed_is_deferred_and_does_not_bill_ancestor_responses() {
     assert_eq!(outcome.new_messages.len(), 2);
     assert!(path.exists());
     let document = crate::SessionStore::open(&path).unwrap().1;
+    let context = document.context().unwrap();
+    let preparation = prepare_compaction(
+        &document.entries,
+        CompactionSettings {
+            keep_recent_tokens: 1,
+            ..Default::default()
+        },
+        &Default::default(),
+        &GenericCompactionPolicy,
+    )
+    .unwrap();
+    let compacted_messages = preparation
+        .messages_to_summarize
+        .iter()
+        .chain(&preparation.turn_prefix_messages)
+        .chain(&preparation.retained_tail)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        compacted_messages,
+        context.messages.iter().collect::<Vec<_>>()
+    );
     assert_eq!(document.context().unwrap().messages.len(), 4);
     assert_eq!(crate::aggregate_document_usage(&document).total_tokens, 7);
     assert_eq!(
@@ -1639,7 +1717,7 @@ async fn durable_queue_revisions_survive_abort_and_process_recovery() {
         }
         revisions.push(event.revision);
         saw_queue |= matches!(event.event, crate::AgentSessionEvent::QueueUpdate { .. });
-        saw_settled |= matches!(event.event, crate::AgentSessionEvent::AgentSettled);
+        saw_settled |= matches!(event.event, crate::AgentSessionEvent::AgentSettled { .. });
     }
     assert!(revisions.windows(2).all(|pair| pair[0] < pair[1]));
     assert!(saw_queue && saw_settled);
@@ -2250,10 +2328,7 @@ async fn manual_compaction_uses_an_isolated_tool_free_completion() {
     assert_eq!(requests.len(), 2);
     assert!(requests[1].tools.is_empty());
     assert_eq!(requests[1].system_prompt, SUMMARIZATION_SYSTEM_PROMPT);
-    assert_eq!(
-        requests[1].max_output_tokens,
-        Some(CompactionSettings::default().reserve_tokens / 2)
-    );
+    assert_eq!(requests[1].max_output_tokens, None);
     assert!(
         session
             .store()
@@ -2266,7 +2341,7 @@ async fn manual_compaction_uses_an_isolated_tool_free_completion() {
 }
 
 #[tokio::test]
-async fn manual_compaction_uses_active_model_reasoning_and_output_limits() {
+async fn manual_compaction_uses_active_model_reasoning_without_a_reserve_based_output_cap() {
     struct LimitedCatalog;
 
     #[pi_plugin::provider_plugin]
@@ -2320,7 +2395,7 @@ async fn manual_compaction_uses_active_model_reasoning_and_output_limits() {
 
     let requests = provider.requests();
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[1].max_output_tokens, Some(32));
+    assert_eq!(requests[1].max_output_tokens, None);
     assert_eq!(requests[1].thinking_level, ThinkingLevel::Off);
 }
 
@@ -2385,6 +2460,7 @@ async fn overflow_compaction_drops_the_failed_assistant_and_retries_once() {
     let agent_ends = Arc::new(AtomicUsize::new(0));
     let agent_settled = Arc::new(AtomicUsize::new(0));
     let provider_plugin = ScriptedProviderPlugin::scripted([
+        ScriptedTurn::Text("previous answer".to_string()),
         ScriptedTurn::Error("context window token length exceeded".to_string()),
         ScriptedTurn::Text("overflow summary".to_string()),
         ScriptedTurn::Text("recovered answer".to_string()),
@@ -2414,6 +2490,7 @@ async fn overflow_compaction_drops_the_failed_assistant_and_retries_once() {
     .await
     .unwrap();
 
+    session.prompt("previous request").await.unwrap();
     let pi_session::PromptOutcome::Agent(outcome) =
         session.prompt("recover this request").await.unwrap()
     else {
@@ -2421,9 +2498,9 @@ async fn overflow_compaction_drops_the_failed_assistant_and_retries_once() {
     };
 
     assert_eq!(outcome.stop, AgentLoopStop::Completed);
-    assert_eq!(provider.requests().len(), 3);
-    assert_eq!(agent_ends.load(Ordering::SeqCst), 2);
-    assert_eq!(agent_settled.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.requests().len(), 4);
+    assert_eq!(agent_ends.load(Ordering::SeqCst), 3);
+    assert_eq!(agent_settled.load(Ordering::SeqCst), 2);
     assert!(
         matches!(outcome.final_context.messages.last(), Some(Message::Assistant(message))
         if matches!(&message.content[0], ContentBlock::Text(text) if text.text == "recovered answer"))

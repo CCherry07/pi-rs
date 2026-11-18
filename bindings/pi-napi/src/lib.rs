@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
 use napi::Status;
-use napi::bindgen_prelude::{FnArgs, Promise};
+use napi::bindgen_prelude::{Buffer, FnArgs, Promise};
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 use pi_core::ToolUpdate;
@@ -41,6 +41,7 @@ type DispatchFunction =
 pub struct NativeExtensionContext {
     handle: RwLock<PluginContextHandle>,
     updates: Option<ToolUpdateSink>,
+    bash_output: Option<pi_plugin::BashOutputSink>,
     pending_requests: pending_requests::PendingRequests,
 }
 
@@ -115,6 +116,21 @@ impl NativeExtensionContext {
             self.replace_handle(replacement);
         }
         encode_context_result(result.value)
+    }
+
+    #[napi]
+    pub fn bash_data(&self, data: Buffer) -> napi::Result<()> {
+        self.current_handle()
+            .access_for_adapter()
+            .map_err(context_error)?;
+        let output = self.bash_output.as_ref().ok_or_else(|| {
+            napi::Error::new(
+                Status::GenericFailure,
+                "shell output is unavailable for this callback".to_string(),
+            )
+        })?;
+        output(data.to_vec());
+        Ok(())
     }
 
     #[napi]
@@ -216,6 +232,17 @@ impl NativePiHost {
         context: Option<PluginContextHandle>,
         updates: Option<ToolUpdateSink>,
     ) -> Result<Value, JsCallbackError> {
+        self.request_with_output(operation, context, updates, None)
+            .await
+    }
+
+    async fn request_with_output(
+        &self,
+        operation: JsHostOperation,
+        context: Option<PluginContextHandle>,
+        updates: Option<ToolUpdateSink>,
+        bash_output: Option<pi_plugin::BashOutputSink>,
+    ) -> Result<Value, JsCallbackError> {
         let operation = self.encode(&operation)?;
         let promise = self
             .dispatch
@@ -224,6 +251,7 @@ impl NativePiHost {
                 context.map(|handle| NativeExtensionContext {
                     handle: RwLock::new(handle),
                     updates,
+                    bash_output,
                     pending_requests: Default::default(),
                 }),
             )))
@@ -313,6 +341,21 @@ impl JsCallbackDispatcher for NativePiHost {
             JsHostOperation::Invoke { invocation },
             Some(context),
             Some(updates),
+        )
+        .await
+    }
+
+    async fn invoke_with_bash_output(
+        &self,
+        invocation: JsInvocation,
+        context: PluginContextHandle,
+        output: pi_plugin::BashOutputSink,
+    ) -> Result<Value, JsCallbackError> {
+        self.request_with_output(
+            JsHostOperation::Invoke { invocation },
+            Some(context),
+            None,
+            Some(output),
         )
         .await
     }

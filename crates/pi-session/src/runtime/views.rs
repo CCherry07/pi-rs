@@ -12,6 +12,16 @@ use crate::{
     SessionError, SessionHeader, SessionRecord, SessionStats, SessionStore,
 };
 
+impl super::AgentSession {
+    /// Canonical session context before provider conversion, including opaque message extensions.
+    pub fn context_messages(&self) -> Result<Vec<crate::AgentMessage>, SessionError> {
+        Ok(self
+            .store
+            .context_with_options(self.context_updates.options())?
+            .messages)
+    }
+}
+
 /// Generation and catalog queries. This view cannot configure or reload the session.
 /// Read the current tool selection from `session.snapshot().agent.active_tools`.
 ///
@@ -97,6 +107,10 @@ impl<'a> SessionCatalog<'a> {
 
     pub fn command_specs(&self) -> Vec<CommandSpec> {
         self.runtime.command_specs()
+    }
+
+    pub fn command_catalog(&self) -> Vec<pi_plugin::CommandCatalogEntry> {
+        self.runtime.command_catalog()
     }
 
     pub fn plugin_order(&self) -> Vec<PluginId> {

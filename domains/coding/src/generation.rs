@@ -213,6 +213,7 @@ impl SessionGenerationFactory for ProductSessionFactory {
                     Some(&config.cwd),
                     project_trusted,
                 )
+                .with_tool_search_registration(false)
                 .prepare()
                 .await
                 .map_err(SessionError::Runtime)?,
@@ -365,6 +366,9 @@ impl SessionGenerationFactory for ProductSessionFactory {
             ),
         )
         .initial_model_fallback_message(initial_model_fallback_message)
+        .settings_writer(Arc::new(crate::configuration::CodingSessionSettings(
+            self.settings.clone(),
+        )))
         .additional_active_tools(additional_active_tools(
             &runtime,
             reload_registered_tools.as_deref(),

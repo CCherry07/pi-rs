@@ -350,3 +350,145 @@ async fn effort_changes_preserve_previous_request_prefix_and_stamp_only_managed_
         );
     }
 }
+
+fn grammar_tool() -> pi_core::ToolSpec {
+    pi_core::ToolSpec {
+        name: "execute".into(),
+        label: "Execute".into(),
+        description: "Execute source".into(),
+        parameters: json!({"type":"object","properties":{"source":{"type":"string"}},"required":["source"]}),
+        output_schema: None,
+        constrained_sampling: Some(pi_core::ConstrainedSampling::Grammar {
+            variants: BTreeMap::from([(
+                pi_core::GrammarFormat::OpenAiLark,
+                "start: /[\\s\\S]*/".into(),
+            )]),
+        }),
+        execution_mode: pi_core::ToolExecutionMode::Parallel,
+        prompt_snippet: None,
+        prompt_guidelines: vec![],
+    }
+}
+
+#[tokio::test]
+async fn grammar_stream_and_replay_preserve_raw_input_and_custom_item_ids() {
+    let source = "text(\"你好\");\nreturn `done`";
+    let mut initial = request(vec![user("run")], ThinkingLevel::Off);
+    initial.tools = vec![grammar_tool()];
+    initial.model_spec.as_mut().unwrap().compat = Some(json!({"supportsOpenAIGrammarTools":true}));
+    let added = json!({"type":"custom_tool_call","id":"ctc_1","call_id":"call_1","name":"execute","input":""});
+    let mut completed = added.clone();
+    completed["input"] = json!(source);
+    let (body, answer) = run(initial.clone(), "sk-fixture", vec![
+        json!({"type":"response.output_item.added","output_index":0,"item":added}),
+        json!({"type":"response.custom_tool_call_input.delta","output_index":0,"delta":"text(\""}),
+        json!({"type":"response.custom_tool_call_input.delta","output_index":0,"delta":"你好\");\n"}),
+        json!({"type":"response.custom_tool_call_input.done","output_index":0,"input":source}),
+        json!({"type":"response.output_item.done","output_index":0,"item":completed}),
+        json!({"type":"response.completed","response":{"status":"completed","output":[completed]}}),
+    ]).await;
+    assert_eq!(body["tools"][0]["type"], "custom");
+    assert_eq!(body["tools"][0]["format"]["syntax"], "lark");
+    assert_eq!(answer.tool_calls()[0].id.as_str(), "call_1|ctc_1");
+    assert_eq!(answer.tool_calls()[0].arguments, json!({"source":source}));
+    initial.messages.push(Message::assistant(answer));
+    initial.messages.push(serde_json::from_value(json!({"role":"toolResult","toolCallId":"call_1|ctc_1","toolName":"execute","content":[{"type":"text","text":"done"}],"isError":false,"timestamp":3})).unwrap());
+    for enabled in [true, false] {
+        initial.model_spec.as_mut().unwrap().compat =
+            Some(json!({"supportsOpenAIGrammarTools":enabled}));
+        let (body, _) = run(initial.clone(), "sk-fixture", text_events()).await;
+        let input = body["input"].as_array().unwrap();
+        let call = &input[1];
+        assert_eq!(
+            call["type"],
+            if enabled {
+                "custom_tool_call"
+            } else {
+                "function_call"
+            }
+        );
+        assert_eq!(call.get("id"), enabled.then_some(&json!("ctc_1")));
+        if enabled {
+            assert_eq!(call["input"], source);
+        } else {
+            assert_eq!(
+                serde_json::from_str::<Value>(call["arguments"].as_str().unwrap()).unwrap(),
+                json!({"source":source})
+            );
+        }
+        assert_eq!(
+            input[2]["type"],
+            if enabled {
+                "custom_tool_call_output"
+            } else {
+                "function_call_output"
+            }
+        );
+        assert_eq!(input[2]["call_id"], "call_1");
+    }
+}
+
+#[tokio::test]
+async fn grammar_final_only_empty_input_closes_to_valid_json() {
+    let mut initial = request(vec![user("run")], ThinkingLevel::Off);
+    initial.tools = vec![grammar_tool()];
+    initial.model_spec.as_mut().unwrap().compat = Some(json!({"supportsOpenAIGrammarTools":true}));
+    let completed = json!({"type":"custom_tool_call","id":"ctc_1","call_id":"call_1","name":"execute","input":""});
+    let (_, answer) = run(
+        initial,
+        "sk-fixture",
+        vec![
+            json!({"type":"response.output_item.done","output_index":0,"item":completed}),
+            json!({"type":"response.completed","response":{"status":"completed"}}),
+        ],
+    )
+    .await;
+    assert_eq!(answer.tool_calls()[0].arguments, json!({"source":""}));
+}
+
+#[tokio::test]
+async fn strict_tools_convert_safely_and_required_support_fails_before_http() {
+    let mut initial = request(vec![user("run")], ThinkingLevel::Off);
+    let mut tool = grammar_tool();
+    tool.parameters = json!({"type":"object","properties":{"source":{"type":"string"},"limit":{"type":"integer"}},"required":["source"]});
+    tool.constrained_sampling = Some(pi_core::ConstrainedSampling::JsonSchema {
+        strict: pi_core::ToolSchemaStrict::Prefer,
+    });
+    initial.tools = vec![tool];
+    initial.model_spec.as_mut().unwrap().compat = Some(json!({"supportsStrictMode":true}));
+    let (body, _) = run(initial.clone(), "sk-fixture", text_events()).await;
+    let tool = &body["tools"][0];
+    assert_eq!(tool["strict"], true);
+    let mut required = tool["parameters"]["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|name| name.as_str().unwrap())
+        .collect::<Vec<_>>();
+    required.sort_unstable();
+    assert_eq!(required, ["limit", "source"]);
+    assert_eq!(
+        tool["parameters"]["properties"]["limit"]["anyOf"][1],
+        json!({"type":"null"})
+    );
+    assert!(
+        initial.tools[0].parameters["properties"]["limit"]
+            .get("anyOf")
+            .is_none()
+    );
+    initial.tools[0].parameters["additionalProperties"] = json!(true);
+    let (body, _) = run(initial.clone(), "sk-fixture", text_events()).await;
+    assert_eq!(body["tools"][0]["strict"], false);
+    initial.tools[0].constrained_sampling = Some(pi_core::ConstrainedSampling::JsonSchema {
+        strict: pi_core::ToolSchemaStrict::Require,
+    });
+    let error = pi_plugin_openai::responses::request_body(&initial).unwrap_err();
+    assert!(error.to_string().contains("additionalProperties"));
+    initial.model_spec.as_mut().unwrap().compat = Some(json!({"supportsStrictMode":false}));
+    assert!(
+        pi_plugin_openai::responses::request_body(&initial)
+            .unwrap_err()
+            .to_string()
+            .contains("strict tools are unsupported")
+    );
+}

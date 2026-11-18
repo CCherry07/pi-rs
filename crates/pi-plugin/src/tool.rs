@@ -45,6 +45,25 @@ pub struct ToolInfo {
     pub discovery: ToolDiscovery,
 }
 
+/// Original metadata for one request. Description rewrites never feed back into this view.
+#[derive(Debug, Clone, Default)]
+pub struct ToolLoadout {
+    pub declared: Vec<ToolInfo>,
+    pub callable: Vec<ToolInfo>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ToolLoadoutChanges {
+    pub descriptions: std::collections::BTreeMap<String, String>,
+    pub hidden_declarations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PreparedToolLoadout {
+    pub tools: Vec<ToolSpec>,
+    pub hidden_tools: Vec<String>,
+}
+
 /// A nested call does not create a model-visible tool-result message. The
 /// caller decides what to expose from the final, hook-processed result.
 #[derive(Debug, Clone)]
@@ -257,6 +276,10 @@ impl Tool for ScopedTool {
         self.inner.structured_output(result)
     }
 
+    fn prepare_loadout(&self, loadout: &ToolLoadout) -> ToolLoadoutChanges {
+        self.inner.prepare_loadout(loadout)
+    }
+
     async fn prepare_arguments(
         &self,
         context: &ToolContext,
@@ -312,8 +335,12 @@ pub trait Tool: Send + Sync {
 
     /// Opt in to structured nested results. Ordinary tools expose text; their
     /// internal `details` remain presentation data rather than a result schema.
-    fn structured_output(&self, _result: &ToolResult) -> Option<Value> {
-        None
+    fn structured_output(&self, result: &ToolResult) -> Option<Value> {
+        result.structured_content.clone()
+    }
+
+    fn prepare_loadout(&self, _loadout: &ToolLoadout) -> ToolLoadoutChanges {
+        ToolLoadoutChanges::default()
     }
 
     async fn prepare_arguments(
@@ -352,6 +379,8 @@ mod tests {
     impl Tool for ReachingTool {
         fn spec(&self) -> ToolSpec {
             ToolSpec {
+                output_schema: None,
+                constrained_sampling: None,
                 name: "entry".into(),
                 label: "Entry".into(),
                 description: "Discovery entry point".into(),

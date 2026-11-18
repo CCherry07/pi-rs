@@ -45,6 +45,7 @@ impl SessionActivity {
         // If cancelled before consumption it can be durably requeued as usual.
         item.kind = Some(QueueKind::NextRun);
         item.run_id = None;
+        item.deliver_on_prompt = false;
         state.active_run = Some(ActiveSessionRun {
             id: run_id.clone(),
             generation,
@@ -139,7 +140,9 @@ impl SessionActivity {
                 for item in &mut replacement {
                     item.target.id = next_unique_id("entry");
                     if recovered {
-                        item.kind = Some(QueueKind::NextRun);
+                        if !item.deliver_on_prompt {
+                            item.kind = Some(QueueKind::NextRun);
+                        }
                         item.run_id = None;
                     }
                     records.push(NewLaneRecord {

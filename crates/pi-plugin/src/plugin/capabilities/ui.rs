@@ -10,10 +10,61 @@ use super::{NoticeLevel, PluginContextHandle, PluginContextResult, PresentationM
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "camelCase")]
 pub enum UiDialogRequest {
-    Confirm { title: String, message: String },
-    Select { title: String, options: Vec<String> },
-    Input { title: String, placeholder: String },
-    Editor { title: String, prefill: String },
+    Confirm {
+        title: String,
+        message: String,
+    },
+    Select {
+        title: String,
+        options: Vec<String>,
+    },
+    Input {
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        placeholder: Option<String>,
+    },
+    Editor {
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefill: Option<String>,
+    },
+}
+
+/// A one-way semantic presentation update, independent of terminal components.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum UiNotification {
+    Notify {
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        level: Option<NoticeLevel>,
+    },
+    Status {
+        key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+    },
+    Widget {
+        key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lines: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        placement: Option<UiWidgetPlacement>,
+    },
+    Title {
+        title: String,
+    },
+    EditorText {
+        text: String,
+    },
+}
+
+/// Placement supported by text widgets in semantic frontends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UiWidgetPlacement {
+    AboveEditor,
+    BelowEditor,
 }
 
 /// A completed semantic dialog. Cancellation differs from an unsupported capability.
@@ -54,6 +105,14 @@ pub trait UiContextAccess: Send + Sync {
     }
 
     fn ui_notify(&self, _level: NoticeLevel, _message: String) -> PluginContextResult<()> {
+        unbound()
+    }
+
+    /// Delivers a semantic presentation update without waiting for user input.
+    fn ui_notification(&self, notification: UiNotification) -> PluginContextResult<()> {
+        if let UiNotification::Notify { message, level } = notification {
+            return self.ui_notify(level.unwrap_or(NoticeLevel::Info), message);
+        }
         unbound()
     }
 
@@ -142,6 +201,11 @@ impl UiContext {
         self.handle.access()?.ui_notify(level, message.into())
     }
 
+    /// Sends a semantic update to a frontend that supports presentation notifications.
+    pub fn notification(&self, notification: UiNotification) -> PluginContextResult<()> {
+        self.handle.access()?.ui_notification(notification)
+    }
+
     /// Requests a binary decision from the active product UI.
     ///
     /// Presentation and input handling remain owned by the frontend; plugins
@@ -225,7 +289,7 @@ impl UiContext {
             .ui_dialog(
                 UiDialogRequest::Input {
                     title: title.clone(),
-                    placeholder: placeholder.clone(),
+                    placeholder: Some(placeholder.clone()),
                 },
                 None,
             )
@@ -263,7 +327,7 @@ impl UiContext {
             .ui_dialog(
                 UiDialogRequest::Editor {
                     title: title.clone(),
-                    prefill: prefill.clone(),
+                    prefill: Some(prefill.clone()),
                 },
                 None,
             )

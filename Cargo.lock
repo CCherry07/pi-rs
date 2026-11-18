@@ -1871,6 +1871,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "icu_collator"
+version = "2.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08984ed58ac439ebf3e13d2cf26b0c46a60afcd21721c1d14087c0b240344dda"
+dependencies = [
+ "icu_collator_data",
+ "icu_collections",
+ "icu_locale_core",
+ "icu_locale_fallback",
+ "icu_normalizer",
+ "icu_properties",
+ "icu_provider",
+ "smallvec",
+ "utf16_iter",
+ "utf8_iter",
+ "zerovec",
+]
+
+[[package]]
+name = "icu_collator_data"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7d7e54efdddeb1208c08dd5d32b53a879ac00d2d3d051b2255fd26821d16368"
+
+[[package]]
 name = "icu_collections"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1881,6 +1906,21 @@ dependencies = [
  "utf8_iter",
  "yoke",
  "zerofrom",
+ "zerovec",
+]
+
+[[package]]
+name = "icu_locale"
+version = "2.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "785f595c61ef57169a467eeed7b4b6936a66f6cacbb116a96ee86da983251bf4"
+dependencies = [
+ "icu_collections",
+ "icu_locale_core",
+ "icu_locale_data",
+ "icu_locale_fallback",
+ "icu_provider",
+ "tinystr",
  "zerovec",
 ]
 
@@ -1897,6 +1937,12 @@ dependencies = [
  "writeable",
  "zerovec",
 ]
+
+[[package]]
+name = "icu_locale_data"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d37d91460e362a5cf58907cd7ce871411775ee6294e49a5cc8e6cec16dfa75ea"
 
 [[package]]
 name = "icu_locale_fallback"
@@ -1929,6 +1975,9 @@ dependencies = [
  "icu_properties",
  "icu_provider",
  "smallvec",
+ "utf16_iter",
+ "utf8_iter",
+ "write16",
  "zerovec",
 ]
 
@@ -3138,12 +3187,14 @@ dependencies = [
  "pi-plugin-models",
  "pi-plugin-openai",
  "pi-plugin-openrouter",
+ "pi-plugin-powershell",
  "pi-plugin-prompts",
  "pi-plugin-read",
  "pi-plugin-schedule",
  "pi-plugin-session-transfer",
  "pi-plugin-skills",
  "pi-plugin-subagents",
+ "pi-plugin-tool-search",
  "pi-plugin-write",
  "pi-plugin-xai",
  "pi-provider",
@@ -3411,6 +3462,7 @@ dependencies = [
  "rquickjs",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
@@ -3532,6 +3584,8 @@ name = "pi-plugin-ls"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "icu_collator",
+ "icu_locale",
  "pi-core",
  "pi-plugin",
  "pi-tool-support",
@@ -3713,6 +3767,21 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tokio",
+]
+
+[[package]]
+name = "pi-plugin-powershell"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "pi-core",
+ "pi-plugin",
+ "pi-plugin-bash",
+ "pi-shell",
+ "pi-tool-support",
+ "serde_json",
+ "tempfile",
  "tokio",
 ]
 
@@ -3906,7 +3975,11 @@ dependencies = [
  "pi-agent",
  "pi-core",
  "pi-plugin",
+ "pi-plugin-prompts",
+ "pi-plugin-skills",
+ "pi-runtime",
  "pi-session",
+ "pi-test-support",
  "rustix 1.1.4",
  "serde",
  "serde_json",
@@ -3990,6 +4063,8 @@ dependencies = [
 name = "pi-shell"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "nix 0.31.3",
  "pi-core",
  "tempfile",
  "thiserror 2.0.20",
@@ -4026,6 +4101,7 @@ dependencies = [
  "pi-plugin",
  "serde_json",
  "tempfile",
+ "tokio",
  "unicode-normalization",
  "url",
  "xxhash-rust",
@@ -5972,6 +6048,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 
 [[package]]
+name = "utf16_iter"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c7de35d9d8757dbc1f5125dc8b51438c68b4430546a735c3a9b91aaaaf9a18a"
+dependencies = [
+ "utf_types",
+]
+
+[[package]]
 name = "utf8_iter"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5982,6 +6067,12 @@ name = "utf8parse"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
+
+[[package]]
+name = "utf_types"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a3b425286980a367278453f3b6d28cdcb134b574e5a35824a6ff5eebad50bb6"
 
 [[package]]
 name = "uuid"
@@ -6583,6 +6674,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "write16"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1890f4022759daae28ed4fe62859b1236caebfc61ede2f63ed4e695f3f6d936"
+
+[[package]]
 name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6695,9 +6792,9 @@ dependencies = [
 
 [[package]]
 name = "zerovec"
-version = "0.11.7"
+version = "0.11.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94b5c6b5976d66c1d703c4fd17d3f5e43c8cedaacf604961b171adc7130896d8"
+checksum = "bb0464e17806c1d976d5cba29399c7f08e516e279e2ba493f63123b5fca67dd8"
 dependencies = [
  "serde",
  "yoke",

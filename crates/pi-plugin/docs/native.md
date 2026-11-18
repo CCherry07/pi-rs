@@ -341,6 +341,24 @@ frontends. Cancelled dialogs do not open a fallback surface. The extended trait 
 exact-build source fingerprint; rebuild native plugins against this SDK. Constructor symbols and
 library lifetime remain unchanged.
 
+`UiContext::notification` sends typed `UiNotification` updates for notices, keyed statuses, text
+widgets, titles and editor text through the frontend's semantic bridge. Text widgets carry an
+optional `UiWidgetPlacement`; omitted status text or widget lines clears that key. RPC preserves
+omitted optional fields separately from empty text, including dialog placeholders and editor
+prefills. These capability and request changes are covered by the exact-build source fingerprint;
+native plugins must be rebuilt against this SDK.
+
+`Plugin::model_select` observes completed model selections with the previous model and the
+selection source. Product model changes await these observers. `Plugin::thinking_level_select`
+observes changed, clamped thinking levels without delaying the setter response, including changes
+caused by a model switch. Both use `SessionPluginContext` and the generation's unified driver.
+`Plugin::user_bash` runs in registration order before a user shell command. The first handler can
+return a complete `UserBashResult` or an `Arc<dyn UserBashOperations>` backend; failures prevent
+fallback execution. Backends receive the command, cwd, abort signal and raw-byte output sink, while
+the session owns streaming, capture and persistence. A completed override works without a local
+shell executor and preserves lazy session-file creation. These Session hook and routing changes
+are covered by the exact-build source fingerprint; rebuild native plugins against this SDK.
+
 ABI 34 introduced shared context snapshots. Context events and boundary-preview entry/message vectors
 use shared `Arc<Vec<_>>` snapshots. Read through the shared view; use `Arc::unwrap_or_clone` or
 `Arc::make_mut` when preparing an owned context replacement. `Plugin::context_hook_batch` optionally
@@ -442,3 +460,19 @@ exact target selection, dependency locking, SHA-256 verification, and a content-
 store. See [plugin manager](../../pi-plugin-manager/README.md) for the release and
 Registry formats. Publisher signatures, Git repository sources, OCI artifacts, update, rollback,
 and store garbage collection remain later distribution milestones.
+
+## Prompt and tool declarations
+
+ABI 36 carries `RunSystemPrompt` in agent-start events and patches. A prepared, domain-owned
+renderer resolves run-local options into ordered system sections. Plugins can update the options
+and render them through that state, or return `system_prompt` for an opaque replacement.
+
+`ToolSpec` advertises optional `output_schema` and typed `constrained_sampling`. Structured
+results live in `ToolResult::structured_content`; declare their shape when returning them.
+`ToolResultPatch::structured_content` explicitly replaces that value. Replacing `content` alone
+drops stale structured output, matching Pi; return both fields to retain a structured result.
+This layout change is covered by the exact-build fingerprint: rebuild native plugins against
+the same SDK. Descriptor symbols and library lifetime are unchanged.
+`Tool::prepare_loadout` can rewrite descriptions and hide declarations for the current request.
+It receives original scoped metadata and never mutates the published registry or execution rights.
+Host and native plugins must rebuild against the same ABI and build fingerprint.

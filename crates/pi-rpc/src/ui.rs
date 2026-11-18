@@ -4,14 +4,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use pi_plugin::{NoticeLevel, UiDialogRequest, UiDialogResponse};
+use pi_plugin::{NoticeLevel, UiDialogRequest, UiDialogResponse, UiNotification};
 use pi_session::PluginUiBridge;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::output::RpcOutput;
-use crate::rpc::MAX_RPC_LINE_BYTES;
 
 enum AnswerKind {
     Confirmation,
@@ -134,24 +133,13 @@ impl PluginUiBridge for RpcUiBridge {
         request: UiDialogRequest,
         timeout_ms: Option<u64>,
     ) -> Result<Option<UiDialogResponse>, String> {
-        let (kind, mut request) = match request {
-            UiDialogRequest::Confirm { title, message } => (
-                AnswerKind::Confirmation,
-                json!({"method":"confirm", "title":title, "message":message}),
-            ),
-            UiDialogRequest::Select { title, options } => (
-                AnswerKind::Text,
-                json!({"method":"select", "title":title, "options":options}),
-            ),
-            UiDialogRequest::Input { title, placeholder } => (
-                AnswerKind::Text,
-                json!({"method":"input", "title":title, "placeholder":placeholder}),
-            ),
-            UiDialogRequest::Editor { title, prefill } => (
-                AnswerKind::Text,
-                json!({"method":"editor", "title":title, "prefill":prefill}),
-            ),
+        let kind = match &request {
+            UiDialogRequest::Confirm { .. } => AnswerKind::Confirmation,
+            UiDialogRequest::Select { .. }
+            | UiDialogRequest::Input { .. }
+            | UiDialogRequest::Editor { .. } => AnswerKind::Text,
         };
+        let mut request = serde_json::to_value(request).map_err(|error| error.to_string())?;
         // Pi's editor wire request has no timeout field.
         let timeout_ms = timeout_ms.filter(|value| *value > 0 && request["method"] != "editor");
         let id = uuid::Uuid::now_v7().to_string();
@@ -193,10 +181,50 @@ impl PluginUiBridge for RpcUiBridge {
     }
 
     fn notify(&self, level: NoticeLevel, message: String) -> Result<bool, String> {
-        self.output.enqueue(json!({
-            "type":"extension_ui_request", "id":uuid::Uuid::now_v7().to_string(),
-            "method":"notify", "message":message, "notifyType":level,
-        }))?;
+        self.notification(UiNotification::Notify {
+            message,
+            level: Some(level),
+        })
+    }
+
+    fn notification(&self, notification: UiNotification) -> Result<bool, String> {
+        let mut request = match notification {
+            UiNotification::Notify { message, level } => {
+                let mut request = json!({"method":"notify", "message":message});
+                if let Some(level) = level {
+                    request["notifyType"] = json!(level);
+                }
+                request
+            }
+            UiNotification::Status { key, text } => {
+                let mut request = json!({"method":"setStatus", "statusKey":key});
+                if let Some(text) = text {
+                    request["statusText"] = json!(text);
+                }
+                request
+            }
+            UiNotification::Widget {
+                key,
+                lines,
+                placement,
+            } => {
+                let mut request = json!({"method":"setWidget", "widgetKey":key});
+                if let Some(lines) = lines {
+                    request["widgetLines"] = json!(lines);
+                }
+                if let Some(placement) = placement {
+                    request["widgetPlacement"] = json!(placement);
+                }
+                request
+            }
+            UiNotification::Title { title } => json!({"method":"setTitle", "title":title}),
+            UiNotification::EditorText { text } => {
+                json!({"method":"set_editor_text", "text":text})
+            }
+        };
+        request["type"] = json!("extension_ui_request");
+        request["id"] = json!(uuid::Uuid::now_v7().to_string());
+        self.output.enqueue(request)?;
         Ok(true)
     }
 }
@@ -259,9 +287,7 @@ async fn read_input(
             }
             Ok(_) => {}
         }
-        if line.len() <= MAX_RPC_LINE_BYTES
-            && let Ok(value) = serde_json::from_slice::<Value>(&line)
-        {
+        if let Ok(value) = serde_json::from_slice::<Value>(&line) {
             if bridge.response(&value) {
                 continue;
             }
@@ -278,7 +304,170 @@ async fn read_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pi_plugin::{PluginContextEpoch, PluginContextError, PresentationMode, UiWidgetPlacement};
+    use pi_session::{PiPluginContext, PluginContextBinding};
     use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn semantic_notifications_use_pi_wire_before_session_startup_and_retire() {
+        let (writer, reader) = tokio::io::duplex(8192);
+        let bridge = Arc::new(RpcUiBridge::new(RpcOutput::with_writer(writer)));
+        let epoch = PluginContextEpoch::new(Arc::new(
+            PiPluginContext::new(PresentationMode::Rpc, true, PluginContextBinding::new())
+                .with_ui_bridge(bridge.clone()),
+        ));
+        let ui = epoch.context().ui;
+        let cases = [
+            (
+                UiNotification::Notify {
+                    message: "ready".into(),
+                    level: None,
+                },
+                json!({"method":"notify", "message":"ready"}),
+            ),
+            (
+                UiNotification::Notify {
+                    message: "info".into(),
+                    level: Some(NoticeLevel::Info),
+                },
+                json!({"method":"notify", "message":"info", "notifyType":"info"}),
+            ),
+            (
+                UiNotification::Status {
+                    key: "job".into(),
+                    text: Some("running".into()),
+                },
+                json!({"method":"setStatus", "statusKey":"job", "statusText":"running"}),
+            ),
+            (
+                UiNotification::Status {
+                    key: "job".into(),
+                    text: Some(String::new()),
+                },
+                json!({"method":"setStatus", "statusKey":"job", "statusText":""}),
+            ),
+            (
+                UiNotification::Status {
+                    key: "job".into(),
+                    text: None,
+                },
+                json!({"method":"setStatus", "statusKey":"job"}),
+            ),
+            (
+                UiNotification::Widget {
+                    key: "job".into(),
+                    lines: Some(vec!["第一行".into(), "second".into()]),
+                    placement: None,
+                },
+                json!({"method":"setWidget", "widgetKey":"job", "widgetLines":["第一行", "second"]}),
+            ),
+            (
+                UiNotification::Widget {
+                    key: "job".into(),
+                    lines: Some(vec![]),
+                    placement: Some(UiWidgetPlacement::AboveEditor),
+                },
+                json!({"method":"setWidget", "widgetKey":"job", "widgetLines":[], "widgetPlacement":"aboveEditor"}),
+            ),
+            (
+                UiNotification::Widget {
+                    key: "job".into(),
+                    lines: None,
+                    placement: Some(UiWidgetPlacement::BelowEditor),
+                },
+                json!({"method":"setWidget", "widgetKey":"job", "widgetPlacement":"belowEditor"}),
+            ),
+            (
+                UiNotification::Title {
+                    title: "项目".into(),
+                },
+                json!({"method":"setTitle", "title":"项目"}),
+            ),
+            (
+                UiNotification::EditorText {
+                    text: "draft\nnext".into(),
+                },
+                json!({"method":"set_editor_text", "text":"draft\nnext"}),
+            ),
+        ];
+        for (notification, _) in &cases {
+            ui.notification(notification.clone()).unwrap();
+        }
+        bridge.flush().await.unwrap();
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+        let mut ids = std::collections::HashSet::new();
+        for (_, expected) in cases {
+            let mut request: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            let object = request.as_object_mut().unwrap();
+            assert_eq!(object.remove("type"), Some(json!("extension_ui_request")));
+            let id = object.remove("id").unwrap();
+            assert!(ids.insert(id.as_str().unwrap().to_owned()));
+            assert_eq!(request, expected);
+        }
+        assert!(bridge.state.lock().unwrap().pending.is_empty());
+        epoch.retire();
+        assert!(matches!(
+            ui.notification(UiNotification::Title {
+                title: "late".into()
+            }),
+            Err(PluginContextError::Retired)
+        ));
+    }
+
+    #[tokio::test]
+    async fn dialog_wire_distinguishes_omitted_and_empty_optional_text() {
+        let (writer, reader) = tokio::io::duplex(4096);
+        let bridge = Arc::new(RpcUiBridge::new(RpcOutput::with_writer(writer)));
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+        for (request, field, expected) in [
+            (
+                UiDialogRequest::Input {
+                    title: "input".into(),
+                    placeholder: None,
+                },
+                "placeholder",
+                None,
+            ),
+            (
+                UiDialogRequest::Input {
+                    title: "input".into(),
+                    placeholder: Some(String::new()),
+                },
+                "placeholder",
+                Some(json!("")),
+            ),
+            (
+                UiDialogRequest::Editor {
+                    title: "editor".into(),
+                    prefill: None,
+                },
+                "prefill",
+                None,
+            ),
+            (
+                UiDialogRequest::Editor {
+                    title: "editor".into(),
+                    prefill: Some(String::new()),
+                },
+                "prefill",
+                Some(json!("")),
+            ),
+        ] {
+            let asking = bridge.clone();
+            let pending = tokio::spawn(async move { asking.dialog(request, None).await });
+            let wire: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(wire.get(field), expected.as_ref());
+            bridge.response(
+                &json!({"type":"extension_ui_response", "id":wire["id"], "cancelled":true}),
+            );
+            assert_eq!(
+                pending.await.unwrap().unwrap(),
+                Some(UiDialogResponse::Cancelled)
+            );
+        }
+    }
 
     #[tokio::test]
     async fn confirmation_is_correlated_and_disconnect_fails_closed() {
@@ -364,11 +553,11 @@ mod tests {
             },
             UiDialogRequest::Input {
                 title: "type".into(),
-                placeholder: "empty is valid".into(),
+                placeholder: Some("empty is valid".into()),
             },
             UiDialogRequest::Editor {
                 title: "edit".into(),
-                prefill: "old\ntext".into(),
+                prefill: Some("old\ntext".into()),
             },
         ] {
             let asking = bridge.clone();
@@ -407,7 +596,7 @@ mod tests {
                 .dialog(
                     UiDialogRequest::Input {
                         title: "timed".into(),
-                        placeholder: String::new(),
+                        placeholder: None,
                     },
                     Some(10),
                 )
@@ -426,7 +615,7 @@ mod tests {
                 .dialog(
                     UiDialogRequest::Editor {
                         title: "next".into(),
-                        prefill: String::new(),
+                        prefill: None,
                     },
                     None,
                 )
@@ -459,7 +648,7 @@ mod tests {
                 .dialog(
                     UiDialogRequest::Input {
                         title: "startup question".into(),
-                        placeholder: String::new(),
+                        placeholder: None,
                     },
                     None,
                 )

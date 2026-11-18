@@ -200,7 +200,7 @@ impl Provider for GoogleCompatibleProvider {
             .map(|base_url| google_endpoint(base_url, request.model.as_str()))
             .unwrap_or_else(|| self.endpoint(request.model.as_str()));
         let payload = context
-            .before_provider_request(&signal, request_body(&request))
+            .before_provider_request(&signal, request_body(&request)?)
             .await?;
         let response = post_json_with_provider_hooks(
             self.transport.as_ref(),
@@ -237,20 +237,32 @@ impl Provider for GoogleCompatibleProvider {
     }
 }
 
-pub fn request_body(request: &ProviderRequest) -> Value {
+pub fn request_body(request: &ProviderRequest) -> Result<Value, ProviderError> {
     let mut body = json!({"contents": project_messages(request)});
     let system_prompt = pi_core::SystemMessage::fold(&request.system_prompt, &request.messages);
     if !system_prompt.is_empty() {
         body["systemInstruction"] = json!({"parts": [{"text": system_prompt}]});
     }
     if !request.tools.is_empty() {
-        body["tools"] = json!([{
-            "functionDeclarations": request.tools.iter().map(|tool| json!({
-                "name": tool.name,
-                "description": tool.description,
-                "parametersJsonSchema": tool.parameters
-            })).collect::<Vec<_>>()
-        }]);
+        let id = request.model.as_str().to_ascii_lowercase();
+        let supports = id
+            .strip_prefix("gemini-live-")
+            .or_else(|| id.strip_prefix("gemini-"))
+            .and_then(|version| version.split(|c: char| !c.is_ascii_digit()).next())
+            .and_then(|version| version.parse::<u32>().ok())
+            .is_some_and(|major| major >= 3);
+        let mut strict_used = false;
+        let declarations=request.tools.iter().map(|tool|{
+            let strict=pi_provider::resolve_json_schema_sampling(tool,supports).map_err(ProviderError::Protocol)?;
+            strict_used|=strict.is_some();
+            let mut parameters=strict.unwrap_or_else(||tool.parameters.clone());
+            rewrite_const_as_enum(&mut parameters);
+            Ok(json!({"name":tool.name,"description":tool.description,"parametersJsonSchema":parameters}))
+        }).collect::<Result<Vec<_>,ProviderError>>()?;
+        body["tools"] = json!([{"functionDeclarations":declarations}]);
+        if strict_used {
+            body["toolConfig"] = json!({"functionCallingConfig":{"mode":"VALIDATED"}});
+        }
     }
     let mut generation = serde_json::Map::new();
     if let Some(max_tokens) = request.max_output_tokens {
@@ -269,7 +281,7 @@ pub fn request_body(request: &ProviderRequest) -> Value {
     if !generation.is_empty() {
         body["generationConfig"] = Value::Object(generation);
     }
-    body
+    Ok(body)
 }
 
 fn project_messages(request: &ProviderRequest) -> Vec<Value> {
@@ -948,6 +960,67 @@ fn map_transport_error(error: TransportError) -> ProviderError {
     error.into_provider_error()
 }
 
+fn rewrite_const_as_enum(schema: &mut Value) {
+    rewrite_schema_const(schema, false);
+}
+
+fn rewrite_schema_const(schema: &mut Value, name_map: bool) {
+    match schema {
+        Value::Array(items) => {
+            for item in items {
+                rewrite_schema_const(item, false);
+            }
+        }
+        Value::Object(object) => {
+            for (key, value) in object.iter_mut() {
+                if name_map
+                    || matches!(
+                        key.as_str(),
+                        "additionalProperties"
+                            | "unevaluatedProperties"
+                            | "propertyNames"
+                            | "items"
+                            | "prefixItems"
+                            | "additionalItems"
+                            | "unevaluatedItems"
+                            | "contains"
+                            | "allOf"
+                            | "anyOf"
+                            | "oneOf"
+                            | "not"
+                            | "if"
+                            | "then"
+                            | "else"
+                            | "contentSchema"
+                    )
+                {
+                    rewrite_schema_const(value, false);
+                } else if matches!(
+                    key.as_str(),
+                    "properties"
+                        | "patternProperties"
+                        | "$defs"
+                        | "definitions"
+                        | "dependentSchemas"
+                        | "dependencies"
+                ) {
+                    rewrite_schema_const(value, true);
+                }
+            }
+            if !name_map
+                && !object.contains_key("enum")
+                && object
+                    .get("const")
+                    .is_some_and(|value| value.is_string() || value.is_number())
+            {
+                let value = object.remove("const").expect("checked const");
+                object.insert("enum".into(), json!([value]));
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use futures::{StreamExt, stream};
@@ -979,8 +1052,43 @@ mod tests {
     }
 
     #[test]
+    fn strict_tools_require_gemini_three_and_rewrite_only_schema_constants() {
+        let mut request = request();
+        request.tools = vec![pi_core::ToolSpec {
+            name: "select".into(),
+            label: String::new(),
+            description: String::new(),
+            parameters: json!({"type":"object","properties":{"const":{"type":"string","const":"literal"},"enabled":{"type":"boolean","const":true}},"required":["const"],"examples":[{"const":"data"}]}),
+            output_schema: None,
+            constrained_sampling: Some(pi_core::ConstrainedSampling::JsonSchema {
+                strict: pi_core::ToolSchemaStrict::Prefer,
+            }),
+            execution_mode: pi_core::ToolExecutionMode::Parallel,
+            prompt_snippet: None,
+            prompt_guidelines: vec![],
+        }];
+        let body = request_body(&request).unwrap();
+        assert_eq!(
+            body["toolConfig"]["functionCallingConfig"]["mode"],
+            "VALIDATED"
+        );
+        let schema = &body["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"];
+        assert_eq!(schema["properties"]["const"]["enum"], json!(["literal"]));
+        assert_eq!(schema["properties"]["enabled"]["anyOf"][0]["const"], true);
+        assert_eq!(schema["examples"][0]["const"], "data");
+        request.model = "gemini-2.5-pro".into();
+        assert!(request_body(&request).unwrap().get("toolConfig").is_none());
+        request.tools[0].constrained_sampling = Some(pi_core::ConstrainedSampling::JsonSchema {
+            strict: pi_core::ToolSchemaStrict::Require,
+        });
+        assert!(request_body(&request).is_err());
+        request.model = "gemini-live-3-pro".into();
+        assert!(request_body(&request).is_ok());
+    }
+
+    #[test]
     fn builds_google_ai_studio_payload_and_endpoint() {
-        let body = request_body(&request());
+        let body = request_body(&request()).unwrap();
         assert_eq!(body["systemInstruction"]["parts"][0]["text"], "system");
         assert_eq!(body["contents"][0]["parts"][0]["text"], "hello");
         assert_eq!(body["generationConfig"]["maxOutputTokens"], 123);

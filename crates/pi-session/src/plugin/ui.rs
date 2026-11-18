@@ -2,7 +2,7 @@ use super::context::{PiPluginContext, context_failed};
 use async_trait::async_trait;
 use pi_plugin::{
     NoticeLevel, PluginContextError, PresentationMode, UiContextAccess, UiDialogRequest,
-    UiDialogResponse,
+    UiDialogResponse, UiNotification,
 };
 
 #[async_trait]
@@ -137,14 +137,27 @@ impl UiContextAccess for PiPluginContext {
     }
 
     fn ui_notify(&self, level: NoticeLevel, message: String) -> Result<(), PluginContextError> {
+        self.ui_notification(UiNotification::Notify {
+            level: Some(level),
+            message,
+        })
+    }
+
+    fn ui_notification(&self, notification: UiNotification) -> Result<(), PluginContextError> {
         if let Some(bridge) = &self.ui_bridge
             && bridge
-                .notify(level, message.clone())
+                .notification(notification.clone())
                 .map_err(context_failed)?
         {
             return Ok(());
         }
-        self.session()?.notify_plugin(message, level);
-        Ok(())
+        if let UiNotification::Notify { message, level } = notification {
+            self.session()?
+                .notify_plugin(message, level.unwrap_or(NoticeLevel::Info));
+            return Ok(());
+        }
+        Err(PluginContextError::Unavailable(
+            "semantic presentation notifications unavailable".into(),
+        ))
     }
 }

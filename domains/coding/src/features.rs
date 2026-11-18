@@ -4,7 +4,7 @@ pub(crate) use command::FeaturesPlugin;
 
 /// Host ceiling for first-party product features.
 ///
-/// All features are enabled by default to preserve the standard Pi product.
+/// The host permits all features by default; settings opt into Rust extensions.
 /// Disabling a feature omits its built-in plugins and lifecycle work; it does not
 /// remove compiled dependencies or restrict explicitly supplied plugins/tools.
 /// The ceiling is captured by the host and reused across session replacements
@@ -13,6 +13,7 @@ pub(crate) use command::FeaturesPlugin;
 /// Feature-specific settings still apply when a feature is enabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Features {
+    pub hashline: bool,
     pub memory: bool,
     pub subagents: bool,
     pub schedule: bool,
@@ -25,6 +26,7 @@ impl Features {
     /// Enable all first-party product features.
     pub const fn all() -> Self {
         Self {
+            hashline: true,
             memory: true,
             subagents: true,
             schedule: true,
@@ -38,6 +40,7 @@ impl Features {
     /// session management and independently configured native/JS/MCP plugins.
     pub const fn none() -> Self {
         Self {
+            hashline: false,
             memory: false,
             subagents: false,
             schedule: false,

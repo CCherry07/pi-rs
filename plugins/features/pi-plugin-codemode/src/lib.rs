@@ -4,8 +4,10 @@
 //! The host owns every tool invocation; JavaScript receives only JSON values.
 
 mod catalog;
+mod declarations;
 mod models;
 mod output;
+mod prompt;
 mod source;
 mod store;
 mod vm;
@@ -18,11 +20,12 @@ use async_trait::async_trait;
 use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
 use pi_core::{
-    AbortHandle, ContentBlock, PluginId, ToolCallId, ToolExecutionMode, ToolResult, ToolSpec,
-    ToolUpdate, Usage,
+    AbortHandle, ConstrainedSampling, ContentBlock, GrammarFormat, PluginId, ToolCallId,
+    ToolExecutionMode, ToolResult, ToolSpec, ToolUpdate, Usage,
 };
 use pi_plugin::{
-    NestedToolResult, Plugin, RegisterContext, Tool, ToolContext, ToolError, ToolUpdateSink,
+    NestedToolResult, Plugin, RegisterContext, Tool, ToolContext, ToolError, ToolLoadout,
+    ToolLoadoutChanges, ToolUpdateSink,
 };
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
@@ -34,6 +37,17 @@ use source::Source;
 use vm::{Outcome, Reply, ReplyReservation, VmInput};
 
 pub const CODEMODE_TOOL_NAME: &str = "codemode";
+pub use prompt::{CodemodeMode, CodemodeOptions, DEFAULT_CODEMODE_INLINE_BUDGET};
+
+pub const CODEMODE_SOURCE_GRAMMAR: &str = r#"
+start: options_source | plain_source
+options_source: OPTIONS_LINE NEWLINE SOURCE
+plain_source: SOURCE
+
+OPTIONS_LINE: /[ \t]*\/\/ @options:[^\r\n]*/
+NEWLINE: /\r?\n/
+SOURCE: /[\s\S]+/
+"#;
 
 /// Independently reusable feature. A new VM is created for every tool call;
 /// only successful explicit `store()` writes survive through session entries.
@@ -51,11 +65,40 @@ impl Plugin for CodemodePlugin {
     }
 }
 
-pub fn codemode_tool() -> Arc<dyn Tool> {
-    Arc::new(CodemodeTool)
+/// Factory-friendly configured codemode presentation; execution uses the same scoped VM.
+#[derive(Debug, Clone, Default)]
+pub struct ConfiguredCodemodePlugin {
+    options: CodemodeOptions,
 }
 
-struct CodemodeTool;
+impl ConfiguredCodemodePlugin {
+    pub fn new(options: CodemodeOptions) -> Self {
+        Self { options }
+    }
+}
+
+#[pi_plugin::plugin]
+impl Plugin for ConfiguredCodemodePlugin {
+    fn id(&self) -> PluginId {
+        PluginId::new("codemode")
+    }
+
+    fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
+        context.register_tool(Arc::new(CodemodeTool {
+            options: self.options.clone(),
+        }))
+    }
+}
+
+pub fn codemode_tool() -> Arc<dyn Tool> {
+    Arc::new(CodemodeTool {
+        options: CodemodeOptions::default(),
+    })
+}
+
+struct CodemodeTool {
+    options: CodemodeOptions,
+}
 
 #[async_trait]
 impl Tool for CodemodeTool {
@@ -63,11 +106,24 @@ impl Tool for CodemodeTool {
         ToolSpec {
             name: CODEMODE_TOOL_NAME.into(),
             label: CODEMODE_TOOL_NAME.into(),
-            description: "Run JavaScript as an async function body: top-level await and return work. Call tools.NAME(args), use Promise.allSettled for independent calls, and emit only the useful output with text(value), image(base64DataUrl), console.log, or return. Ordinary tools return text; MCP tools return their complete result object. ALL_TOOLS lists callable names and input schemas; await searchTools(query, {limit, namespace}), describeTool(name), and describeNamespace(name) discover tools and namespace instructions. store(key, value)/load(key) keep small JSON values on this session branch; store(key, undefined) deletes, and only successful scripts save changes. exit() ends successfully. Optional first line: // @options: {\"timeout_ms\":60000,\"max_output_tokens\":10000}. models.getModelsOfType(type, provider?), getAvailableOfType(type, provider?), and getModelOfType(type, provider, id) query chat/classifier/image catalogs. models.classify(model, {state, questions, images?}) classifies structured state. Each question is {type, instructions, criteria}: choice uses a nonempty label-to-meaning object, score uses a nonempty ordered string array, bool uses {true: meaning, false: meaning}. models.generateImages(model, {input: [text/image blocks]}) generates images. Use image(block) to show generated image blocks. Model inference runs at most four calls concurrently; invalid arguments reject, provider failures resolve with stopReason/errorMessage. Default timeout is 60 seconds, heap 256 MiB, at most 128 host calls. No Node, filesystem, network, timers, or module loading in the VM; use registered tools for I/O. Active direct tools and exposed deferred tools are callable; codemode and model-only tools are excluded.".into(),
-            parameters: json!({"type":"object","properties":{"code":{"type":"string","description":"JavaScript source, optionally beginning with an @options comment."}},"required":["code"],"additionalProperties":false}),
+            description: prompt::description(&[], &self.options),
+            parameters: json!({"type":"object","properties":{"code":{"type":"string","description":"Raw JavaScript source."}},"required":["code"]}),
+            output_schema: None,
+            constrained_sampling: Some(ConstrainedSampling::Grammar {
+                variants: [(GrammarFormat::OpenAiLark, CODEMODE_SOURCE_GRAMMAR.into())].into(),
+            }),
             execution_mode: ToolExecutionMode::Sequential,
-            prompt_snippet: Some("Run JavaScript that composes tools and filters their output".into()),
-            prompt_guidelines: vec!["Use codemode for multi-step tool workflows or reducing large intermediate results; use Promise.allSettled for independent operations.".into()],
+            prompt_snippet: Some(prompt::PROMPT_SNIPPET.into()),
+            prompt_guidelines: vec![prompt::PROMPT_GUIDELINE.into()],
+        }
+    }
+
+    fn prepare_loadout(&self, loadout: &ToolLoadout) -> ToolLoadoutChanges {
+        let (descriptions, hidden_declarations) =
+            prompt::prepare_descriptions(&loadout.declared, &loadout.callable, &self.options);
+        ToolLoadoutChanges {
+            descriptions,
+            hidden_declarations,
         }
     }
 
@@ -279,6 +335,7 @@ async fn run(
         ))));
     }
     Ok(ToolResult {
+        structured_content: None,
         content,
         details: Some(
             json!({"calls":calls,"elapsedMs":started.elapsed().as_millis(),"truncated":output.truncated}),

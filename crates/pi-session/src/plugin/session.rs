@@ -156,13 +156,7 @@ impl SessionContextAccess for PiPluginContext {
     }
 
     fn system_prompt(&self) -> Result<String, PluginContextError> {
-        Ok(self
-            .session()?
-            .runtime()
-            .agent()
-            .runtime()
-            .system_prompt()
-            .to_owned())
+        Ok(self.session()?.runtime().agent().effective_system_prompt())
     }
 
     fn system_prompt_options(
@@ -179,6 +173,14 @@ impl SessionContextAccess for PiPluginContext {
 
     fn session_cwd(&self) -> Result<PathBuf, PluginContextError> {
         self.cwd()
+    }
+
+    fn render_system_prompt(&self, options: Value) -> Result<String, PluginContextError> {
+        self.session()?
+            .runtime()
+            .agent()
+            .render_system_prompt_options(options)
+            .map_err(context_failed)
     }
 
     fn session_dir(&self) -> Result<PathBuf, PluginContextError> {
@@ -308,7 +310,9 @@ impl SessionContextAccess for PiPluginContext {
     }
 
     fn shutdown(&self) -> Result<(), PluginContextError> {
-        if let Ok(session) = self.pi_session() {
+        if self.mode != pi_plugin::PresentationMode::Rpc
+            && let Ok(session) = self.pi_session()
+        {
             session.abort();
         }
         self.binding.request_shutdown();
@@ -360,20 +364,9 @@ impl SessionContextAccess for PiPluginContext {
     }
 
     fn set_session_name(&self, name: String) -> Result<(), PluginContextError> {
-        let session = self.session()?;
-        let name = session
-            .set_name_immediate(Some(name))
-            .map_err(context_failed)?;
-        self.runtime.spawn(async move {
-            session
-                .plugin_driver()
-                .session_info_changed(
-                    session.session_dispatch_context(),
-                    &crate::SessionInfoChangedEvent { name },
-                )
-                .await;
-        });
-        Ok(())
+        self.session()?
+            .set_session_name(Some(name))
+            .map_err(context_failed)
     }
 
     fn set_label(&self, entry_id: String, label: Option<String>) -> Result<(), PluginContextError> {

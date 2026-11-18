@@ -253,6 +253,8 @@ struct ReloadTool(String);
 impl Tool for ReloadTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
+            output_schema: None,
+            constrained_sampling: None,
             name: self.0.clone(),
             label: self.0.clone(),
             description: "Reload fixture tool".to_string(),

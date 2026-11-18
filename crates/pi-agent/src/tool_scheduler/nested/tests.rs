@@ -19,6 +19,8 @@ use crate::tool_scheduler::tests::assistant;
 
 fn spec(name: &str, mode: ToolExecutionMode) -> ToolSpec {
     ToolSpec {
+        output_schema: None,
+        constrained_sampling: None,
         name: name.to_owned(),
         label: name.to_owned(),
         description: name.to_owned(),

@@ -187,19 +187,20 @@ impl FeaturesPlugin {
     }
 }
 
-const LABELS: [&str; 6] = [
+const LABELS: [&str; 7] = [
     "Memory — persistent recall and session search",
     "Subagents — delegate work to other agents",
     "Schedule — run tasks at scheduled times",
     "Skills — discover and invoke skills",
     "Prompt templates — reusable prompt commands",
     "Session transfer — export, import and share",
+    "Hashline — edit with validated line anchors",
 ];
 
 struct FeaturesEditor {
-    initial: [bool; 6],
-    selected: [bool; 6],
-    allowed: [bool; 6],
+    initial: [bool; 7],
+    selected: [bool; 7],
+    allowed: [bool; 7],
     focused: usize,
     scope: SettingsScope,
     project_overrides: bool,
@@ -219,6 +220,7 @@ impl FeaturesEditor {
             settings.skills,
             settings.prompt_templates,
             settings.session_transfer,
+            settings.hashline,
         ];
         Self {
             initial,
@@ -230,6 +232,7 @@ impl FeaturesEditor {
                 allowed.skills,
                 allowed.prompt_templates,
                 allowed.session_transfer,
+                allowed.hashline,
             ],
             focused: 0,
             scope,
@@ -249,6 +252,7 @@ impl FeaturesEditor {
             skills: changed(3),
             prompt_templates: changed(4),
             session_transfer: changed(5),
+            hashline: changed(6),
         }
     }
 }

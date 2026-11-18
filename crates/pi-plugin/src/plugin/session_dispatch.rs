@@ -19,10 +19,40 @@ impl PluginDriver {
     session_observers! {
         session_start: Start => SessionStartEvent,
         session_info_changed: InfoChanged => SessionInfoChangedEvent,
+        model_select: ModelSelect => ModelSelectEvent,
+        thinking_level_select: ThinkingLevelSelect => ThinkingLevelSelectEvent,
         session_compact: Compact => SessionCompactEvent,
         session_compact_failed: CompactFailed => SessionCompactFailedEvent,
         session_shutdown: Shutdown => SessionShutdownEvent,
         session_tree: Tree => SessionTreeEvent,
+    }
+
+    /// User shell hooks use first-handler-wins semantics; a failure prevents local execution.
+    pub async fn user_bash(
+        &self,
+        context: &SessionDispatchContext,
+        event: &UserBashEvent,
+    ) -> Result<Option<UserBashOverride>, PluginError> {
+        for slot in self.session_plugins(SessionHook::UserBash) {
+            match slot
+                .plugin
+                .user_bash(&self.session_plugin_context(slot, context), event)
+                .await
+            {
+                Ok(Some(result)) => return Ok(Some(result)),
+                Ok(None) => {}
+                Err(error) => {
+                    let message = error.to_string();
+                    self.record_session_error(slot, context, SessionHook::UserBash, error);
+                    return Err(PluginError::Hook {
+                        plugin_id: slot.id.clone(),
+                        hook: "user_bash",
+                        message,
+                    });
+                }
+            }
+        }
+        Ok(None)
     }
 
     pub async fn session_before_switch(

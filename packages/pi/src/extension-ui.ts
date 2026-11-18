@@ -14,9 +14,15 @@ export interface DialogOptions { signal?: AbortSignal; timeout?: number }
 type RpcDialogRequest =
   | { method: "confirm"; title: string; message: string }
   | { method: "select"; title: string; options: string[] }
-  | { method: "input"; title: string; placeholder: string }
-  | { method: "editor"; title: string; prefill: string };
+  | { method: "input"; title: string; placeholder?: string }
+  | { method: "editor"; title: string; prefill?: string };
 type RpcDialogResponse = { type: "confirmed"; value: boolean } | { type: "value"; value: string } | { type: "cancelled" };
+type RpcUiNotification =
+  | { type: "notify"; message: string; level?: "info" | "warning" | "error" }
+  | { type: "status"; key: string; text?: string }
+  | { type: "widget"; key: string; lines?: string[]; placement?: "aboveEditor" | "belowEditor" }
+  | { type: "title"; title: string }
+  | { type: "editorText"; text: string };
 function rpcDialogResponse(value: unknown): RpcDialogResponse | undefined {
   if (typeof value !== "object" || value === null || !("type" in value)) return;
   if (value.type === "cancelled") return { type: "cancelled" };
@@ -127,6 +133,9 @@ export class ExtensionUI {
     return this.#snapshot;
   }
   #isRpc() { return this.#native && JSON.parse(this.#native.query('{"type":"mode"}')) === "rpc"; }
+  #rpcNotification(notification: RpcUiNotification) {
+    this.#native?.notify(JSON.stringify({ type: "uiNotification", notification }));
+  }
   #command(command: UiCommand) {
     if (!this.#retired && !this.#isRpc()) this.#native?.notify(JSON.stringify({ type: "uiCommand", owner: this.owner, command: uiCommandSchema.parse(command) }));
   }
@@ -423,22 +432,22 @@ export class ExtensionUI {
       } catch (error) { finish(undefined, error); }
     });
   }
-  async input(title: string, placeholder = "", opts?: DialogOptions): Promise<string | undefined> {
+  async input(title: string, placeholder?: string, opts?: DialogOptions): Promise<string | undefined> {
     this.#assertActive();
     if (this.#isRpc()) {
       const response = await this.#rpcDialog({ method: "input", title, placeholder }, opts);
       return response?.type === "value" ? response.value : undefined;
     }
-    const result = await this.#dialog(title, { type: "input", id: "value", initialValue: "", placeholder }, "enter submit · esc cancel", opts);
+    const result = await this.#dialog(title, { type: "input", id: "value", initialValue: "", placeholder: placeholder ?? "" }, "enter submit · esc cancel", opts);
     return typeof result === "string" ? result : undefined;
   }
-  async editor(title: string, prefill = "", opts?: DialogOptions): Promise<string | undefined> {
+  async editor(title: string, prefill?: string, opts?: DialogOptions): Promise<string | undefined> {
     this.#assertActive();
     if (this.#isRpc()) {
       const response = await this.#rpcDialog({ method: "editor", title, prefill }, opts);
       return response?.type === "value" ? response.value : undefined;
     }
-    const result = await this.#dialog(title, { type: "editor", id: "value", initialValue: prefill }, "ctrl+enter submit · esc cancel", opts);
+    const result = await this.#dialog(title, { type: "editor", id: "value", initialValue: prefill ?? "" }, "ctrl+enter submit · esc cancel", opts);
     return typeof result === "string" ? result : undefined;
   }
   async multiSelect(request: UiMultiSelectRequest, opts?: DialogOptions): Promise<UiMultiSelectResponse | undefined> {
@@ -513,12 +522,30 @@ export class ExtensionUI {
       throw error;
     }
   }
-  setWidget(key: string, content?: UiNode | string[] | SlotFactory, options?: { placement?: "aboveEditor" | "belowEditor" }) { this.#set(`widget:${key}`, options?.placement ?? "aboveEditor", content); }
+  setWidget(key: string, content?: UiNode | string[] | SlotFactory, options?: { placement?: "aboveEditor" | "belowEditor" }) {
+    this.#assertActive();
+    if (this.#isRpc()) {
+      if (content === undefined || Array.isArray(content)) {
+        this.#rpcNotification({ type: "widget", key, lines: content, placement: options?.placement });
+      }
+      return;
+    }
+    this.#set(`widget:${key}`, options?.placement ?? "aboveEditor", content);
+  }
   setHeader(content?: UiNode | SlotFactory) { this.#set("header", "header", content); }
   setFooter(content?: UiNode | FooterFactory) { this.#set("footer", "footer", content); }
-  setStatus(key: string, text?: string) { this.#assertActive(); if (text === undefined) this.#statuses.delete(key); else this.#statuses.set(key, text); this.#changed(); }
+  setStatus(key: string, text?: string) {
+    this.#assertActive();
+    if (this.#isRpc()) { this.#rpcNotification({ type: "status", key, text }); return; }
+    if (text === undefined) this.#statuses.delete(key); else this.#statuses.set(key, text);
+    this.#changed();
+  }
   registerShortcut(key: string, handler: () => Promise<void>) { this.#assertActive(); this.#shortcuts.set(key, handler); this.#changed(); }
-  notify(message: unknown, level = "info") { this.#assertActive(); this.#native?.notify(JSON.stringify({ type: "uiNotify", message: String(message), level })); }
+  notify(message: unknown, level?: "info" | "warning" | "error") {
+    this.#assertActive();
+    if (this.#isRpc()) { this.#rpcNotification({ type: "notify", message: String(message), level }); return; }
+    this.#native?.notify(JSON.stringify({ type: "uiNotify", message: String(message), level: level ?? "info" }));
+  }
   setTheme(name: UiTheme) {
     this.#assertActive();
     if (name !== "light" && name !== "dark" && name !== "system") throw new Error(`Unknown UI theme: ${name}`);
@@ -528,9 +555,21 @@ export class ExtensionUI {
   setProgramStatus(status: { state: "working" | "error" | "success" | "clear"; text?: string; progress?: number }) {
     this.#assertActive(); this.#command({ channel: "product", command: { type: "programStatus", state: status.state, text: status.text ?? null, progress: status.progress ?? null } });
   }
-  setTitle(title: string) { this.#assertActive(); this.#command({ channel: "product", command: { type: "title", title } }); }
-  setEditorText(text: string) { this.#assertActive(); this.#command({ channel: "product", command: { type: "editorText", text, append: false } }); }
-  pasteToEditor(text: string) { this.#assertActive(); this.#command({ channel: "product", command: { type: "editorText", text, append: true } }); }
+  setTitle(title: string) {
+    this.#assertActive();
+    if (this.#isRpc()) { this.#rpcNotification({ type: "title", title }); return; }
+    this.#command({ channel: "product", command: { type: "title", title } });
+  }
+  setEditorText(text: string) {
+    this.#assertActive();
+    if (this.#isRpc()) { this.#rpcNotification({ type: "editorText", text }); return; }
+    this.#command({ channel: "product", command: { type: "editorText", text, append: false } });
+  }
+  pasteToEditor(text: string) {
+    this.#assertActive();
+    if (this.#isRpc()) { this.setEditorText(text); return; }
+    this.#command({ channel: "product", command: { type: "editorText", text, append: true } });
+  }
   getEditorText() { this.#assertActive(); return this.#query().editorText; }
   getToolsExpanded() { this.#assertActive(); return this.#query().toolsExpanded; }
   setToolsExpanded(expanded: boolean) { this.#assertActive(); this.#command({ channel: "product", command: { type: "toolsExpanded", expanded } }); }

@@ -398,7 +398,7 @@ impl Provider for GoogleVertexCompatibleProvider {
         let endpoint = self.endpoint(&request, &credentials)?;
         let headers = self.headers(&request, &credentials);
         let payload = context
-            .before_provider_request(&signal, request_body(&request))
+            .before_provider_request(&signal, request_body(&request)?)
             .await?;
         let response = post_json_with_provider_hooks(
             self.transport.as_ref(),

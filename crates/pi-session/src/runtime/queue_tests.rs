@@ -1,6 +1,135 @@
 use super::*;
 
 #[tokio::test]
+async fn idle_user_queues_keep_delivery_modes_and_join_the_next_explicit_prompt() {
+    use pi_plugin::InputStreamingBehavior;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("idle-queue.jsonl");
+    let session = AgentSession::create(
+        scripted_runtime([
+            ScriptedTurn::Text("answer".into()),
+            ScriptedTurn::Text("follow-up answer".into()),
+        ]),
+        &path,
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    let mut events = session.subscribe();
+    session
+        .queue_user_input("steering", InputStreamingBehavior::Steer)
+        .await
+        .unwrap();
+    session
+        .queue_user_input("follow-up", InputStreamingBehavior::FollowUp)
+        .await
+        .unwrap();
+    assert_eq!(session.snapshot().queue.steering, ["steering"]);
+    assert_eq!(session.snapshot().queue.follow_up, ["follow-up"]);
+    assert!(
+        session
+            .history()
+            .load()
+            .unwrap()
+            .records
+            .iter()
+            .filter_map(|record| match &record.record {
+                LaneRecordEntry::QueueEnqueued { queue, run_id, .. } => Some((*queue, run_id)),
+                _ => None,
+            })
+            .all(|(queue, run_id)| queue == QueueKind::NextRun && run_id.is_none())
+    );
+    assert!(!path.exists(), "idle queue does not materialize a session");
+    session.prompt("start explicitly").await.unwrap();
+    assert!(session.snapshot().queue.items.is_empty());
+    let user_texts = session
+        .snapshot()
+        .agent
+        .messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::User(user) => user.content.first().and_then(|block| match block {
+                ContentBlock::Text(text) => Some(text.text.clone()),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(user_texts, ["start explicitly", "steering", "follow-up"]);
+    let mut settled = Vec::new();
+    while let Ok(event) = events.events.try_recv() {
+        if let AgentSessionEvent::AgentSettled { aborted } = event.event {
+            settled.push(aborted);
+        }
+    }
+    assert_eq!(settled, [false]);
+    session.shutdown().await;
+    drop(session);
+    let reopened = AgentSession::open(scripted_runtime([]), &path, Default::default())
+        .await
+        .unwrap();
+    assert!(
+        reopened.snapshot().queue.items.is_empty(),
+        "consumed idle input must not reappear during recovery"
+    );
+}
+
+#[tokio::test]
+async fn idle_user_queue_clear_and_recovery_keep_v4_next_run_semantics() {
+    use pi_plugin::InputStreamingBehavior;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("idle-recovery.jsonl");
+    let session = AgentSession::create(
+        scripted_runtime([ScriptedTurn::Text("saved".into())]),
+        &path,
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    session.prompt("save").await.unwrap();
+    session
+        .queue_user_input("steering", InputStreamingBehavior::Steer)
+        .await
+        .unwrap();
+    session
+        .queue_user_input("follow-up", InputStreamingBehavior::FollowUp)
+        .await
+        .unwrap();
+    let cleared = session.clear_queue().unwrap();
+    assert_eq!(cleared.steering, ["steering"]);
+    assert_eq!(cleared.follow_up, ["follow-up"]);
+    session
+        .queue_user_input("recover explicitly", InputStreamingBehavior::Steer)
+        .await
+        .unwrap();
+    session.shutdown().await;
+    drop(session);
+    let reopened = AgentSession::open(scripted_runtime([]), &path, Default::default())
+        .await
+        .unwrap();
+    assert_eq!(reopened.snapshot().queue.follow_up, ["recover explicitly"]);
+    assert!(
+        reopened
+            .snapshot()
+            .queue
+            .items
+            .iter()
+            .all(|item| item.kind == QueueKind::NextRun)
+    );
+    assert_eq!(
+        reopened
+            .history()
+            .load()
+            .unwrap()
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.entry, SessionEntry::Message(_)))
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn next_run_queue_edits_survive_resume_and_execute_only_on_request() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("queue.jsonl");

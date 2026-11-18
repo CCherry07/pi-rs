@@ -37,6 +37,7 @@ pub enum ExtensionContextQuery {
     ContextUsage,
     SystemPrompt,
     SystemPromptOptions,
+    RenderSystemPrompt { options: Value },
     SessionCwd,
     SessionDir,
     SessionId,
@@ -64,6 +65,9 @@ pub enum ExtensionContextQuery {
     rename_all_fields = "camelCase"
 )]
 pub enum ExtensionContextNotification {
+    UiNotification {
+        notification: pi_plugin::UiNotification,
+    },
     UiCommand {
         owner: String,
         command: pi_plugin::UiCommand,
@@ -207,6 +211,9 @@ pub fn execute_context_query(
         ExtensionContextQuery::ContextUsage => value(access.context_usage()?),
         ExtensionContextQuery::SystemPrompt => value(access.system_prompt()?),
         ExtensionContextQuery::SystemPromptOptions => access.system_prompt_options(context.scope()),
+        ExtensionContextQuery::RenderSystemPrompt { options } => {
+            value(access.render_system_prompt(options)?)
+        }
         ExtensionContextQuery::SessionCwd => value(access.session_cwd()?),
         ExtensionContextQuery::SessionDir => value(access.session_dir()?),
         ExtensionContextQuery::SessionId => value(access.session_id()?),
@@ -262,6 +269,9 @@ pub fn execute_context_notification(
 ) -> Result<(), PluginContextError> {
     let access = context.access_for_adapter()?;
     match notification {
+        ExtensionContextNotification::UiNotification { notification } => {
+            access.ui_notification(notification)
+        }
         ExtensionContextNotification::UiCommand { owner, command } => {
             access.ui_command(owner, command)
         }
@@ -598,7 +608,7 @@ mod tests {
         let request = ExtensionContextRequest::UiDialog {
             request: pi_plugin::UiDialogRequest::Input {
                 title: "Name".into(),
-                placeholder: String::new(),
+                placeholder: None,
             },
             timeout_ms: None,
         };

@@ -69,16 +69,62 @@ impl AgentSession {
         input: impl Into<SessionInput>,
         receipt: impl FnOnce(PromptDisposition) + Send,
     ) -> Result<PromptOutcome, SessionError> {
-        let input = input.into();
-        if self.accepts_live_messages() {
-            let outcome = self.queue_input(input, QueueKind::Steer).await?;
-            receipt(outcome.disposition());
-            return Ok(outcome);
-        }
-        let Some(submission) = self.prepare_text_command(input).await? else {
+        self.prompt_with_streaming_behavior_and_receipt(
+            input,
+            Some(InputStreamingBehavior::Steer),
+            receipt,
+        )
+        .await
+    }
+
+    /// Processes commands and input hooks before applying the caller's concurrent-input policy.
+    /// `None` rejects ordinary input while a run is active, after interception hooks.
+    pub async fn prompt_with_streaming_behavior_and_receipt(
+        &self,
+        input: impl Into<SessionInput>,
+        streaming_behavior: Option<InputStreamingBehavior>,
+        receipt: impl FnOnce(PromptDisposition) + Send,
+    ) -> Result<PromptOutcome, SessionError> {
+        let Some(submission) = self.prepare_text_command(input.into()).await? else {
             receipt(PromptDisposition::Handled);
             return Ok(PromptOutcome::Handled);
         };
+        if self.activity.is_summarizing() {
+            return Err(SessionError::Runtime("Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.".into()));
+        }
+        if self.accepts_live_messages() {
+            let SessionSubmission::Text {
+                display_text,
+                input,
+            } = submission
+            else {
+                unreachable!("text command preparation only produces text submissions");
+            };
+            let expected = self.activity.delivery_target()?;
+            let prepared = self
+                .runtime
+                .process_queued_input_after_command(
+                    display_text,
+                    input.text,
+                    input.images,
+                    input.source,
+                    streaming_behavior,
+                )
+                .await?;
+            let outcome = if matches!(prepared, pi_runtime::QueuedTextOutcome::Handled) {
+                PromptOutcome::Handled
+            } else {
+                let kind = match streaming_behavior {
+                    Some(InputStreamingBehavior::Steer) => QueueKind::Steer,
+                    Some(InputStreamingBehavior::FollowUp) => QueueKind::FollowUp,
+                    None => return Err(SessionError::Runtime("Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.".into())),
+                };
+                self.activity
+                    .enqueue_text(self.runtime.agent(), Some(expected), kind, prepared)?
+            };
+            receipt(outcome.disposition());
+            return Ok(outcome);
+        }
         let mut receipt = Some(receipt);
         let result = self
             .run_submission_with_receipt(submission, || {
@@ -104,7 +150,14 @@ impl AgentSession {
     ) -> Result<Option<SessionSubmission>, SessionError> {
         self.ensure_open()?;
         let display_text = input.text.clone();
-        if let Some(outcome) = self.runtime.execute_command(&input.text).await? {
+        let command = if self.accepts_live_messages() {
+            self.runtime
+                .execute_live_extension_command(&input.text)
+                .await?
+        } else {
+            self.runtime.execute_extension_command(&input.text).await?
+        };
+        if let Some(outcome) = command {
             match outcome {
                 CommandOutcome::Handled => return Ok(None),
                 CommandOutcome::TransformInput(transformed) => input.text = transformed,
@@ -138,7 +191,12 @@ impl AgentSession {
             } => {
                 let prepared = match self
                     .runtime
-                    .prepare_submission_after_command(display_text, input.text, input.images)
+                    .prepare_submission_after_command_with_source(
+                        display_text,
+                        input.text,
+                        input.images,
+                        input.source,
+                    )
                     .await?
                 {
                     PreparedTextSubmission::Handled => return Ok(None),
@@ -179,6 +237,7 @@ impl AgentSession {
                 (PreparedSessionPrompt::Messages(prepared), run_id)
             }
         };
+        self.activity.activate_idle_queue(self.runtime.agent())?;
         admitted();
         let telemetry = self.runtime.agent().telemetry_context();
         let run_span = telemetry.start_span::<RunSpan>(RunStart {
@@ -285,6 +344,57 @@ impl AgentSession {
         self.queue_input(input.into(), QueueKind::FollowUp).await
     }
 
+    /// Queues explicit user input, including while idle, without executing extension commands.
+    pub async fn queue_user_input(
+        &self,
+        input: impl Into<SessionInput>,
+        behavior: InputStreamingBehavior,
+    ) -> Result<PromptOutcome, SessionError> {
+        self.ensure_open()?;
+        let input = input.into();
+        if let Some(name) = input
+            .text
+            .strip_prefix('/')
+            .and_then(|text| text.split_whitespace().next())
+            && self.runtime.command_catalog().iter().any(|entry| {
+                entry.spec.name == name
+                    && entry.metadata.source == pi_plugin::CommandSource::Extension
+            })
+        {
+            return Err(SessionError::Runtime(format!(
+                "Extension command \"/{name}\" cannot be queued. Use prompt() or execute the command when not streaming."
+            )));
+        }
+        let expected = if self.accepts_live_messages() {
+            Some(self.activity.delivery_target()?)
+        } else {
+            None
+        };
+        let streaming_behavior = expected.as_ref().map(|_| behavior);
+        let mut prepared = self
+            .runtime
+            .process_queued_input_after_command(
+                input.text.clone(),
+                input.text,
+                input.images,
+                input.source,
+                streaming_behavior,
+            )
+            .await?;
+        if let pi_runtime::QueuedTextOutcome::Message {
+            display_text, text, ..
+        } = &mut prepared
+        {
+            *display_text = text.clone();
+        }
+        let kind = match behavior {
+            InputStreamingBehavior::Steer => QueueKind::Steer,
+            InputStreamingBehavior::FollowUp => QueueKind::FollowUp,
+        };
+        self.activity
+            .enqueue_text(self.runtime.agent(), expected, kind, prepared)
+    }
+
     /// Enqueues an extension-created user or custom message without running
     /// text preprocessing. The durable queue record is committed before the
     /// live agent can observe steer/follow-up delivery.
@@ -314,7 +424,12 @@ impl AgentSession {
         let input = input.into();
         let prepared = self
             .runtime
-            .process_queued_input(input.text, input.images, InputStreamingBehavior::FollowUp)
+            .process_queued_input_with_source(
+                input.text,
+                input.images,
+                input.source,
+                Some(InputStreamingBehavior::FollowUp),
+            )
             .await?;
         self.ensure_open()?;
         self.activity
@@ -352,6 +467,12 @@ impl AgentSession {
         self.runtime.abort();
     }
 
+    /// Cancels the current activity and waits for its settlement callbacks to finish.
+    pub async fn abort_and_wait(&self) {
+        self.abort();
+        self.wait_for_idle().await;
+    }
+
     pub fn abort_retry(&self) {
         self.activity.abort_stage(CancellationStage::Retry);
     }
@@ -374,7 +495,12 @@ impl AgentSession {
         };
         let prepared = self
             .runtime
-            .process_queued_input(input.text, input.images, behavior)
+            .process_queued_input_with_source(
+                input.text,
+                input.images,
+                input.source,
+                Some(behavior),
+            )
             .await?;
         self.activity
             .enqueue_text(self.runtime.agent(), Some(expected), kind, prepared)
@@ -397,9 +523,10 @@ impl AgentSession {
     }
 
     pub(super) async fn emit_agent_settled(&self) {
-        self.runtime.dispatch_agent_settled().await;
+        let aborted = self.activity.is_aborted();
+        self.runtime.dispatch_agent_settled(aborted).await;
         self.events
-            .publish_agent_settled(self.runtime.agent().state());
+            .publish_agent_settled(self.runtime.agent().state(), aborted);
     }
 
     pub(super) async fn finish_prompt_locked(

@@ -232,14 +232,14 @@ async fn rpc_native_dialogs_preserve_results_and_notify_before_session_binding()
             (
                 UiDialogRequest::Input {
                     title: "Name".into(),
-                    placeholder: "可留空".into()
+                    placeholder: Some("可留空".into())
                 },
                 None
             ),
             (
                 UiDialogRequest::Editor {
                     title: "Notes".into(),
-                    prefill: "初始文本".into()
+                    prefill: Some("初始文本".into())
                 },
                 None
             ),

@@ -6,14 +6,15 @@ fresh VM and the current generation's scoped catalog. The generic nested-tool ex
 argument preparation, validation, hooks, scheduling and cancellation. Nested results stay inside
 the script; the model sees only the outer result and the script's explicit output.
 
-Coding includes this tool in its default selection. When `defaultTools` omits it, an enabled MCP
-server with codemode exposure (the default) can still append it at startup, reload or resume. Top-level
+Coding registers this tool for explicit `defaultTools` selection. An enabled MCP
+server with codemode exposure (the default) can append it at startup, reload or resume. Top-level
 `autoEnableCodemode: false` in `mcp.json` disables that automatic addition and leaves existing
 selection intact. See [MCP configuration](../pi-plugin-mcp/README.md#codemode-scripts) for inheritance
 and child tool permissions. Children follow the same activation rule within their allowed catalog.
 
-The tool accepts `{ "code": "JavaScript source" }`. The code is an async function body, so both
-top-level `await` and `return` work:
+Models supporting grammar-constrained tools submit raw JavaScript; other providers use
+`{ "code": "JavaScript source" }`. The code is an async function body, so both top-level `await`
+and `return` work:
 
 ```js
 const [file, matches] = await Promise.all([
@@ -32,13 +33,14 @@ when independent calls should preserve successful results despite individual fai
 
 - `tools.NAME(args)` and `tools["exact name"](args)` call scoped tools. Safe normalized aliases are
   provided only when unambiguous. Exact names always remain accessible.
-- `ALL_TOOLS` contains `{ name, description }`, including input JSON schemas and guidelines.
+- `ALL_TOOLS` contains `{ name, description }`, including TypeScript input/output declarations and guidelines.
 - `await searchTools(query, { limit?, namespace? })` uses the shared BM25 ranker.
-- `await describeTool(name)` returns its description/schema; `await describeNamespace(name)` returns
+- `await describeTool(name)` returns its description and TypeScript declaration; `await describeNamespace(name)` returns
   the namespace's description, instructions and tools. Unknown names return `undefined`.
 - `text(value)`, `console.log/info/warn/error/debug`, and `return value` emit output.
 - `image(dataUrl)`, `image({ image_url: dataUrl })`, and `image({ type: "image", data, mimeType })`
-  accept base64 image data. Remote URLs are not fetched.
+  accept base64 PNG, JPEG, GIF and WebP data. Each emitted image is saved to a temporary file and
+  its path precedes the image in the result. Repeated images share that file within a script.
 - `exit()` ends successfully, including when the script catches its internal unwind signal.
 - `store(key, value)` and `load(key)` handle JSON values; `store(key, undefined)` deletes a key.
   Successful scripts append `codemode-store` entries with `{ set, delete }`. Loading uses the
@@ -161,6 +163,24 @@ is limited to 16 MiB and 10,000 items. Text is safely truncated at the requested
 that do not fit are omitted. Truncation is reported; this version does not save full output files.
 Store values are limited to 256 Ki JavaScript characters, with a 1 MiB authoritative JSON store.
 
+## Model-facing tool declarations
+
+`ConfiguredCodemodePlugin::new(CodemodeOptions { .. })` configures declaration presentation. In
+`CodemodeMode::On` (the default), direct tools retain their declarations and gain a script call
+example and return-value summary. In `CodemodeMode::Only`, those declarations appear inside
+codemode, grouped by namespace, instead of as separate model tools. Every request renders its
+current scoped tools without mutating the generation's registered catalog.
+
+Inline declarations share a budget of 3000 estimated tokens. Selection rotates through namespaces
+and picks their smallest remaining declarations first. Deferred tools remain discoverable through
+the script helpers without entering that description. Schema rendering preserves property
+descriptions, constraints, local references, unions and output types; recursive references become
+`unknown`, and oversized input schemas fall back after omitting constraint tags. The same renderer
+supplies the script discovery helpers, including each tool's prompt guidelines.
+
+`docs_path` points to the readable [script and model API reference](codemode.md). Product
+hosts can set it to their installed documentation path.
+
 At script completion, queued calls stop before execution. Started calls are cancelled and given
 up to one second to finish their result hooks; completed usage is retained. The parent scheduler
 also owns these pipelines, so dropping or cancelling the outer tool cannot detach them. Its
@@ -176,8 +196,7 @@ the worker permit remains held until cleanup completes. The heap quota covers th
 separate bounded host bridge/output buffers; it is not a process-wide RSS limit.
 
 Compared with `legacy/pi`, this implementation deliberately uses native QuickJS, has a finite
-default deadline and explicit bridge/call quotas, accepts JSON `{code}` instead of provider-specific
-raw-source grammar, and shows JSON schemas rather than complete TypeScript declarations.
+default deadline and explicit bridge/call quotas.
 Model availability keeps the Rust host's credential-configuration snapshot rather than resolving
 secrets during catalog queries; actual credential failures appear when calling the model. Specialized
 requests reuse the configured host transport retries, including for Decisions HTTP 504 responses.

@@ -245,6 +245,7 @@ fn generation(dispatcher: Arc<LifecycleDispatcher>) -> JsPluginGeneration {
                     invocation_name: "rewrite".to_string(),
                     description: "Rewrite input".to_string(),
                     argument_hint: None,
+                    source_info: None,
                 }],
                 hooks: vec![
                     JsHookManifest {
@@ -403,6 +404,7 @@ fn duplicate_logical_commands_register_by_unique_invocation_name() {
             invocation_name: invocation.to_string(),
             description: invocation.to_string(),
             argument_hint: None,
+            source_info: None,
         }],
         hooks: Vec::new(),
     };
@@ -623,6 +625,7 @@ async fn before_agent_start_exposes_pi_prompt_and_images_to_javascript() {
             std::path::Path::new("/workspace"),
             &signal,
             BeforeAgentStartEvent {
+                prompt_state: None,
                 system_prompt: "base prompt".to_string(),
                 input_messages: vec![Message::User(UserMessage {
                     content: vec![
@@ -904,7 +907,7 @@ async fn agent_settled_is_active_and_isolates_callback_failures() {
             &RunId::new("settled-run"),
             std::path::Path::new("/workspace"),
             &signal,
-            AgentSettledEvent,
+            AgentSettledEvent { aborted: true },
         )
         .await;
 
@@ -913,7 +916,10 @@ async fn agent_settled_is_active_and_isolates_callback_failures() {
         .iter()
         .find(|invocation| invocation.callback_id == "agent-settled")
         .expect("later agent_settled callback should still run");
-    assert_eq!(settled.payload["event"], json!({"type": "agent_settled"}));
+    assert_eq!(
+        settled.payload["event"],
+        json!({"type": "agent_settled", "aborted": true})
+    );
     assert!(driver.diagnostics().iter().any(|diagnostic| {
         diagnostic.hook.as_str() == "agent_settled"
             && diagnostic.message.contains("intentional callback failure")

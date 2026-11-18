@@ -8,10 +8,61 @@ use crate::{
 };
 use pi_agent::{AgentContext, AgentLoopOutcome, AgentTurnContext};
 use pi_core::{AbortHandle, Message, StopReason};
+use pi_runtime::{CompletionRetryPolicy, RuntimeCompletionRequest, RuntimeError};
 mod algorithm;
 pub use algorithm::*;
 
+struct SessionCompactionCompleter<'a> {
+    session: &'a AgentSession,
+    reason: crate::CompactionReason,
+}
+
+#[async_trait::async_trait]
+impl CompactionCompleter for SessionCompactionCompleter<'_> {
+    fn model_capabilities(&self) -> CompactionModelCapabilities {
+        self.session.runtime.model_capabilities()
+    }
+
+    async fn complete_compaction(
+        &self,
+        request: CompactionCompletionRequest,
+        signal: pi_core::AbortSignal,
+    ) -> Result<CompactionCompletion, CompactionError> {
+        algorithm::compaction_completion(
+            self.session
+                .complete_summary(
+                    algorithm::compaction_request(&self.session.runtime, request),
+                    signal,
+                    crate::SummarizationSource::Compaction {
+                        reason: self.reason,
+                    },
+                )
+                .await,
+        )
+    }
+}
+
 impl AgentSession {
+    pub(super) async fn complete_summary(
+        &self,
+        request: RuntimeCompletionRequest,
+        signal: pi_core::AbortSignal,
+        source: crate::SummarizationSource,
+    ) -> Result<pi_core::AssistantMessage, RuntimeError> {
+        let settings = self.retry_settings();
+        self.runtime
+            .complete_with_retry(
+                request,
+                signal,
+                Some(CompletionRetryPolicy {
+                    enabled: settings.enabled,
+                    max_retries: settings.max_retries,
+                    base_delay_ms: settings.base_delay_ms,
+                }),
+                |event| self.events.publish_summarization_retry(source, event),
+            )
+            .await
+    }
     pub(super) async fn compact_before_next_turn(
         &self,
         turn: &AgentTurnContext,
@@ -162,6 +213,7 @@ impl AgentSession {
         &self,
         custom_instructions: Option<String>,
     ) -> Result<CompactionEntry, SessionError> {
+        self.abort_and_wait().await;
         let _operation = self.activity.begin(ActivityPhase::Updating).await;
         self.ensure_open()?;
         self.run_compaction_locked(
@@ -248,6 +300,9 @@ impl AgentSession {
         activation: CompactionActivation,
     ) -> Result<CompletedCompaction, SessionError> {
         let _phase = self.activity.phase(ActivityPhase::Compacting);
+        if reason == crate::CompactionReason::Manual {
+            self.events.publish_compaction_start(reason);
+        }
         let branch_entries = self.store.branch_entries()?;
         let mut preparation_entries = branch_entries.clone();
         if remove_failed_assistant
@@ -271,11 +326,41 @@ impl AgentSession {
             self.context_updates.options(),
             self.compaction_policy.as_ref(),
         ) else {
-            return Err(SessionError::InvalidEntry(
-                "there is no uncompacted history to compact".to_string(),
-            ));
+            let error = if preparation_entries
+                .last()
+                .is_some_and(|record| matches!(record.entry, SessionEntry::Compaction(_)))
+            {
+                SessionError::AlreadyCompacted
+            } else {
+                SessionError::NothingToCompact
+            };
+            if reason == crate::CompactionReason::Manual {
+                let error_message = Some(format!("Compaction failed: {error}"));
+                self.events.publish_compaction_end(
+                    reason,
+                    None,
+                    false,
+                    false,
+                    error_message.clone(),
+                );
+                self.plugin_driver()
+                    .session_compact_failed(
+                        self.session_dispatch_context(),
+                        &SessionCompactFailedEvent {
+                            reason,
+                            error_message,
+                            aborted: false,
+                            will_retry: false,
+                            from_extension: false,
+                        },
+                    )
+                    .await;
+            }
+            return Err(error);
         };
-        self.events.publish_compaction_start(reason);
+        if reason != crate::CompactionReason::Manual {
+            self.events.publish_compaction_start(reason);
+        }
 
         let (abort_handle, signal) = AbortHandle::new();
         self.activity
@@ -297,21 +382,9 @@ impl AgentSession {
         if signal.is_aborted() || before.as_ref().is_some_and(|result| result.cancel) {
             self.activity
                 .clear_cancellation(CancellationStage::Compaction);
-            self.plugin_driver()
-                .session_compact_failed(
-                    self.session_dispatch_context(),
-                    &SessionCompactFailedEvent {
-                        reason,
-                        error_message: None,
-                        aborted: true,
-                        will_retry,
-                        from_extension: false,
-                    },
-                )
-                .await;
-            self.events
-                .publish_compaction_end(reason, None, true, will_retry, None);
-            return Err(SessionError::Cancelled("session compaction"));
+            let error = SessionError::Cancelled("session compaction");
+            self.publish_compaction_failure(reason, &error, false).await;
+            return Err(error);
         }
 
         let replacement = before.and_then(|result| result.compaction);
@@ -320,7 +393,10 @@ impl AgentSession {
             Some(compaction) => Ok(compaction),
             None => generate_compaction(
                 &preparation,
-                &self.runtime,
+                &SessionCompactionCompleter {
+                    session: self,
+                    reason,
+                },
                 self.compaction_policy.as_ref(),
                 custom_instructions.as_deref(),
                 self.runtime.agent().state().thinking_level,
@@ -330,7 +406,7 @@ impl AgentSession {
             .map_err(|error| match error {
                 CompactionError::Aborted(_) => SessionError::Cancelled("session compaction"),
                 CompactionError::SummarizationFailed(message) => {
-                    SessionError::Runtime(format!("compaction summarization failed: {message}"))
+                    SessionError::CompactionFailed(message)
                 }
             }),
         };
@@ -339,25 +415,8 @@ impl AgentSession {
         let mut compaction = match generated {
             Ok(compaction) => compaction,
             Err(error) => {
-                self.plugin_driver()
-                    .session_compact_failed(
-                        self.session_dispatch_context(),
-                        &SessionCompactFailedEvent {
-                            reason,
-                            error_message: Some(error.to_string()),
-                            aborted: matches!(error, SessionError::Cancelled(_)),
-                            will_retry,
-                            from_extension,
-                        },
-                    )
+                self.publish_compaction_failure(reason, &error, from_extension)
                     .await;
-                self.events.publish_compaction_end(
-                    reason,
-                    None,
-                    matches!(error, SessionError::Cancelled(_)),
-                    will_retry,
-                    Some(error.to_string()),
-                );
                 return Err(error);
             }
         };
@@ -410,27 +469,41 @@ impl AgentSession {
                 })
             }
             Err(error) => {
-                self.plugin_driver()
-                    .session_compact_failed(
-                        self.session_dispatch_context(),
-                        &SessionCompactFailedEvent {
-                            reason,
-                            error_message: Some(error.to_string()),
-                            aborted: false,
-                            will_retry,
-                            from_extension,
-                        },
-                    )
+                self.publish_compaction_failure(reason, &error, from_extension)
                     .await;
-                self.events.publish_compaction_end(
-                    reason,
-                    None,
-                    false,
-                    will_retry,
-                    Some(error.to_string()),
-                );
                 Err(error)
             }
         }
+    }
+
+    async fn publish_compaction_failure(
+        &self,
+        reason: crate::CompactionReason,
+        error: &SessionError,
+        from_extension: bool,
+    ) {
+        let aborted = matches!(error, SessionError::Cancelled(_));
+        let error_message = (!aborted).then(|| {
+            let prefix = match reason {
+                crate::CompactionReason::Manual => "Compaction failed",
+                crate::CompactionReason::Threshold => "Auto-compaction failed",
+                crate::CompactionReason::Overflow => "Context overflow recovery failed",
+            };
+            format!("{prefix}: {error}")
+        });
+        self.events
+            .publish_compaction_end(reason, None, aborted, false, error_message.clone());
+        self.plugin_driver()
+            .session_compact_failed(
+                self.session_dispatch_context(),
+                &SessionCompactFailedEvent {
+                    reason,
+                    error_message,
+                    aborted,
+                    will_retry: false,
+                    from_extension,
+                },
+            )
+            .await;
     }
 }

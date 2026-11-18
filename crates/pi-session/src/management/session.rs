@@ -398,6 +398,7 @@ impl PiSession {
             cwd: cwd.into(),
             path: path.into(),
             parent_session: None,
+            parent_reference: None,
         })
         .await
     }
@@ -412,6 +413,23 @@ impl PiSession {
             cwd: cwd.into(),
             path: path.into(),
             parent_session: Some(parent_session.into()),
+            parent_reference: None,
+        })
+        .await
+    }
+
+    /// Records an external parent's opaque reference without requiring its journal to exist locally.
+    pub async fn new_session_with_parent_reference(
+        &self,
+        cwd: impl Into<PathBuf>,
+        path: impl Into<PathBuf>,
+        parent_reference: String,
+    ) -> Result<AgentSessionReplacement, MultiSessionManagerError> {
+        self.replace(SessionReplacementRequest::New {
+            cwd: cwd.into(),
+            path: path.into(),
+            parent_session: None,
+            parent_reference: Some(parent_reference),
         })
         .await
     }

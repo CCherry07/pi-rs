@@ -11,18 +11,15 @@ use std::task::Poll;
 use pi_agent::QueueMode;
 use pi_core::{ContentBlock, ImageContent, Message, ModelSpec, StopReason, ThinkingLevel};
 use pi_session::{
-    AgentMessage, AgentSession, AgentSessionReplacement, ForkPosition, PiSession,
-    PromptDisposition, SessionDocument, SessionEntry, SessionInput, SessionRecord,
-    SessionResetReason, SessionUpdate, ShellExecutionOptions, aggregate_document_usage,
-    current_session_context_tokens,
+    AgentSession, AgentSessionReplacement, ForkPosition, PiSession, PromptDisposition,
+    SessionDocument, SessionEntry, SessionInput, SessionRecord, SessionResetReason, SessionUpdate,
+    ShellExecutionOptions, aggregate_document_usage, current_session_context_tokens,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::json_wire::{compaction_result_json, session_entry_json, session_event_json};
 use crate::output::RpcOutput;
-
-pub(crate) const MAX_RPC_LINE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(
@@ -161,6 +158,8 @@ enum RpcCommand {
     GetCommands {
         id: Option<String>,
     },
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -190,6 +189,7 @@ impl From<RpcQueueMode> for QueueMode {
 impl RpcCommand {
     fn id(&self) -> Option<&str> {
         match self {
+            Self::Unknown => None,
             Self::Prompt { id, .. }
             | Self::Steer { id, .. }
             | Self::FollowUp { id, .. }
@@ -228,6 +228,7 @@ impl RpcCommand {
 
     const fn name(&self) -> &'static str {
         match self {
+            Self::Unknown => "unknown",
             Self::Prompt { .. } => "prompt",
             Self::Steer { .. } => "steer",
             Self::FollowUp { .. } => "follow_up",
@@ -275,23 +276,58 @@ pub async fn run(session: PiSession, export_html: HtmlExporter) -> Result<(), St
 pub async fn run_connection(
     session: PiSession,
     export_html: HtmlExporter,
+    connection: crate::ui::RpcConnection,
+) -> Result<(), String> {
+    run_connection_with_shutdown(session, export_html, connection, std::future::pending()).await
+}
+
+/// Extension-requested shutdown waits for outstanding responses and session settlement.
+/// Closing stdin still cancels outstanding work and disposes the connection immediately.
+pub async fn run_connection_with_shutdown(
+    session: PiSession,
+    export_html: HtmlExporter,
     mut connection: crate::ui::RpcConnection,
+    shutdown: impl Future<Output = ()>,
 ) -> Result<(), String> {
     let output = connection.bridge.output.clone();
-    let events = EventForwarder(tokio::spawn(forward_events(
-        session.clone(),
-        output.clone(),
-    )));
+    let (stop_events, stopping_events) = tokio::sync::oneshot::channel();
+    let events = EventForwarder {
+        stop: Some(stop_events),
+        task: Some(tokio::spawn(forward_events(
+            session.observe(),
+            output.clone(),
+            stopping_events,
+        ))),
+    };
     let mut commands = tokio::task::JoinSet::new();
+    tokio::pin!(shutdown);
+    let mut shutdown_requested = false;
     let result = async {
-        while let Some(line) = connection.commands.recv().await {
-            let mut line = line?;
-            if line.len() > MAX_RPC_LINE_BYTES {
-                output
-                    .emit(error_response(None, "parse", "RPC command exceeds 16 MiB"))
-                    .await?;
-                continue;
+        loop {
+            while let Some(result) = commands.try_join_next() {
+                result.map_err(|error| error.to_string())??;
             }
+            let current = session.current();
+            let line = tokio::select! {
+                biased;
+                // Read commands already delivered before an idle shutdown request.
+                line = connection.commands.recv() => match line {
+                    Some(line) => line,
+                    None => break,
+                },
+                result = commands.join_next(), if !commands.is_empty() => {
+                    if let Some(result) = result {
+                        result.map_err(|error| error.to_string())??;
+                    }
+                    continue;
+                },
+                () = &mut shutdown, if !shutdown_requested => {
+                    shutdown_requested = true;
+                    continue;
+                },
+                () = current.wait_for_idle(), if shutdown_requested && commands.is_empty() => break,
+            };
+            let mut line = line?;
             if line.last() == Some(&b'\n') {
                 line.pop();
             }
@@ -323,22 +359,49 @@ pub async fn run_connection(
     session.current().abort_shell();
     commands.abort_all();
     while commands.join_next().await.is_some() {}
-    drop(events);
+    events.finish().await;
     let flushed = output.flush().await;
     result.and(flushed)
 }
 
-struct EventForwarder(tokio::task::JoinHandle<()>);
+struct EventForwarder {
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
 
-impl Drop for EventForwarder {
-    fn drop(&mut self) {
-        self.0.abort();
+impl EventForwarder {
+    async fn finish(mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
     }
 }
 
-async fn forward_events(session: PiSession, output: RpcOutput) {
-    let mut observation = session.observe();
-    while let Some(update) = observation.recv().await {
+impl Drop for EventForwarder {
+    fn drop(&mut self) {
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+    }
+}
+
+async fn forward_events(
+    mut observation: pi_session::SessionObservation,
+    output: RpcOutput,
+    mut stop: tokio::sync::oneshot::Receiver<()>,
+) {
+    loop {
+        let update = tokio::select! {
+            biased;
+            update = observation.recv() => match update {
+                Some(update) => update,
+                None => return,
+            },
+            _ = &mut stop => return,
+        };
         let value = match update {
             SessionUpdate::Event {
                 event: pi_session::AgentSessionEvent::PluginNotice { message, level },
@@ -430,6 +493,13 @@ pub async fn dispatch(
         .unwrap_or("parse")
         .to_string();
     let command = match serde_json::from_value::<RpcCommand>(parsed) {
+        Ok(RpcCommand::Unknown) => {
+            return Some(error_response(
+                fallback_id.as_deref(),
+                &fallback_command,
+                &format!("Unknown command: {fallback_command}"),
+            ));
+        }
         Ok(command) => command,
         Err(error) => {
             return Some(error_response(
@@ -453,21 +523,15 @@ async fn handle_command(
     export_html: HtmlExporter,
 ) -> Result<Option<Value>, String> {
     match command {
+        RpcCommand::Unknown => Err("Unknown command".into()),
         RpcCommand::Prompt {
             message,
             images,
             streaming_behavior,
             ..
         } => {
-            let current = session.current();
-            let disposition = if current.snapshot().agent.is_running {
-                let behavior = streaming_behavior.ok_or_else(|| {
-                    "Agent is streaming; specify streamingBehavior as steer or followUp".to_string()
-                })?;
-                queue_message(&current, message, images, behavior).await?
-            } else {
-                start_prompt(current, message, images).await?
-            };
+            let disposition =
+                start_prompt(session.current(), message, images, streaming_behavior).await?;
             Ok(Some(disposition_json(disposition)))
         }
         RpcCommand::Steer {
@@ -495,7 +559,7 @@ async fn handle_command(
             Ok(Some(disposition_json(disposition)))
         }
         RpcCommand::Abort { .. } => {
-            session.abort();
+            session.current().abort_and_wait().await;
             Ok(None)
         }
         RpcCommand::ClearQueue { .. } => {
@@ -511,10 +575,10 @@ async fn handle_command(
         RpcCommand::NewSession { parent_session, .. } => {
             let current = session.current();
             let path = new_session_path(current.history().path());
-            let replacement = match parent_session {
+            let replacement = match parent_session.filter(|parent| !parent.is_empty()) {
                 Some(parent) => {
                     session
-                        .new_session_with_parent(current.catalog().cwd(), &path, parent)
+                        .new_session_with_parent_reference(current.catalog().cwd(), &path, parent)
                         .await
                 }
                 None => session.new_session(current.catalog().cwd(), &path).await,
@@ -531,32 +595,29 @@ async fn handle_command(
             let current = session.current();
             let model = current
                 .catalog()
-                .model(&provider.clone().into(), &model_id.clone().into())
+                .available_models()
+                .into_iter()
+                .find(|model| model.provider.as_str() == provider && model.id.as_str() == model_id)
                 .ok_or_else(|| format!("Model not found: {provider}/{model_id}"))?;
             current
-                .set_model(provider.into(), model_id.into())
+                .set_model_with_hooks(provider.into(), model_id.into())
+                .await
                 .map_err(|error| error.to_string())?;
             Ok(Some(model_json(&model)?))
         }
         RpcCommand::CycleModel { .. } => {
             let current = session.current();
-            let models = current.catalog().available_models();
-            if models.is_empty() {
+            let Some(result) = current
+                .cycle_model_with_hooks()
+                .await
+                .map_err(|error| error.to_string())?
+            else {
                 return Ok(Some(Value::Null));
-            }
-            let state = current.snapshot().agent;
-            let index = models
-                .iter()
-                .position(|model| model.provider == state.provider_id && model.id == state.model_id)
-                .map_or(0, |index| (index + 1) % models.len());
-            let model = models[index].clone();
-            current
-                .set_model(model.provider.clone(), model.id.clone())
-                .map_err(|error| error.to_string())?;
+            };
             Ok(Some(json!({
-                "model":model_json(&model)?,
-                "thinkingLevel":current.snapshot().agent.thinking_level,
-                "isScoped":false,
+                "model":model_json(&result.model)?,
+                "thinkingLevel":result.thinking_level,
+                "isScoped":result.is_scoped,
             })))
         }
         RpcCommand::GetAvailableModels { .. } => {
@@ -596,11 +657,17 @@ async fn handle_command(
             "levels":available_thinking_levels(&session.current()),
         }))),
         RpcCommand::SetSteeringMode { mode, .. } => {
-            session.current().set_steering_mode(mode.into());
+            session
+                .current()
+                .update_setting(pi_session::SessionSetting::SteeringMode(mode.into()))
+                .map_err(|error| error.to_string())?;
             Ok(None)
         }
         RpcCommand::SetFollowUpMode { mode, .. } => {
-            session.current().set_follow_up_mode(mode.into());
+            session
+                .current()
+                .update_setting(pi_session::SessionSetting::FollowUpMode(mode.into()))
+                .map_err(|error| error.to_string())?;
             Ok(None)
         }
         RpcCommand::Compact {
@@ -611,7 +678,10 @@ async fn handle_command(
             current
                 .compact(custom_instructions)
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| match error {
+                    pi_session::SessionError::Cancelled(_) => "Compaction cancelled".to_string(),
+                    error => error.to_string(),
+                })?;
             let document = current
                 .history()
                 .load()
@@ -625,11 +695,17 @@ async fn handle_command(
             Ok(Some(compaction_result_json(record, &document)?))
         }
         RpcCommand::SetAutoCompaction { enabled, .. } => {
-            session.current().set_auto_compaction_enabled(enabled);
+            session
+                .current()
+                .update_setting(pi_session::SessionSetting::AutoCompaction(enabled))
+                .map_err(|error| error.to_string())?;
             Ok(None)
         }
         RpcCommand::SetAutoRetry { enabled, .. } => {
-            session.current().set_auto_retry_enabled(enabled);
+            session
+                .current()
+                .update_setting(pi_session::SessionSetting::AutoRetry(enabled))
+                .map_err(|error| error.to_string())?;
             Ok(None)
         }
         RpcCommand::AbortRetry { .. } => {
@@ -648,6 +724,7 @@ async fn handle_command(
                     ShellExecutionOptions {
                         id,
                         exclude_from_context,
+                        timeout: None,
                         ..ShellExecutionOptions::default()
                     },
                 )
@@ -689,11 +766,12 @@ async fn handle_command(
             let replacement = session
                 .fork_session(entry_id, ForkPosition::Before)
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(fork_error)?;
             Ok(Some(json!({
-                "text":selected_text.unwrap_or_default(),
+                "text":(!replacement_cancelled(replacement)).then_some(selected_text).flatten(),
                 "cancelled":replacement_cancelled(replacement),
-            })))
+            }))
+            .map(omit_null_fields))
         }
         RpcCommand::CloneSession { .. } => {
             let leaf = session
@@ -704,7 +782,7 @@ async fn handle_command(
             let replacement = session
                 .fork_session(leaf, ForkPosition::At)
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(fork_error)?;
             Ok(Some(
                 json!({"cancelled":replacement_cancelled(replacement)}),
             ))
@@ -719,7 +797,9 @@ async fn handle_command(
                 .entries
                 .iter()
                 .filter_map(|record| {
-                    user_entry_text(record).map(|text| json!({"entryId":record.id,"text":text}))
+                    user_entry_text(record)
+                        .filter(|text| !text.is_empty())
+                        .map(|text| json!({"entryId":record.id,"text":text}))
                 })
                 .collect::<Vec<_>>();
             Ok(Some(json!({"messages":messages})))
@@ -759,9 +839,9 @@ async fn handle_command(
                 "leafId":document.leaf_id(pi_session::MAIN_LANE).map_err(|error| error.to_string())?,
             })))
         }
-        RpcCommand::GetLastAssistantText { .. } => Ok(Some(json!({
+        RpcCommand::GetLastAssistantText { .. } => Ok(Some(omit_null_fields(json!({
             "text":last_assistant_text(&session.current()),
-        }))),
+        })))),
         RpcCommand::SetSessionName { name, .. } => {
             let name = name.trim();
             if name.is_empty() {
@@ -769,31 +849,28 @@ async fn handle_command(
             }
             session
                 .current()
-                .set_name(Some(name.to_string()))
-                .await
+                .set_session_name(Some(name.to_string()))
                 .map_err(|error| error.to_string())?;
             Ok(None)
         }
         RpcCommand::GetMessages { .. } => Ok(Some(json!({
-            "messages":session.current().snapshot().agent.messages,
+            "messages":session.current().context_messages().map_err(|error| error.to_string())?,
         }))),
         RpcCommand::GetCommands { .. } => {
-            let commands = session
-                .current()
-                .catalog()
-                .command_specs()
+            let mut catalog = session.current().catalog().command_catalog();
+            catalog.sort_by_key(|command| match command.metadata.source {
+                pi_plugin::CommandSource::Extension => 0,
+                pi_plugin::CommandSource::Prompt => 1,
+                pi_plugin::CommandSource::Skill => 2,
+            });
+            let commands = catalog
                 .into_iter()
                 .map(|command| {
                     json!({
-                        "name":command.name,
-                        "description":command.description,
-                        "source":"extension",
-                        "sourceInfo":{
-                            "path":"pi-rs://runtime/commands",
-                            "source":"pi-rs runtime",
-                            "scope":"temporary",
-                            "origin":"top-level",
-                        },
+                        "name":command.spec.name,
+                        "description":command.spec.description,
+                        "source":command.metadata.source,
+                        "sourceInfo":command.metadata.source_info,
                     })
                 })
                 .collect::<Vec<_>>();
@@ -806,13 +883,21 @@ async fn start_prompt(
     session: Arc<AgentSession>,
     message: String,
     images: Vec<ImageContent>,
+    streaming_behavior: Option<StreamingBehavior>,
 ) -> Result<PromptDisposition, String> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let running = tokio::spawn(async move {
         session
-            .prompt_with_receipt(session_input(message, images), move |disposition| {
-                let _ = sender.send(disposition);
-            })
+            .prompt_with_streaming_behavior_and_receipt(
+                session_input(message, images),
+                streaming_behavior.map(|behavior| match behavior {
+                    StreamingBehavior::Steer => pi_plugin::InputStreamingBehavior::Steer,
+                    StreamingBehavior::FollowUp => pi_plugin::InputStreamingBehavior::FollowUp,
+                }),
+                move |disposition| {
+                    let _ = sender.send(disposition);
+                },
+            )
             .await
     });
     // Admission belongs to this request. A disconnected client must not leave
@@ -857,16 +942,21 @@ async fn queue_message(
     behavior: StreamingBehavior,
 ) -> Result<PromptDisposition, String> {
     let input = session_input(text, images);
-    match behavior {
-        StreamingBehavior::Steer => session.steer(input).await,
-        StreamingBehavior::FollowUp => session.follow_up(input).await,
-    }
-    .map(|outcome| outcome.disposition())
-    .map_err(|error| error.to_string())
+    session
+        .queue_user_input(
+            input,
+            match behavior {
+                StreamingBehavior::Steer => pi_plugin::InputStreamingBehavior::Steer,
+                StreamingBehavior::FollowUp => pi_plugin::InputStreamingBehavior::FollowUp,
+            },
+        )
+        .await
+        .map(|outcome| outcome.disposition())
+        .map_err(|error| error.to_string())
 }
 
 fn session_input(text: String, images: Vec<ImageContent>) -> SessionInput {
-    let input = SessionInput::new(text);
+    let input = SessionInput::new(text).with_source(pi_plugin::InputSource::Rpc);
     if images.is_empty() {
         input
     } else {
@@ -892,7 +982,7 @@ fn state_json(session: &AgentSession) -> Result<Value, String> {
         "sessionId": session.history().header().id,
         "sessionName": snapshot.name,
         "autoCompactionEnabled": session.auto_compaction_enabled(),
-        "messageCount": snapshot.agent.messages.len(),
+        "messageCount": session.context_messages().map_err(|error| error.to_string())?.len(),
         "pendingMessageCount": snapshot.queue.steering.len() + snapshot.queue.follow_up.len(),
     })))
 }
@@ -1023,13 +1113,8 @@ fn session_stats_json(session: &AgentSession) -> Result<Value, String> {
             .cloned()
             .collect::<Vec<_>>();
         let messages = session
-            .snapshot()
-            .agent
-            .messages
-            .iter()
-            .cloned()
-            .map(AgentMessage::from)
-            .collect::<Vec<_>>();
+            .context_messages()
+            .map_err(|error| error.to_string())?;
         let tokens = current_session_context_tokens(&branch, &messages).map(|usage| usage.tokens);
         value["contextUsage"] = json!({
             "tokens":tokens,
@@ -1042,10 +1127,15 @@ fn session_stats_json(session: &AgentSession) -> Result<Value, String> {
 
 fn tree_json(document: &SessionDocument) -> Result<Vec<Value>, String> {
     fn children(document: &SessionDocument, parent: Option<&str>) -> Result<Vec<Value>, String> {
-        document
+        let mut entries = document
             .entries
             .iter()
             .filter(|record| record.parent_id.as_deref() == parent)
+            .collect::<Vec<_>>();
+        if parent.is_some() {
+            entries.sort_by_key(|record| record.timestamp_ms);
+        }
+        entries.into_iter()
             .map(|record| {
                 let mut node = json!({
                     "entry":session_entry_json(record, document)?,
@@ -1053,6 +1143,13 @@ fn tree_json(document: &SessionDocument) -> Result<Vec<Value>, String> {
                 });
                 if let Some(label) = document.labels.get(&record.id) {
                     node["label"] = json!(label);
+                    if let Some(change) = document.entries.iter().rev().find(|change| {
+                        matches!(&change.entry, SessionEntry::Custom(custom)
+                            if custom.custom_type == "pi.coding-agent.legacy.label"
+                            && custom.data.as_ref().and_then(|data| data.get("targetId")).and_then(Value::as_str) == Some(record.id.as_str()))
+                    }) {
+                        node["labelTimestamp"] = session_entry_json(change, document)?["timestamp"].clone();
+                    }
                 }
                 Ok(node)
             })
@@ -1080,31 +1177,42 @@ fn user_entry_text(record: &SessionRecord) -> Option<String> {
     )
 }
 
+fn fork_error(error: pi_session::MultiSessionManagerError) -> String {
+    match error {
+        pi_session::MultiSessionManagerError::Session(
+            pi_session::SessionError::InvalidForkTarget(_),
+        ) => "Invalid entry ID for forking".to_string(),
+        error => error.to_string(),
+    }
+}
+
 fn last_assistant_text(session: &AgentSession) -> Option<String> {
     session
-        .snapshot()
-        .agent
-        .messages
+        .context_messages()
+        .ok()?
         .iter()
         .rev()
-        .find_map(|message| match message {
-            Message::Assistant(message)
-                if !matches!(message.stop_reason, StopReason::Error | StopReason::Aborted) =>
-            {
-                Some(
-                    message
-                        .content
-                        .iter()
-                        .filter_map(|content| match content {
-                            ContentBlock::Text(text) => Some(text.text.as_str()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join(""),
-                )
-            }
+        .filter_map(|message| match message.as_standard() {
+            Some(Message::Assistant(message)) => Some(message),
             _ => None,
         })
+        .find(|message| {
+            message.stop_reason == StopReason::Stop || message.content.iter()
+            .any(|block| matches!(block, ContentBlock::Text(text) if !text.text.trim().is_empty()))
+        })
+        .map(|message| {
+            message
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>()
+                .trim()
+                .to_string()
+        })
+        .filter(|text| !text.is_empty())
 }
 
 #[cfg(test)]

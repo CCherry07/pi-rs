@@ -184,6 +184,8 @@ fn tool_parameters() -> Value {
 impl Tool for ScheduleTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
+            output_schema: None,
+            constrained_sampling: None,
             name: "schedule".into(), label: "Scheduled tasks".into(),
             description: "Manage persistent scheduled prompts. Jobs run in fresh isolated sessions while a primary Pi session with the same workspace roots and execution directory is open and idle. Actions: create, list, pause, resume, remove, run_now, history. run_now queues an asynchronous run. Scope defaults to global; project requires trust. Creating a job snapshots the current workspace, model, thinking and active tools.".into(),
             parameters: tool_parameters(),

@@ -87,6 +87,7 @@ impl Config {
     pub(crate) fn features(&self) -> Features {
         let requested = self.runtime_settings.features;
         Features {
+            hashline: self.features.hashline && requested.hashline,
             memory: self.features.memory && requested.memory,
             subagents: self.features.subagents && requested.subagents,
             schedule: self.features.schedule && requested.schedule,

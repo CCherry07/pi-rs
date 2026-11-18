@@ -304,6 +304,7 @@ pub(crate) enum ResolvedSessionTransition {
         cwd: PathBuf,
         path: PathBuf,
         parent_session_id: Option<String>,
+        parent_reference: Option<String>,
     },
     Resume {
         path: PathBuf,
@@ -568,6 +569,7 @@ impl SessionSlot {
                 cwd,
                 path,
                 parent_session_id,
+                parent_reference,
             } => {
                 let inherit_workspace = cwd == current.runtime().cwd();
                 let target = match parent_session_id {
@@ -575,7 +577,7 @@ impl SessionSlot {
                     None => SessionTarget::create(cwd, &path),
                 }
                 .with_in_memory(!current.store().is_persistent());
-                let target = if inherit_workspace {
+                let mut target = if inherit_workspace {
                     target.with_workspace(
                         current.runtime().workspace().spec().clone(),
                         current.store().header().metadata,
@@ -583,6 +585,16 @@ impl SessionSlot {
                 } else {
                     target
                 };
+                if let SessionTarget::Create { metadata, .. } = &mut target {
+                    let metadata = metadata.get_or_insert_default();
+                    metadata.remove("pi.coding-agent.parentSession");
+                    if let Some(reference) = parent_reference {
+                        metadata.insert(
+                            "pi.coding-agent.parentSession".into(),
+                            serde_json::Value::String(reference),
+                        );
+                    }
+                }
                 (
                     target,
                     SessionStartReason::New,
@@ -657,6 +669,14 @@ impl SessionSlot {
             .join(format!("{id}.jsonl"));
         let mut header = SessionHeader::new(id, source.cwd);
         header.metadata = source.metadata;
+        if current.store().is_persistent() {
+            header.metadata.get_or_insert_default().insert(
+                "pi.coding-agent.parentSession".into(),
+                serde_json::Value::String(current.store().path().to_string_lossy().into_owned()),
+            );
+        } else if let Some(metadata) = &mut header.metadata {
+            metadata.remove("pi.coding-agent.parentSession");
+        }
         header.parent_session_id = Some(source.id);
         let fork = current.store().fork(
             &path,

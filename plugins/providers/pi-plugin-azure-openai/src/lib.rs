@@ -315,8 +315,9 @@ impl Provider for AzureOpenAiResponsesProvider {
         if let Some(deployment) = self.config.deployment_names.get(original_model.as_str()) {
             wire_request.model = deployment.clone().into();
         }
+        let grammar = responses::grammar_properties(&wire_request)?;
         let payload = context
-            .before_provider_request(&signal, responses::request_body(&wire_request))
+            .before_provider_request(&signal, responses::request_body(&wire_request)?)
             .await?;
         let response = post_json_with_provider_hooks(
             self.transport.as_ref(),
@@ -344,12 +345,13 @@ impl Provider for AzureOpenAiResponsesProvider {
                 response.content_type.as_deref().unwrap_or("<missing>")
             )));
         }
-        Ok(responses::stream(
+        Ok(responses::stream_with_grammar(
             self.config.provider_id.clone(),
             original_model,
             AZURE_OPENAI_RESPONSES_API,
             response.body,
             signal,
+            grammar,
         ))
     }
 }

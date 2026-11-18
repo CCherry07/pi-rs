@@ -18,7 +18,9 @@
   "files": [
     "dist/bin",
     "dist/src",
-    "README.md"
+    "README.md",
+    "docs",
+    "examples"
   ],
   "exports": {
     ".": {
@@ -29,6 +31,7 @@
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "npm run clean && tsc",
+    "postbuild": "node -e \"for (const file of new Set(Object.values(require('./package.json').bin))) require('node:fs').chmodSync(file, 0o755)\"",
     "build:native": "tsx ./scripts/release.ts native",
     "build:native:release": "tsx ./scripts/release.ts native --release",
     "check": "tsc --noEmit",

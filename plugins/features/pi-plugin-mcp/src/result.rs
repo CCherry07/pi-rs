@@ -53,6 +53,7 @@ fn project_resource_listing_with_output(
     mut save: impl FnMut(&[u8], &str) -> io::Result<PathBuf>,
 ) -> ToolResult {
     ToolResult {
+        structured_content: Some(payload.clone()),
         content: limit_content(vec![text(payload.to_string())], &mut save),
         details: Some(payload),
         usage: None,
@@ -103,6 +104,7 @@ fn project_resource_read_with_output(
         content.push(text(format!("Resource {uri} is empty.")));
     }
     ToolResult {
+        structured_content: Some(details.clone()),
         content: limit_content(content, &mut save),
         details: Some(details),
         usage: None,
@@ -121,6 +123,12 @@ fn project_result_with_output(
 ) -> ToolResult {
     // Keep the existing Rust details contract, including _meta and structured content.
     let details = serde_json::to_value(&result).ok();
+    let structured_content = details.clone().map(|mut payload| {
+        if let Some(object) = payload.as_object_mut() {
+            object.remove("_meta");
+        }
+        payload
+    });
     let is_error = result.is_error.unwrap_or(false);
     let mut content = result
         .content
@@ -138,6 +146,7 @@ fn project_result_with_output(
         content.push(text(format!("MCP tool {server}/{tool} returned an error")));
     }
     ToolResult {
+        structured_content,
         content: limit_content(content, &mut save),
         details,
         usage: None,

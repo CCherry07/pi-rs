@@ -51,6 +51,7 @@ pub enum AgentLoopError {
 
 #[derive(Debug, Clone)]
 pub struct AgentLoopConfig {
+    pub prompt_state: Option<pi_plugin::RunSystemPrompt>,
     /// Overrides the runtime's configured default for this run.
     pub stream_fn: Option<StreamFn>,
     pub convert_to_llm: ConvertToLlm,
@@ -280,13 +281,20 @@ impl AgentMessageQueues for NoopMessageQueues {
 
 pub async fn run_agent_loop(
     run_id: RunId,
-    prompts: Vec<Message>,
+    mut prompts: Vec<Message>,
     mut context: AgentContext,
     config: AgentLoopConfig,
     services: AgentLoopServices,
     signal: AbortSignal,
 ) -> Result<AgentLoopOutcome, AgentLoopError> {
     let events = Arc::clone(&services.events);
+    if let Some(update) = config
+        .prompt_state
+        .as_ref()
+        .and_then(|prompt| prompt.section_update(&context.messages, now_ms()))
+    {
+        prompts.insert(0, Message::System(update));
+    }
     let mut new_messages = Vec::with_capacity(prompts.len());
     emit(&events, AgentEvent::AgentStart, &signal).await?;
     emit(&events, AgentEvent::TurnStart, &signal).await?;
@@ -381,6 +389,14 @@ async fn run_loop(
                     .await?
                 {
                     if let Some(next_context) = update.context {
+                        if next_context.system_prompt != context.system_prompt {
+                            // A controller's run-local replacement must survive the
+                            // next loadout render, just like an agent-start override.
+                            config.prompt_state = config
+                                .prompt_state
+                                .take()
+                                .map(|state| state.with_text(next_context.system_prompt.clone()));
+                        }
                         context = Arc::new(next_context);
                     }
                     if let Some(provider_id) = update.provider_id {
@@ -441,6 +457,28 @@ async fn run_loop(
                 .await?;
                 stop = AgentLoopStop::Aborted;
                 break 'run;
+            }
+
+            if let Some(prompt) = &config.prompt_state {
+                let prompt = prompt
+                    .with_active_tools(&context.active_tools)
+                    .map_err(AgentLoopError::Event)?;
+                Arc::make_mut(&mut context).system_prompt = prompt.text().to_string();
+                if let Some(update) = prompt.section_update(&context.messages, now_ms()) {
+                    let message = Message::System(update);
+                    emit(
+                        &events,
+                        AgentEvent::MessageStart {
+                            message: message.clone(),
+                        },
+                        &signal,
+                    )
+                    .await?;
+                    let message = emit_message_end(&events, &signal, message).await?;
+                    Arc::make_mut(&mut context).messages.push(message.clone());
+                    Arc::make_mut(&mut new_messages).push(message);
+                }
+                config.prompt_state = Some(prompt);
             }
 
             let assistant = stream_assistant_response(
@@ -624,8 +662,9 @@ async fn stream_assistant_response(
     let events = Arc::clone(&services.events);
 
     let tools = registries
-        .tool_specs(&context.active_tools)
+        .prepare_tool_loadout(&context.active_tools)
         .map_err(|error| AgentLoopError::ProviderNotFound(error.to_string()))?;
+    let tools = tools.tools;
     let mut request_messages = plugins
         .context(run_id, &config.cwd, &signal, context.messages.clone())
         .await
@@ -633,13 +672,21 @@ async fn stream_assistant_response(
     if let Some(transform) = &config.transform_context {
         request_messages = transform.call(request_messages, signal.clone()).await;
     }
-    let request_messages = config
+    let mut request_messages: Vec<Message> = config
         .convert_to_llm
         .call(request_messages)
         .await
         .into_iter()
         .map(|message| filter_blocked_images(message, config.block_images))
         .collect();
+    let system_prompt = match &config.prompt_state {
+        Some(prompt) if prompt.is_forced() => {
+            request_messages.retain(|message| !matches!(message, Message::System(_)));
+            prompt.text()
+        }
+        Some(prompt) if prompt.has_sections() => "",
+        _ => &context.system_prompt,
+    };
     let model_spec = registries
         .model(&config.provider_id, &config.model_id)
         .cloned();
@@ -651,7 +698,7 @@ async fn stream_assistant_response(
         model: config.model_id.clone(),
         model_spec,
         system_prompt: crate::namespace_prompt::with_instructions(
-            &context.system_prompt,
+            system_prompt,
             &registries,
             &context.active_tools,
         ),

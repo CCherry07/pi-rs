@@ -16,7 +16,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use futures::StreamExt;
 use pi_agent::{
     Agent, AgentConfigurationPatch, AgentLoopOutcome, AgentOptions, AgentRestoreState,
-    AgentRuntime, AgentStateSnapshot, PreparedAgentConfiguration, PromptInput, StreamAssembler,
+    AgentRuntime, AgentStateSnapshot, PreparedAgentConfiguration, PreparedAgentModelConfiguration,
+    PromptInput, StreamAssembler,
 };
 use pi_core::{
     AbortHandle, AbortSignal, AssistantMessage, ContentBlock, ImageContent, Message, ModelId,
@@ -24,10 +25,11 @@ use pi_core::{
     ThinkingBudgets, ThinkingLevel, UserMessage,
 };
 use pi_plugin::{
-    AgentSettledEvent, CommandContext, CommandOutcome, CommandSpec, ContextParts, InputEvent,
-    InputPatch, InputSource, InputStreamingBehavior, Plugin, PluginContext, PluginContextEpoch,
-    PluginContextHandle, PluginContextScope, PluginDiagnostic, ProviderCallContext, ProviderPlugin,
-    ProviderRequest, RegistriesBuilder, is_retryable_provider_error_message,
+    AgentSettledEvent, CommandContext, CommandOutcome, CommandSource, CommandSpec, ContextParts,
+    InputEvent, InputPatch, InputSource, InputStreamingBehavior, Plugin, PluginContext,
+    PluginContextEpoch, PluginContextHandle, PluginContextScope, PluginDiagnostic,
+    ProviderCallContext, ProviderPlugin, ProviderRequest, RegistriesBuilder,
+    is_retryable_provider_error_message,
 };
 use pi_utils::time::unix_timestamp_ms as now_ms;
 
@@ -84,15 +86,23 @@ pub struct RuntimeConfigurationPatch {
 /// succeeded. Dropping this value leaves configuration and prompt metadata intact.
 #[must_use = "commit the prepared configuration or drop it to roll back"]
 pub struct PreparedRuntimeConfiguration<'a> {
-    _reload_guard: tokio::sync::MutexGuard<'a, ()>,
-    agent: PreparedAgentConfiguration<'a>,
+    _reload_guard: Option<tokio::sync::MutexGuard<'a, ()>>,
+    agent: PreparedConfigurationAgent<'a>,
     generation: Arc<RuntimeGeneration>,
     prompt_options: Option<Option<serde_json::Value>>,
 }
 
+enum PreparedConfigurationAgent<'a> {
+    Idle(PreparedAgentConfiguration<'a>),
+    Model(PreparedAgentModelConfiguration<'a>),
+}
+
 impl PreparedRuntimeConfiguration<'_> {
     pub fn configuration(&self) -> &AgentStateSnapshot {
-        self.agent.configuration()
+        match &self.agent {
+            PreparedConfigurationAgent::Idle(agent) => agent.configuration(),
+            PreparedConfigurationAgent::Model(agent) => agent.configuration(),
+        }
     }
 
     /// The caller may persist this configuration before publishing it. No
@@ -105,7 +115,10 @@ impl PreparedRuntimeConfiguration<'_> {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = options;
         }
-        self.agent.commit();
+        match self.agent {
+            PreparedConfigurationAgent::Idle(agent) => agent.commit(),
+            PreparedConfigurationAgent::Model(agent) => agent.commit(),
+        }
     }
 }
 
@@ -117,6 +130,19 @@ pub struct CompletionRetryPolicy {
     pub enabled: bool,
     pub max_retries: u32,
     pub base_delay_ms: u64,
+}
+
+/// Retry progress for an isolated completion. Product adapters supply the operation's meaning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompletionRetryEvent {
+    Scheduled {
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        error_message: String,
+    },
+    AttemptStart,
+    Finished,
 }
 
 pub enum TextSubmissionOutcome {
@@ -763,7 +789,7 @@ fn build_generation(
                 AgentRuntime::new(
                     generation,
                     output.system_prompt,
-                    registries,
+                    Arc::clone(&registries),
                     driver,
                     Arc::clone(&provider_driver),
                 )
@@ -772,7 +798,10 @@ fn build_generation(
                         .as_ref()
                         .map(|prompt| prompt.prompt_contributions.clone())
                         .unwrap_or_default(),
-                ),
+                )
+                .with_prompt_resolver(prepared_prompt.as_ref().map(|prompt| {
+                    prompt.resolver(blueprint.workspace.clone(), Arc::clone(&registries))
+                })),
             ),
             prompt: prepared_prompt,
             prompt_options: Mutex::new(output.options),
@@ -789,13 +818,17 @@ fn assemble_prompt(
     workspace: &WorkspaceSnapshot,
     registries: &pi_plugin::FrozenRegistries,
 ) -> Result<PromptOutput, RuntimeError> {
-    let active_tools = registries
-        .tool_specs(active_tools)
+    let loadout = registries
+        .prepare_tool_loadout(active_tools)
         .map_err(|error| RuntimeError::Build(error.to_string()))?;
+    let available_tools = registries.all_tool_specs();
     prompt
         .render(PromptContext {
             workspace,
-            active_tools: &active_tools,
+            selected_tools: active_tools,
+            active_tools: &loadout.tools,
+            available_tools: &available_tools,
+            hidden_tools: &loadout.hidden_tools,
         })
         .map_err(RuntimeError::Build)
 }
@@ -993,6 +1026,13 @@ impl PiRuntime {
         self.current_generation().agent.registries().command_specs()
     }
 
+    pub fn command_catalog(&self) -> Vec<pi_plugin::CommandCatalogEntry> {
+        self.current_generation()
+            .agent
+            .registries()
+            .command_catalog()
+    }
+
     pub fn tool_specs(&self) -> Vec<pi_core::ToolSpec> {
         self.current_generation()
             .agent
@@ -1008,8 +1048,8 @@ impl PiRuntime {
             .default_tool_specs()
     }
 
-    /// Runs input hooks directly. Full text submissions dispatch registered
-    /// commands before entering this hook chain.
+    /// Runs input hooks directly. Full text submissions dispatch extension
+    /// commands first and expand resource commands after this hook chain.
     pub async fn process_input(
         &self,
         input: impl Into<String>,
@@ -1039,9 +1079,9 @@ impl PiRuntime {
         &self,
         input: &str,
     ) -> Result<Option<CommandOutcome>, RuntimeError> {
-        let Some((name, arguments)) = parse_command(input) else {
+        if parse_command(input).is_none() {
             return Ok(None);
-        };
+        }
         // Resolve against one published generation, then pin it for the callback.
         // Commands can invoke session/model/UI capabilities which acquire this
         // same lock. Holding it across user code makes those operations fail or
@@ -1050,9 +1090,59 @@ impl PiRuntime {
             let _reload_guard = self.reload_lock.lock().await;
             self.agent.runtime()
         };
+        self.execute_command_in_generation(input, runtime, None)
+            .await
+    }
+
+    /// Dispatches an extension command before input hooks and resource expansion.
+    pub async fn execute_extension_command(
+        &self,
+        input: &str,
+    ) -> Result<Option<CommandOutcome>, RuntimeError> {
+        if parse_command(input).is_none() {
+            return Ok(None);
+        }
+        let runtime = {
+            let _reload_guard = self.reload_lock.lock().await;
+            self.agent.runtime()
+        };
+        self.execute_command_in_generation(input, runtime, Some(CommandSource::Extension))
+            .await
+    }
+
+    /// Dispatches an extension command against the immutable generation pinned by an active submission.
+    pub async fn execute_live_extension_command(
+        &self,
+        input: &str,
+    ) -> Result<Option<CommandOutcome>, RuntimeError> {
+        self.execute_command_in_generation(
+            input,
+            self.agent.runtime(),
+            Some(CommandSource::Extension),
+        )
+        .await
+    }
+
+    async fn execute_command_in_generation(
+        &self,
+        input: &str,
+        runtime: Arc<AgentRuntime>,
+        source: Option<CommandSource>,
+    ) -> Result<Option<CommandOutcome>, RuntimeError> {
+        let Some((name, arguments)) = parse_command(input) else {
+            return Ok(None);
+        };
         let Some(command) = runtime.registries().command(name) else {
             return Ok(None);
         };
+        if source.is_some_and(|source| {
+            command
+                .metadata()
+                .map_or(CommandSource::Extension, |metadata| metadata.source)
+                != source
+        }) {
+            return Ok(None);
+        }
         let (_, signal) = AbortHandle::new();
         command
             .execute(
@@ -1069,6 +1159,24 @@ impl PiRuntime {
                 command: name.to_string(),
                 message: error.to_string(),
             })
+    }
+
+    async fn expand_input_resources(
+        &self,
+        runtime: &Arc<AgentRuntime>,
+        mut text: String,
+    ) -> Result<CommandOutcome, RuntimeError> {
+        for source in [CommandSource::Skill, CommandSource::Prompt] {
+            match self
+                .execute_command_in_generation(&text, Arc::clone(runtime), Some(source))
+                .await?
+            {
+                Some(CommandOutcome::Handled) => return Ok(CommandOutcome::Handled),
+                Some(CommandOutcome::TransformInput(transformed)) => text = transformed,
+                None => {}
+            }
+        }
+        Ok(CommandOutcome::TransformInput(text))
     }
 
     pub fn active_tools(&self) -> Vec<String> {
@@ -1139,10 +1247,29 @@ impl PiRuntime {
             })
             .map_err(|error| RuntimeError::Agent(error.to_string()))?;
         Ok(PreparedRuntimeConfiguration {
-            _reload_guard: reload_guard,
-            agent,
+            _reload_guard: Some(reload_guard),
+            agent: PreparedConfigurationAgent::Idle(agent),
             generation,
             prompt_options,
+        })
+    }
+
+    /// Prepares only model and thinking selection during either idle or active runs.
+    /// The Agent state lease keeps validation and synchronous persistence atomic with generation publication.
+    pub fn prepare_model_configuration(
+        &self,
+        model: Option<ModelSelection>,
+        thinking_level: Option<ThinkingLevel>,
+    ) -> Result<PreparedRuntimeConfiguration<'_>, RuntimeError> {
+        let agent = self
+            .agent
+            .prepare_model_configuration(model, thinking_level)
+            .map_err(|error| RuntimeError::Agent(error.to_string()))?;
+        Ok(PreparedRuntimeConfiguration {
+            _reload_guard: None,
+            agent: PreparedConfigurationAgent::Model(agent),
+            generation: self.current_generation(),
+            prompt_options: None,
         })
     }
 
@@ -1275,30 +1402,28 @@ impl PiRuntime {
         let mut text = text.into();
         let display_text = text.clone();
         let runtime = self.agent.runtime();
-        if let Some((name, arguments)) = parse_command(&text)
-            && let Some(command) = runtime.registries().command(name)
+        if let Some(outcome) = self
+            .execute_command_in_generation(
+                &text,
+                Arc::clone(&runtime),
+                Some(CommandSource::Extension),
+            )
+            .await?
         {
-            let (_, signal) = AbortHandle::new();
-            match command
-                .execute(
-                    CommandContext::with_plugin_context(
-                        self.cwd().to_path_buf(),
-                        signal,
-                        runtime.plugins().command_context_parts(),
-                    ),
-                    arguments.to_string(),
-                )
-                .await
-                .map_err(|error| RuntimeError::Command {
-                    command: name.to_string(),
-                    message: error.to_string(),
-                })? {
+            match outcome {
                 CommandOutcome::Handled => return Ok(PreparedTextSubmission::Handled),
                 CommandOutcome::TransformInput(transformed) => text = transformed,
             }
         }
-        self.prepare_submission_locked(reload_guard, runtime, display_text, text, None)
-            .await
+        self.prepare_submission_locked(
+            reload_guard,
+            runtime,
+            display_text,
+            text,
+            None,
+            InputSource::Interactive,
+        )
+        .await
     }
 
     /// Runs input hooks after a host has already dispatched a slash command.
@@ -1313,9 +1438,26 @@ impl PiRuntime {
         text: String,
         images: Option<Vec<ImageContent>>,
     ) -> Result<PreparedTextSubmission, RuntimeError> {
+        self.prepare_submission_after_command_with_source(
+            display_text,
+            text,
+            images,
+            InputSource::Interactive,
+        )
+        .await
+    }
+
+    /// Prepares input with the submitting frontend's identity after command dispatch.
+    pub async fn prepare_submission_after_command_with_source(
+        &self,
+        display_text: String,
+        text: String,
+        images: Option<Vec<ImageContent>>,
+        source: InputSource,
+    ) -> Result<PreparedTextSubmission, RuntimeError> {
         let reload_guard = Arc::clone(&self.reload_lock).lock_owned().await;
         let runtime = self.agent.runtime();
-        self.prepare_submission_locked(reload_guard, runtime, display_text, text, images)
+        self.prepare_submission_locked(reload_guard, runtime, display_text, text, images, source)
             .await
     }
 
@@ -1343,16 +1485,11 @@ impl PiRuntime {
         display_text: String,
         mut text: String,
         input_images: Option<Vec<ImageContent>>,
+        source: InputSource,
     ) -> Result<PreparedTextSubmission, RuntimeError> {
         let mut images = input_images.clone().unwrap_or_default();
         match self
-            .process_input_locked(
-                &runtime,
-                &text,
-                input_images,
-                InputSource::Interactive,
-                None,
-            )
+            .process_input_locked(&runtime, &text, input_images, source, None)
             .await?
         {
             InputPatch::Handled => return Ok(PreparedTextSubmission::Handled),
@@ -1364,6 +1501,10 @@ impl PiRuntime {
                 images = transformed_images.unwrap_or_default();
             }
             InputPatch::Continue => {}
+        }
+        match self.expand_input_resources(&runtime, text).await? {
+            CommandOutcome::Handled => return Ok(PreparedTextSubmission::Handled),
+            CommandOutcome::TransformInput(transformed) => text = transformed,
         }
         Ok(PreparedTextSubmission::Agent(PreparedRuntimePrompt {
             runtime: self.clone(),
@@ -1385,40 +1526,58 @@ impl PiRuntime {
         input_images: Option<Vec<ImageContent>>,
         streaming_behavior: InputStreamingBehavior,
     ) -> Result<QueuedTextOutcome, RuntimeError> {
+        self.process_queued_input_with_source(
+            text,
+            input_images,
+            InputSource::Interactive,
+            Some(streaming_behavior),
+        )
+        .await
+    }
+
+    /// Preprocesses concurrent input without reacquiring the active generation lease.
+    pub async fn process_queued_input_with_source(
+        &self,
+        text: impl Into<String>,
+        input_images: Option<Vec<ImageContent>>,
+        source: InputSource,
+        streaming_behavior: Option<InputStreamingBehavior>,
+    ) -> Result<QueuedTextOutcome, RuntimeError> {
         let mut text = text.into();
         let display_text = text.clone();
         let runtime = self.agent.runtime();
-        if let Some((name, arguments)) = parse_command(&text)
-            && let Some(command) = runtime.registries().command(name)
+        if let Some(outcome) = self
+            .execute_command_in_generation(&text, runtime, Some(CommandSource::Extension))
+            .await?
         {
-            let (_, signal) = AbortHandle::new();
-            match command
-                .execute(
-                    CommandContext::with_plugin_context(
-                        self.cwd().to_path_buf(),
-                        signal,
-                        runtime.plugins().command_context_parts(),
-                    ),
-                    arguments.to_string(),
-                )
-                .await
-                .map_err(|error| RuntimeError::Command {
-                    command: name.to_string(),
-                    message: error.to_string(),
-                })? {
+            match outcome {
                 CommandOutcome::Handled => return Ok(QueuedTextOutcome::Handled),
                 CommandOutcome::TransformInput(transformed) => text = transformed,
             }
         }
+        self.process_queued_input_after_command(
+            display_text,
+            text,
+            input_images,
+            source,
+            streaming_behavior,
+        )
+        .await
+    }
+
+    /// Runs concurrent input hooks after the session has dispatched a command.
+    pub async fn process_queued_input_after_command(
+        &self,
+        display_text: String,
+        mut text: String,
+        input_images: Option<Vec<ImageContent>>,
+        source: InputSource,
+        streaming_behavior: Option<InputStreamingBehavior>,
+    ) -> Result<QueuedTextOutcome, RuntimeError> {
+        let runtime = self.agent.runtime();
         let mut images = input_images.clone().unwrap_or_default();
         match self
-            .process_input_locked(
-                &runtime,
-                &text,
-                input_images,
-                InputSource::Interactive,
-                Some(streaming_behavior),
-            )
+            .process_input_locked(&runtime, &text, input_images, source, streaming_behavior)
             .await?
         {
             InputPatch::Handled => return Ok(QueuedTextOutcome::Handled),
@@ -1430,6 +1589,10 @@ impl PiRuntime {
                 images = transformed_images.unwrap_or_default();
             }
             InputPatch::Continue => {}
+        }
+        match self.expand_input_resources(&runtime, text).await? {
+            CommandOutcome::Handled => return Ok(QueuedTextOutcome::Handled),
+            CommandOutcome::TransformInput(transformed) => text = transformed,
         }
         Ok(QueuedTextOutcome::Message {
             generation: runtime.generation(),
@@ -1473,6 +1636,23 @@ impl PiRuntime {
         request: RuntimeCompletionRequest,
         signal: AbortSignal,
     ) -> Result<AssistantMessage, RuntimeError> {
+        self.complete_with_retry(
+            request,
+            signal,
+            self.blueprint.completion_retry_policy,
+            |_| {},
+        )
+        .await
+    }
+
+    /// Runs an isolated completion with caller-owned retry policy and progress reporting.
+    pub async fn complete_with_retry(
+        &self,
+        request: RuntimeCompletionRequest,
+        signal: AbortSignal,
+        policy: Option<CompletionRetryPolicy>,
+        observer: impl Fn(CompletionRetryEvent) + Send + Sync,
+    ) -> Result<AssistantMessage, RuntimeError> {
         // Hooks may await this while the parent prompt owns reload_lock.
         // Pin the immutable generation instead of re-entering that lock, and
         // keep provider/model selection stable across completion retries.
@@ -1485,7 +1665,7 @@ impl PiRuntime {
             }
         });
         let mut retry_attempt = 0_u32;
-        loop {
+        let result = loop {
             let result = Self::complete_once(
                 &generation.agent,
                 self.cwd(),
@@ -1495,25 +1675,43 @@ impl PiRuntime {
                 signal.clone(),
             )
             .await;
-            let Some(policy) = self.blueprint.completion_retry_policy else {
-                return result;
+            let Some(policy) = policy else {
+                break result;
             };
             if !policy.enabled
                 || retry_attempt >= policy.max_retries
                 || !completion_result_is_retryable(&result)
             {
-                return result;
+                break result;
             }
             retry_attempt = retry_attempt.saturating_add(1);
             let multiplier = 1_u64
                 .checked_shl(retry_attempt.saturating_sub(1))
                 .unwrap_or(u64::MAX);
             let delay_ms = policy.base_delay_ms.saturating_mul(multiplier);
+            let error_message = match &result {
+                Ok(message) => message
+                    .error_message
+                    .clone()
+                    .unwrap_or_else(|| "Unknown error".into()),
+                Err(error) => error.to_string(),
+            };
+            observer(CompletionRetryEvent::Scheduled {
+                attempt: retry_attempt,
+                max_attempts: policy.max_retries,
+                delay_ms,
+                error_message,
+            });
             tokio::select! {
                 () = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => {}
-                () = signal.wait() => return Err(RuntimeError::Aborted),
+                () = signal.wait() => break Err(RuntimeError::Aborted),
             }
+            observer(CompletionRetryEvent::AttemptStart);
+        };
+        if retry_attempt > 0 {
+            observer(CompletionRetryEvent::Finished);
         }
+        result
     }
 
     async fn complete_once(
@@ -1640,12 +1838,17 @@ impl PiRuntime {
 
     /// Dispatches the product-level lifecycle event after session-owned retry,
     /// compaction, and queued continuation orchestration has fully settled.
-    pub async fn dispatch_agent_settled(&self) {
+    pub async fn dispatch_agent_settled(&self, aborted: bool) {
         let runtime = self.agent.runtime();
         let (_, signal) = AbortHandle::new();
         runtime
             .plugins()
-            .agent_settled(&RunId::next(), self.cwd(), &signal, AgentSettledEvent)
+            .agent_settled(
+                &RunId::next(),
+                self.cwd(),
+                &signal,
+                AgentSettledEvent { aborted },
+            )
             .await;
     }
 
@@ -1821,6 +2024,7 @@ mod tests {
                     Ok(PromptOutput {
                         system_prompt: tools.join(","),
                         options: Some(serde_json::json!({"tools": tools})),
+                        ..Default::default()
                     })
                 }))
             }))
@@ -2515,6 +2719,7 @@ mod tests {
             event: BeforeAgentStartEvent,
         ) -> Result<BeforeAgentStartPatch, PluginError> {
             Ok(BeforeAgentStartPatch {
+                prompt_state: None,
                 prompt_contributions: Vec::new(),
                 system_prompt: Some(format!("{}|hook-{}", event.system_prompt, self.value)),
                 messages: Vec::new(),
@@ -2586,6 +2791,7 @@ mod tests {
             event: BeforeAgentStartEvent,
         ) -> Result<BeforeAgentStartPatch, PluginError> {
             Ok(BeforeAgentStartPatch {
+                prompt_state: None,
                 prompt_contributions: Vec::new(),
                 system_prompt: Some(format!("{}{}", event.system_prompt, self.suffix)),
                 messages: self
@@ -3826,6 +4032,7 @@ mod tests {
                     Ok(PromptOutput {
                         system_prompt: format!("domain {revision}: {}", names.join(",")),
                         options: Some(json!({ "revision": revision, "selectedTools": names, "cwd": context.workspace.cwd() })),
+                        ..Default::default()
                     })
                 });
                 prompt.resource_options = Some(json!({ "revision": revision }));

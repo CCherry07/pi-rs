@@ -61,23 +61,31 @@ pub(crate) fn decode_values(
 ) -> SettingsValues {
     SettingsValues {
         features: decode_features(document, origin, diagnostics),
+        codemode: decode_codemode(document, origin, diagnostics),
         default_provider: optional_string(document, "defaultProvider", origin, diagnostics),
         default_model: optional_string(document, "defaultModel", origin, diagnostics),
+        model_thinking_levels: optional_object(
+            document,
+            "modelThinkingLevels",
+            origin,
+            diagnostics,
+        )
+        .map(|levels| {
+            levels
+                .keys()
+                .filter_map(|key| {
+                    optional_enum(levels, key, origin, diagnostics, thinking_level)
+                        .map(|level| (key.clone(), level))
+                })
+                .collect()
+        })
+        .unwrap_or_default(),
         default_thinking_level: optional_enum(
             document,
             "defaultThinkingLevel",
             origin,
             diagnostics,
-            |value| match value {
-                "off" => Some(ThinkingLevelSetting::Off),
-                "minimal" => Some(ThinkingLevelSetting::Minimal),
-                "low" => Some(ThinkingLevelSetting::Low),
-                "medium" => Some(ThinkingLevelSetting::Medium),
-                "high" => Some(ThinkingLevelSetting::High),
-                "xhigh" => Some(ThinkingLevelSetting::XHigh),
-                "max" => Some(ThinkingLevelSetting::Max),
-                _ => None,
-            },
+            thinking_level,
         ),
         transport: optional_enum(
             document,
@@ -149,6 +157,19 @@ pub(crate) fn decode_values(
     }
 }
 
+fn thinking_level(value: &str) -> Option<ThinkingLevelSetting> {
+    match value {
+        "off" => Some(ThinkingLevelSetting::Off),
+        "minimal" => Some(ThinkingLevelSetting::Minimal),
+        "low" => Some(ThinkingLevelSetting::Low),
+        "medium" => Some(ThinkingLevelSetting::Medium),
+        "high" => Some(ThinkingLevelSetting::High),
+        "xhigh" => Some(ThinkingLevelSetting::XHigh),
+        "max" => Some(ThinkingLevelSetting::Max),
+        _ => None,
+    }
+}
+
 fn decode_terminal(
     document: &Map<String, Value>,
     origin: Option<(SettingsScope, &Path)>,
@@ -167,6 +188,28 @@ fn decode_terminal(
     }
 }
 
+fn decode_codemode(
+    document: &Map<String, Value>,
+    origin: Option<(SettingsScope, &Path)>,
+    diagnostics: &mut Vec<SettingsDiagnostic>,
+) -> crate::CodemodeSettings {
+    let defaults = crate::CodemodeSettings::default();
+    let Some(object) = optional_object(document, "codemode", origin, diagnostics) else {
+        return defaults;
+    };
+    let mode = match optional_string(object, "mode", origin, diagnostics).as_deref() {
+        Some("only") => crate::CodemodeModeSetting::Only,
+        _ => crate::CodemodeModeSetting::On,
+    };
+    let inline_budget = optional_u64(object, "inlineBudget", origin, diagnostics)
+        .and_then(|budget| usize::try_from(budget).ok())
+        .unwrap_or(defaults.inline_budget);
+    crate::CodemodeSettings {
+        mode,
+        inline_budget,
+    }
+}
+
 fn decode_features(
     document: &Map<String, Value>,
     origin: Option<(SettingsScope, &Path)>,
@@ -177,6 +220,8 @@ fn decode_features(
         return defaults;
     };
     FeatureSettings {
+        hashline: optional_bool(object, "hashline", origin, diagnostics)
+            .unwrap_or(defaults.hashline),
         memory: optional_bool(object, "memory", origin, diagnostics).unwrap_or(defaults.memory),
         subagents: optional_bool(object, "subagents", origin, diagnostics)
             .unwrap_or(defaults.subagents),

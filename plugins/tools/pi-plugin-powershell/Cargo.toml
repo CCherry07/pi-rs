@@ -1,0 +1,20 @@
+[package]
+name = "pi-plugin-powershell"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+pi-core.workspace = true
+pi-plugin.workspace = true
+pi-plugin-bash.workspace = true
+pi-shell.workspace = true
+pi-tool-support.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3.21.0"
+tokio.workspace = true

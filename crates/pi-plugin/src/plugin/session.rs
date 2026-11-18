@@ -162,6 +162,70 @@ pub struct SessionInfoChangedEvent {
     pub name: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ModelSelectSource {
+    Set,
+    Cycle,
+    Restore,
+}
+
+/// A completed model selection. The context already exposes the new model and thinking level.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelSelectEvent {
+    pub model: pi_core::ModelSpec,
+    pub previous_model: Option<pi_core::ModelSpec>,
+    pub source: ModelSelectSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThinkingLevelSelectEvent {
+    pub level: pi_core::ThinkingLevel,
+    pub previous_level: pi_core::ThinkingLevel,
+}
+
+#[derive(Debug, Clone)]
+pub struct UserBashEvent {
+    pub command: String,
+    pub exclude_from_context: bool,
+    pub cwd: PathBuf,
+    pub signal: AbortSignal,
+}
+
+/// Complete output supplied by a plugin that handled a user shell command.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserBashResult {
+    pub output: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    pub cancelled: bool,
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_output_path: Option<PathBuf>,
+}
+
+pub type BashOutputSink = std::sync::Arc<dyn Fn(Vec<u8>) + Send + Sync>;
+
+/// Execution inputs for a plugin-supplied shell backend. The session retains output capture.
+pub struct UserBashRequest {
+    pub command: String,
+    pub cwd: PathBuf,
+    pub signal: AbortSignal,
+    pub on_data: BashOutputSink,
+}
+
+#[async_trait::async_trait]
+pub trait UserBashOperations: Send + Sync {
+    async fn execute(&self, request: UserBashRequest) -> Result<Option<i32>, crate::PluginError>;
+}
+
+/// The first handling plugin either supplies a complete result or delegates execution.
+pub enum UserBashOverride {
+    Result(UserBashResult),
+    Operations(std::sync::Arc<dyn UserBashOperations>),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionSwitchReason {
     New,
@@ -285,6 +349,9 @@ define_hooks! {
     SessionHook {
         Start => "session_start",
         InfoChanged => "session_info_changed",
+        ModelSelect => "model_select",
+        ThinkingLevelSelect => "thinking_level_select",
+        UserBash => "user_bash",
         BeforeSwitch => "session_before_switch",
         BeforeFork => "session_before_fork",
         BeforeCompact => "session_before_compact",
@@ -296,9 +363,12 @@ define_hooks! {
     }
 }
 
-pub(super) const SESSION_HOOKS: [SessionHook; 10] = [
+pub(super) const SESSION_HOOKS: [SessionHook; 13] = [
     SessionHook::Start,
     SessionHook::InfoChanged,
+    SessionHook::ModelSelect,
+    SessionHook::ThinkingLevelSelect,
+    SessionHook::UserBash,
     SessionHook::BeforeSwitch,
     SessionHook::BeforeFork,
     SessionHook::BeforeCompact,

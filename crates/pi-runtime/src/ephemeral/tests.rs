@@ -50,6 +50,8 @@ struct ProbeTool {
 impl Tool for ProbeTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
+            output_schema: None,
+            constrained_sampling: None,
             name: self.name.to_string(),
             label: self.name.to_string(),
             description: self.name.to_string(),

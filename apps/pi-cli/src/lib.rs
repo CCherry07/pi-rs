@@ -8,6 +8,7 @@ mod markdown;
 mod output;
 mod package_commands;
 mod plugin_commands;
+mod rpc_signals;
 mod text_selection;
 mod tui;
 
@@ -85,6 +86,9 @@ impl CLIMode {
             return Ok(Self::Acp);
         }
         if cli.mode == Some(OutputMode::Rpc) {
+            if cli.prompt.iter().any(|argument| argument.starts_with('@')) {
+                return Err("@file arguments are not supported in RPC mode".to_string());
+            }
             return Ok(Self::Rpc);
         }
         if Self::requested_presentation(cli, stdin_is_terminal) == PresentationMode::Json {
@@ -188,13 +192,20 @@ async fn run_with_exit_code(
     {
         return auth::check(&config::resolve_app_config(&cli)?, command).await;
     }
-    run(cli, js_host, extension_flag_values).await.map(|()| 0)
+    let signals = (cli.mode == Some(OutputMode::Rpc))
+        .then(rpc_signals::RpcSignals::new)
+        .transpose()?;
+    run(cli, js_host, extension_flag_values, signals.as_ref()).await?;
+    Ok(signals
+        .as_ref()
+        .map_or(0, rpc_signals::RpcSignals::exit_code))
 }
 
 async fn run(
     mut cli: Cli,
     js_host: Option<Arc<dyn JsPluginHost>>,
     extension_flag_values: BTreeMap<String, serde_json::Value>,
+    rpc_signals: Option<&rpc_signals::RpcSignals>,
 ) -> Result<(), String> {
     let mut config = config::resolve_app_config(&cli)?;
     config.extension_flag_values = extension_flag_values;
@@ -429,13 +440,20 @@ async fn run(
                 rpc_connection,
             },
             agent_dir,
-            Some(plugin_context_binding),
+            CliShutdown {
+                binding: Some(plugin_context_binding),
+                rpc_signals,
+            },
         )
         .await
     }
     .await;
+    if let Some(signals) = rpc_signals {
+        signals.begin_shutdown();
+    }
     let shutdown = sessions.shutdown().await.map_err(|error| error.to_string());
     let flushed = match rpc_ui {
+        Some(_) if rpc_signals.is_some_and(|signals| signals.exit_code() == 143) => Ok(()),
         Some(ui) => ui.flush().await,
         None => Ok(()),
     };
@@ -624,6 +642,38 @@ async fn run_cli_with_shutdown(
     agent_dir: std::path::PathBuf,
     shutdown: CliShutdown<'_>,
 ) -> Result<(), String> {
+    let CliShutdown {
+        binding: shutdown,
+        rpc_signals,
+    } = shutdown;
+    if matches!(mode, CLIMode::Rpc) {
+        let rpc = pi_rpc::rpc::run_connection_with_shutdown(
+            session.clone(),
+            pi_plugin_session_transfer::export::export_html,
+            interactive_requests
+                .rpc_connection
+                .ok_or_else(|| "RPC connection unavailable".to_string())?,
+            async {
+                match shutdown {
+                    Some(binding) => binding.wait_for_shutdown().await,
+                    None => std::future::pending().await,
+                }
+            },
+        );
+        return tokio::select! {
+            result = rpc => result,
+            () = async {
+                match rpc_signals {
+                    Some(signals) => signals.wait().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                session.abort();
+                session.current().abort_shell();
+                Ok(())
+            }
+        };
+    }
     if let Some(shutdown) = shutdown {
         let abort_session = session.clone();
         tokio::select! {

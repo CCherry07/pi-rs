@@ -51,7 +51,8 @@ pub enum DefaultProjectTrust {
     Never,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum QueueModeSetting {
     All,
     #[default]
@@ -67,7 +68,8 @@ pub enum TransportSetting {
     Auto,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ThinkingLevelSetting {
     Off,
     Minimal,
@@ -251,6 +253,7 @@ pub struct PackageFilter {
 /// First-party feature selections from settings; the product host may further restrict them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FeatureSettings {
+    pub hashline: bool,
     pub memory: bool,
     pub subagents: bool,
     pub schedule: bool,
@@ -262,9 +265,10 @@ pub struct FeatureSettings {
 impl Default for FeatureSettings {
     fn default() -> Self {
         Self {
-            memory: true,
-            subagents: true,
-            schedule: true,
+            hashline: false,
+            memory: false,
+            subagents: false,
+            schedule: false,
             skills: true,
             prompt_templates: true,
             session_transfer: true,
@@ -276,6 +280,8 @@ impl Default for FeatureSettings {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FeatureSettingsPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hashline: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -290,13 +296,37 @@ pub struct FeatureSettingsPatch {
     pub session_transfer: Option<bool>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CodemodeModeSetting {
+    #[default]
+    On,
+    Only,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CodemodeSettings {
+    pub mode: CodemodeModeSetting,
+    pub inline_budget: usize,
+}
+
+impl Default for CodemodeSettings {
+    fn default() -> Self {
+        Self {
+            mode: CodemodeModeSetting::On,
+            inline_budget: 3000,
+        }
+    }
+}
+
 /// Validated values from one raw document or the effective deep merge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsValues {
+    pub codemode: CodemodeSettings,
     pub features: FeatureSettings,
     pub default_provider: Option<String>,
     pub default_model: Option<String>,
     pub default_thinking_level: Option<ThinkingLevelSetting>,
+    pub model_thinking_levels: BTreeMap<String, ThinkingLevelSetting>,
     pub transport: TransportSetting,
     pub steering_mode: QueueModeSetting,
     pub follow_up_mode: QueueModeSetting,
@@ -331,9 +361,11 @@ impl Default for SettingsValues {
     fn default() -> Self {
         Self {
             features: FeatureSettings::default(),
+            codemode: CodemodeSettings::default(),
             default_provider: None,
             default_model: None,
             default_thinking_level: None,
+            model_thinking_levels: BTreeMap::new(),
             transport: TransportSetting::Auto,
             steering_mode: QueueModeSetting::OneAtATime,
             follow_up_mode: QueueModeSetting::OneAtATime,
@@ -465,6 +497,49 @@ pub struct SettingsManager {
 }
 
 impl SettingsManager {
+    /// Persists one session preference while preserving unrelated document fields.
+    pub fn set_session_preference(
+        &self,
+        preference: SessionPreference,
+    ) -> Result<(), SettingsError> {
+        let path = self.global_path();
+        let result = match preference {
+            SessionPreference::SteeringMode(mode) => store::replace_top_level(
+                &path,
+                "steeringMode",
+                serde_json::to_value(mode).expect("queue mode serializes"),
+            ),
+            SessionPreference::FollowUpMode(mode) => store::replace_top_level(
+                &path,
+                "followUpMode",
+                serde_json::to_value(mode).expect("queue mode serializes"),
+            ),
+            SessionPreference::AutoCompaction(enabled) => store::patch_object(
+                &path,
+                "compaction",
+                Map::from_iter([("enabled".into(), Value::Bool(enabled))]),
+            ),
+            SessionPreference::AutoRetry(enabled) => store::patch_object(
+                &path,
+                "retry",
+                Map::from_iter([("enabled".into(), Value::Bool(enabled))]),
+            ),
+        };
+        match result {
+            Ok(document) => {
+                self.state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .last_valid
+                    .insert(path, document);
+                Ok(())
+            }
+            Err(error) => {
+                self.record_write_error(SettingsScope::Global, &path, &error);
+                Err(error)
+            }
+        }
+    }
     pub fn new(agent_dir: impl Into<PathBuf>) -> Self {
         Self {
             agent_dir: agent_dir.into(),
@@ -668,4 +743,12 @@ impl SettingsManager {
     fn project_path(&self, cwd: &Path) -> PathBuf {
         cwd.join(CONFIG_DIRECTORY).join("settings.json")
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionPreference {
+    SteeringMode(QueueModeSetting),
+    FollowUpMode(QueueModeSetting),
+    AutoCompaction(bool),
+    AutoRetry(bool),
 }

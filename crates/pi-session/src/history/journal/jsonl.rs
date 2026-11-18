@@ -624,6 +624,76 @@ impl SessionStore {
         self.commit(&mut state, mutation)
     }
 
+    /// Commits a metadata fact together with a real tree entry for external session consumers.
+    pub(crate) fn set_name_with_entry(
+        &self,
+        name: Option<String>,
+    ) -> Result<SessionRecord, HistoryError> {
+        self.append_metadata_fact(SessionFact::Name { name }, "session_info")
+    }
+
+    pub(crate) fn set_label_with_entry(
+        &self,
+        target_id: &str,
+        label: Option<String>,
+    ) -> Result<SessionRecord, HistoryError> {
+        self.append_metadata_fact(
+            SessionFact::Label {
+                target_id: target_id.to_string(),
+                label: label.filter(|label| !label.is_empty()),
+            },
+            "label",
+        )
+    }
+
+    fn append_metadata_fact(
+        &self,
+        fact: SessionFact,
+        kind: &str,
+    ) -> Result<SessionRecord, HistoryError> {
+        let mut state = self.state();
+        let mut data = serde_json::Map::new();
+        data.insert("type".into(), Value::String(kind.to_string()));
+        match &fact {
+            SessionFact::Name { name } => {
+                if let Some(name) = name {
+                    data.insert("name".into(), Value::String(name.clone()));
+                }
+            }
+            SessionFact::Label { target_id, label } => {
+                state.validate_target(Some(target_id))?;
+                data.insert("targetId".into(), Value::String(target_id.clone()));
+                if let Some(label) = label {
+                    data.insert("label".into(), Value::String(label.clone()));
+                }
+            }
+        }
+        let record = SessionRecord {
+            id: next_unique_id("entry"),
+            seq: state.next_sequence(),
+            parent_id: state.require_lane(MAIN_LANE)?,
+            timestamp_ms: now_ms(),
+            entry: SessionEntry::Custom(crate::history::CustomEntry {
+                custom_type: format!("pi.coding-agent.legacy.{kind}"),
+                data: Some(Value::Object(data)),
+            }),
+        };
+        self.commit_mutations(
+            &mut state,
+            vec![
+                SessionMutation::Entry {
+                    lane: Some(MAIN_LANE.to_string()),
+                    record: record.clone(),
+                },
+                SessionMutation::Fact {
+                    seq: record.seq.saturating_add(1),
+                    fact,
+                },
+            ],
+        )?;
+        Ok(record)
+    }
+
     pub fn label(&self, target_id: &str) -> Option<String> {
         self.state().label(target_id)
     }

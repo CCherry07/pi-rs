@@ -243,6 +243,8 @@ impl Plugin for ToolPlugin {
 
 fn tool_spec(name: &str) -> ToolSpec {
     ToolSpec {
+        output_schema: None,
+        constrained_sampling: None,
         name: name.to_string(),
         label: name.to_string(),
         description: format!("{name} test tool"),
@@ -1949,6 +1951,7 @@ impl Plugin for ContextAccountingProbe {
     ) -> Result<pi_plugin::BeforeAgentStartPatch, PluginError> {
         use pi_core::{ContextCategory, PromptContribution};
         Ok(pi_plugin::BeforeAgentStartPatch {
+            prompt_state: None,
             system_prompt: Some(format!("{}AAAABBBB", event.system_prompt)),
             prompt_contributions: vec![
                 PromptContribution {

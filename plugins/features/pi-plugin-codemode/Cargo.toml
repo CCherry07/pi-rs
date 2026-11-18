@@ -15,4 +15,5 @@ pi-plugin-tool-search.workspace = true
 rquickjs = { version = "0.14.0", default-features = false, features = ["std"] }
 serde_json.workspace = true
 serde.workspace = true
+tempfile = "3.21.0"
 tokio.workspace = true

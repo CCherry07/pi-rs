@@ -26,7 +26,9 @@ pub enum AgentSessionEvent {
         messages: Vec<Message>,
         will_retry: bool,
     },
-    AgentSettled,
+    AgentSettled {
+        aborted: bool,
+    },
     QueueUpdate {
         steering: Vec<String>,
         follow_up: Vec<String>,
@@ -55,6 +57,16 @@ pub enum AgentSessionEvent {
         attempt: u32,
         final_error: Option<String>,
     },
+    SummarizationRetryScheduled {
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        error_message: String,
+    },
+    SummarizationRetryAttemptStart {
+        source: SummarizationSource,
+    },
+    SummarizationRetryFinished,
     EntryAppended {
         entry: SessionRecord,
     },
@@ -84,6 +96,7 @@ pub enum AgentSessionEvent {
     },
     BashExecutionUpdate {
         id: String,
+        request_id: Option<String>,
         stream: ShellStream,
         delta: String,
     },
@@ -92,6 +105,12 @@ pub enum AgentSessionEvent {
         result: Option<ShellResult>,
         error_message: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SummarizationSource {
+    Compaction { reason: CompactionReason },
+    BranchSummary,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -234,8 +253,8 @@ impl AgentSessionEventHub {
         );
     }
 
-    pub(crate) fn publish_agent_settled(&self, agent: AgentStateSnapshot) {
-        self.publish(AgentSessionEvent::AgentSettled, |snapshot| {
+    pub(crate) fn publish_agent_settled(&self, agent: AgentStateSnapshot, aborted: bool) {
+        self.publish(AgentSessionEvent::AgentSettled { aborted }, |snapshot| {
             snapshot.agent = agent;
         });
     }
@@ -365,6 +384,33 @@ impl AgentSessionEventHub {
         );
     }
 
+    pub(crate) fn publish_summarization_retry(
+        &self,
+        source: SummarizationSource,
+        event: pi_runtime::CompletionRetryEvent,
+    ) {
+        let event = match event {
+            pi_runtime::CompletionRetryEvent::Scheduled {
+                attempt,
+                max_attempts,
+                delay_ms,
+                error_message,
+            } => AgentSessionEvent::SummarizationRetryScheduled {
+                attempt,
+                max_attempts,
+                delay_ms,
+                error_message,
+            },
+            pi_runtime::CompletionRetryEvent::AttemptStart => {
+                AgentSessionEvent::SummarizationRetryAttemptStart { source }
+            }
+            pi_runtime::CompletionRetryEvent::Finished => {
+                AgentSessionEvent::SummarizationRetryFinished
+            }
+        };
+        self.publish(event, |_| {});
+    }
+
     pub(crate) fn publish_session_info(&self, name: Option<String>) {
         self.publish(
             AgentSessionEvent::SessionInfoChanged { name: name.clone() },
@@ -406,10 +452,17 @@ impl AgentSessionEventHub {
         );
     }
 
-    pub(crate) fn publish_bash_update(&self, id: String, stream: ShellStream, delta: String) {
+    pub(crate) fn publish_bash_update(
+        &self,
+        id: String,
+        request_id: Option<String>,
+        stream: ShellStream,
+        delta: String,
+    ) {
         self.publish(
             AgentSessionEvent::BashExecutionUpdate {
                 id: id.clone(),
+                request_id,
                 stream,
                 delta: delta.clone(),
             },

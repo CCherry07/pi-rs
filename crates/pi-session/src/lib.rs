@@ -41,7 +41,7 @@ pub use management::{SessionObservation, SessionResetReason, SessionUpdate, Sess
 pub use runtime::events::{
     AgentSessionEvent, AgentSessionSnapshot, AgentSessionSubscription, AutoRetrySnapshot,
     BashExecutionSnapshot, CompactionSnapshot, QueueSnapshot, QueuedMessageSnapshot,
-    RevisionedAgentSessionEvent,
+    RevisionedAgentSessionEvent, SummarizationSource,
 };
 
 pub use management::{
@@ -66,8 +66,9 @@ pub use runtime::SessionShellExecutor;
 pub use runtime::{
     AgentSessionInitialModelSource, AgentSessionInitialState, AgentSessionOptions,
     AutoRetrySettings, InitialModelRequest, InitialModelResolveError, InitialModelSelection,
-    RestoredSessionConfiguration, RestoredToolSelection, SessionRuntimeInventory,
-    resolve_model_scope, validate_initial_model_scope,
+    ModelCycleResult, ModelSwitchPolicy, RestoredSessionConfiguration, RestoredToolSelection,
+    SessionRuntimeInventory, SessionSetting, SessionSettingsWriter, resolve_model_scope,
+    validate_initial_model_scope,
 };
 
 pub(crate) use pi_utils::time::unix_timestamp_ms as now_ms;

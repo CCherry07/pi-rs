@@ -76,8 +76,14 @@ additions before rendering a resumed or reloaded session; rejected prompts do no
 recovery writes. Fresh isolated sessions use their inherited selection. Generic harnesses still
 perform no implicit resource discovery.
 Coding's private `prompt::CodingSystemPrompt` adapts its resource and prompt builders at this seam.
-It preserves existing Rust prompt rendering and serialized options; plugin prompt hooks remain
-run-local. This is not a new plugin lifecycle or a new claim of complete upstream prompt parity.
+It follows current Pi's section rendering and serialized options; plugin prompt hooks remain
+run-local. `scripts/sync-prompt-conformance.mjs` executes the local TypeScript oracle to capture
+10 tool declarations and 16 prompt scenarios. The checked-in fixture is exercised by Coding's
+`prompt::oracle_tests` without requiring Node during Cargo tests. Installation-specific documentation
+paths are normalized, not pointed at the upstream distribution. An opaque forced prompt bypasses
+section validation/rendering; a controller's run-local text replacement also updates the run prompt
+state so the next loadout render cannot silently undo it. This is not a new plugin lifecycle or a
+claim that optional Rust product extensions or every provider request are identical to Pi.
 
 `crates/pi-sdk/tests/dependency_graph.rs` enforces the production dependency boundary for
 `pi-core`, `pi-plugin`, `pi-agent`, `pi-runtime`, `pi-session`, `pi-sdk`, and `pi-eval`. It walks Cargo's
@@ -505,12 +511,16 @@ Main-screen mode never enables mouse capture and leaves visible-text selection t
 Semantic `/copy` remains independent and copies the last completed assistant message.
 
 `pi-media` owns provider-neutral multimodal byte processing. Its first Module, `image`, owns
-magic-byte detection, PNG conversion, dimension/encoded-size limits, and processing hints behind
-`process_image(bytes, policy)`. `pi-core::ImageContent` remains the message contract. The read tool
-and CLI both use that Interface on blocking workers; filesystem paths, settings, clipboard I/O,
-and terminal state remain with their owning Adapters. Video/audio Modules and message contracts
-are future work. The existing Rust PNG/Lanczos resize algorithm is retained, so processing limits
-and hints follow Pi intent without claiming byte-for-byte encoder equivalence.
+magic-byte detection, BMP normalization, PNG/JPEG encoding selection, dimension/base64-size limits,
+EXIF orientation and processing hints behind `process_image(bytes, policy)`. At each size it tries
+PNG and the configured JPEG quality, then Pi's additional quality steps before shrinking again.
+`pi-core::ImageContent` remains the message contract. The read tool and CLI use that Interface on
+blocking workers; filesystem paths, settings, clipboard I/O, and terminal state remain with their
+owning Adapters. `read` obtains `inputLimits.images.resize` from the current generation's model
+capability on each call, falling back to its configured/default policy only when no model resize
+profile exists. An empty profile intentionally selects Pi defaults. Decode/conversion/size failures
+produce successful text-only omission results, not failed tool calls. Video/audio Modules and message
+contracts are future work; Rust and Photon encoder bytes/pixels are not claimed to be identical.
 
 CLI startup prepares text and image attachments into `SessionInput`, preserved through TUI,
 print and NDJSON submission. As in current Pi's `cli/file-processor.ts` and `cli/initial-message.ts`,
@@ -524,6 +534,14 @@ uses the native clipboard first for local sessions, PowerShell as the WSL fallba
 bounded OSC 52 for terminal-mediated copying. SSH deliberately skips the remote native clipboard so
 copied text reaches the user's local terminal.
 Its separate asynchronous read Interface supports local native image/text paste through `Ctrl+V`.
+
+The standard `edit` and `write` tools share a realpath-keyed mutation queue in `pi-tool-support`.
+Queued operations stay ordered through caller cancellation and retain their slot until in-flight I/O
+settles. Direct writes follow symlinks and preserve hard links, with no undeclared 10 MiB ceiling.
+Editing splices only matched ranges back into the original text; fuzzy matching does not normalize
+untouched lines, and mixed line endings survive. These are Pi-compatible filesystem semantics, not
+an atomic-replacement or sandbox guarantee. Optional hashline editing retains its separate stale
+snapshot checks and remains opt-in.
 Matching current Pi's interactive mode, RGBA pixels become a temporary PNG and its path is inserted
 at the composer cursor; later tool reads process that image through `pi-media`. These files remain
 available after exit for saved path references. Pending reads never insert into a replaced session,
@@ -621,8 +639,10 @@ the same generation and registration lifecycle.
 `Config::features` is a typed, host-captured ceiling for first-party memory, subagents, scheduling,
 skills, prompt templates, and session-transfer plugins. `SettingsValues::features` supplies the
 generation-local selection from the deep merge of global and trusted-project `settings.json`.
-All flags default to enabled. Coding configuration intersects the two without mutating the host
-ceiling, so settings cannot re-enable a host-disabled feature and removing a settings override can
+The host ceiling permits every feature; settings default hashline, memory, subagents and schedule
+to disabled, while skills, prompt templates and session transfer remain enabled. Coding configuration
+intersects the two without mutating the host ceiling, so settings cannot re-enable a host-disabled
+feature and removing a settings override can
 re-enable an allowed feature on reload. Generation construction gates complete agent/session
 registrations and initialization, so disabled memory never loads its provider and disabled scheduling
 never starts its worker. Each managed session replacement/reload rereads settings; existing sessions
@@ -819,11 +839,20 @@ client can retain one stable resume path. In-memory sessions omit it. Session Ru
 owns full settlement. RPC returns the corresponding disposition without waiting for that future,
 and reports preflight errors as failed command responses. Cancelling a request before its receipt
 cancels the pending prompt task; admitted work follows normal session cancellation and shutdown.
+RPC input carries `InputSource::Rpc` through commands, input hooks and queue preprocessing.
+Extension commands and input hooks run before active-run admission rejects a prompt without a
+streaming behavior. Explicit `steer` and `follow_up` requests reject extension commands and can
+queue while idle. Idle queue entries retain their live delivery mode and use v4 `nextRun` storage
+until the next explicit prompt binds them to its run; reopening history preserves the existing
+explicit recovery boundary. `abort` waits for session idleness before its successful response.
 
 Stdio RPC installs its semantic dialog bridge before session startup and keeps reading correlated
 UI responses while startup or command hooks await them. `confirm`, `select`, `input`, `editor`
-and `notify` use Pi's `extension_ui_request` wire methods. `pi-plugin` owns typed
-`UiDialogRequest`/`UiDialogResponse` capabilities, `pi-session` binds them to the frontend, and
+and `notify` use Pi's `extension_ui_request` wire methods. Typed `UiNotification` also carries
+status updates, text widgets, titles and editor replacement through `setStatus`, `setWidget`,
+`setTitle` and `set_editor_text`. Optional notification levels, dialog placeholders and editor
+prefills retain omission separately from empty text. `pi-plugin` owns typed
+`UiDialogRequest`/`UiDialogResponse` and notification capabilities, `pi-session` binds them to the frontend, and
 `pi-rpc` owns their wire projection. Native helpers preserve their existing return types and TUI
 fallback; a cancelled semantic dialog never opens a fallback surface. Unknown or retired response
 IDs are ignored. Cancellation, timeout, generation retirement and disconnect release pending
@@ -837,6 +866,18 @@ handlers that await output, hooks or other work then continue concurrently. EOF 
 pending commands and running work, while the shared output flush preserves responses already
 enqueued. A one-shot `get_state` / `get_available_models` probe therefore receives both responses
 without keeping stdin open or waiting for unrelated extension commands to finish.
+An extension-requested shutdown waits for all outstanding command responses and session
+settlement, then drains the event stream before disposing the session. The app owns SIGTERM and
+SIGHUP handling: one signal starts disposal, a signal following stdin EOF leaves that disposal
+running, and a repeated signal exits immediately. The Node host redirects extension stdout
+logging to stderr while Rust retains exclusive ownership of protocol output.
+
+The JSON projection includes the session-authoritative `agent_settled.aborted` flag, cumulative
+stream usage and summarization retry progress. Bash updates preserve an optional client request
+ID independently of the internal shell execution identity. Command discovery exposes the
+registered extension, prompt or skill source metadata. Model cycling uses the session's scoped
+models and thinking-selection policy; mutable queue and automatic-operation preferences use the
+product-injected settings writer.
 
 RPC notifications go directly through the injected bridge, including during startup and reload.
 A bridge that accepts a notification owns its delivery; the session adapter publishes the ordinary
@@ -2030,15 +2071,22 @@ resume and tree navigation restore that selection rather than unioning historica
 The session wire schema is unchanged. Native plugins must rebuild against the changed context layout
 through the existing exact-build fingerprint checks.
 
-MCP registers the generic search tool when enabled policy contains any deferred exposure, even an
-unmatched per-tool override. Its prompt hook adds a bounded server directory; namespace instructions
-are projected from the actually active tools on every provider request. Shared resource tools are
-direct if any visible resource server is direct, otherwise deferred. Hidden server resources remain
-unreachable. Coding applies ordinary default registration policy without MCP-name switches.
+Coding registers the generic search plugin in every generation, initially inactive unless explicitly
+selected or required by MCP deferred exposure, including unmatched per-tool overrides. A standalone
+MCP library still registers its helper when needed; Coding disables that fallback explicitly with
+`McpLibrary::with_tool_search_registration(false)` to avoid duplicate identities. MCP's prompt hook
+lists configured enabled indirect servers regardless of active entry points, using only the reach
+hints present in the directory. Namespace instructions are projected from actually active tools on
+every provider request; no duplicate active-server summary is appended. Shared resource tools are
+direct if any visible resource server is direct, otherwise deferred. Their input and output schemas
+match Pi, so codemode advertises the same structured values it returns. Ordinary MCP tools also
+declare the complete CallToolResult envelope; embedded remote schemas relocate local references
+without rewriting JSON data examples. Content-only native/JS tool-result patches invalidate stale
+structured output; explicit `structured_content`/`structuredContent` replacements chain with them.
+Hidden resources remain
+unreachable. Duplicate registry identities still fail construction.
 
-Deliberate Rust differences remain: tool_search is supplied by the MCP plugin
-when needed rather than always registered inactive, and duplicate registration is rejected. Stable
-Rust catalog ordering replaces locale-sensitive tie ordering. Compiled ICU dictionaries can differ
+Deliberate Rust differences remain: stable Rust catalog ordering replaces locale-sensitive tie ordering. Compiled ICU dictionaries can differ
 from the Node host's ICU version. New schemas and namespace instructions are available in the next
 request; generic base-prompt snippets are rerendered after the run, preserving the existing run-local
 hook prompt. A failed render prevents a subsequent run from using a stale base prompt.
@@ -2127,6 +2175,9 @@ These limits are documented by the feature; generic runtimes contain no codemode
 - `ProviderPluginDriver`: validates, registers, and invokes the ordered provider plugin set for one runtime generation.
 - `SessionDispatchContext`: carries Session identity and generation into a hook dispatch; capabilities come from the PluginDriver's context epoch.
 - `ModelRuntime`: is the immutable, generation-local model catalog and provider resolver.
+  `ModelSpec.input_limits` preserves typed optional input/resize metadata through catalog generation,
+  models.json overrides and plugin serialization. Image resize policy consumes its resize profile;
+  request byte/count metadata alone does not imply provider-side enforcement.
 - `TelemetryContext`: starts schema-typed spans through an injected sink; the no-op and in-memory
   sinks are adapters, not alternate event systems.
 - `AbortHandle` / `AbortSignal`: provide cooperative cancellation without exposing Tokio types in public signatures.
@@ -3492,7 +3543,8 @@ described in [plugin UI](plugin-ui.md).
 Availability is a property of the complete presentation adapter, not the mode label alone:
 `hasUI` is true for TUI mode with an installed `PluginUiBridge`, and for RPC mode with a bridge
 that supports semantic confirmation. The stdio RPC bridge supports confirmations, selection, text
-input, multiline editing and notifications, including startup hooks. It does not enable declarative
+input, multiline editing, notifications, status, text widgets, titles and editor replacement,
+including startup hooks. It does not enable declarative
 terminal surfaces. Print, JSON and ACP report UI unavailable.
 
 Semantic dialogs are separate from declarative surfaces. `PluginUiBridge::dialog` answers typed

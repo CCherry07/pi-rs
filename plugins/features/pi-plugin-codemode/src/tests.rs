@@ -204,6 +204,8 @@ fn fake_context(signal: AbortSignal, executor: Arc<dyn NestedToolExecutor>) -> T
                 label: name.into(),
                 description: format!("{name} test tool"),
                 parameters: json!({"type":"object","properties":{"value":{"type":"string"}}}),
+                output_schema: (name == "structured").then(|| json!({"type":"object","properties":{"content":{"type":"array"},"structuredContent":{"type":"object"}}})),
+                constrained_sampling: None,
                 execution_mode: ToolExecutionMode::Parallel,
                 prompt_snippet: None,
                 prompt_guidelines: Vec::new(),
@@ -450,6 +452,129 @@ fn catalog_preserves_exact_names_and_exposes_namespace_instructions() {
     )
     .unwrap();
     assert_eq!(found["value"].as_array().unwrap().len(), 1);
+    let description = declarations[0]["description"].as_str().unwrap();
+    assert!(description.contains("codemode tool declaration:"));
+    assert!(description.contains("\"read-file\"(args:"));
+    assert!(description.contains("Promise<string>"));
+}
+
+#[tokio::test]
+async fn emitted_images_are_saved_once_and_paths_reach_the_model() {
+    let result =
+        script("image('data:image/png;base64,aGVsbG8='); image('data:image/png;base64,aGVsbG8=');")
+            .await;
+    assert!(!result.is_error, "{}", text_of(&result));
+    let labels = result
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text(text) if text.text.starts_with("[Image saved to ") => {
+                Some(text.text.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(labels.len(), 2);
+    assert_eq!(labels[0], labels[1]);
+    let path = labels[0]
+        .strip_prefix("[Image saved to ")
+        .unwrap()
+        .split(" (image/png,")
+        .next()
+        .unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), b"hello");
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn codemode_loadout_changes_actual_registered_declarations_without_mutating_the_catalog() {
+    struct DeclaredTool(ToolSpec);
+    #[async_trait]
+    impl Tool for DeclaredTool {
+        fn spec(&self) -> ToolSpec {
+            self.0.clone()
+        }
+
+        async fn execute(
+            &self,
+            _context: ToolContext,
+            _id: ToolCallId,
+            _input: Value,
+            _updates: ToolUpdateSink,
+        ) -> Result<ToolResult, ToolError> {
+            unreachable!("rendering declarations cannot execute tools")
+        }
+    }
+    let (_abort, signal) = AbortHandle::new();
+    let executor = Arc::new(FakeExecutor {
+        barrier: None,
+        started: AtomicUsize::new(0),
+        cancelled: Arc::new(AtomicBool::new(false)),
+    });
+    let context = fake_context(signal, executor);
+    let registry = |mode| {
+        let mut builder = pi_plugin::RegistriesBuilder::new();
+        builder
+            .register_tool(
+                PluginId::new("codemode"),
+                Arc::new(CodemodeTool {
+                    options: CodemodeOptions {
+                        mode,
+                        ..CodemodeOptions::default()
+                    },
+                }),
+            )
+            .unwrap();
+        for tool in context.nested_tools() {
+            builder
+                .register_tool(
+                    PluginId::new("fixture"),
+                    Arc::new(DeclaredTool(tool.spec.clone())),
+                )
+                .unwrap();
+        }
+        builder.freeze()
+    };
+    let active = ["codemode".into(), "read".into(), "structured".into()];
+    let on = registry(CodemodeMode::On);
+    let prepared = on.prepare_tool_loadout(&active).unwrap();
+    let read = prepared
+        .tools
+        .iter()
+        .find(|tool| tool.name == "read")
+        .unwrap();
+    assert!(
+        read.description
+            .ends_with("Codemode: `tools.read(args)` resolves to a string.")
+    );
+    assert!(
+        prepared
+            .tools
+            .iter()
+            .find(|tool| tool.name == "structured")
+            .unwrap()
+            .description
+            .contains("structuredContent")
+    );
+    assert!(prepared.hidden_tools.is_empty());
+    let without_codemode = on.prepare_tool_loadout(&["read".into()]).unwrap();
+    assert_eq!(without_codemode.tools[0].description, "read test tool");
+    assert_eq!(
+        on.all_tool_specs()
+            .iter()
+            .find(|tool| tool.name == "read")
+            .unwrap()
+            .description,
+        "read test tool"
+    );
+    let only = registry(CodemodeMode::Only)
+        .prepare_tool_loadout(&active)
+        .unwrap();
+    assert_eq!(only.tools.len(), 1);
+    assert_eq!(only.hidden_tools.len(), 2);
+    assert!(only.tools[0].description.contains("### `read`"));
+    assert!(only.tools[0].description.contains("Promise<string>"));
+    assert!(!only.tools[0].description.contains("### `wait`"));
 }
 
 #[test]

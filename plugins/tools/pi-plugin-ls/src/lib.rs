@@ -3,7 +3,7 @@ use pi_core::{PluginId, ToolCallId, ToolResult, ToolSpec};
 use pi_plugin::{Plugin, RegisterContext, Tool, ToolContext, ToolError, ToolUpdateSink};
 use pi_tool_support::with_prompt;
 use pi_tool_support::{
-    execution, optional_positive_usize, resolve_to_cwd, spec, truncate_lines_by_bytes,
+    execution, optional_result_limit, resolve_to_cwd, spec, truncate_lines_by_bytes,
 };
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
@@ -28,9 +28,9 @@ impl Tool for LsTool {
         with_prompt(
             spec(
                 "ls",
-                "List directory entries alphabetically, including dotfiles; directories end in '/'.",
+                "List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. Includes dotfiles. Output is truncated to 500 entries or 50KB (whichever is hit first).",
                 json!({
-                    "type":"object","properties":{"path":{"type":"string","description":"Directory to list (default: current directory)"},"limit":{"type":"integer","minimum":1}},"additionalProperties":false
+                    "type":"object","properties":{"path":{"type":"string","description":"Directory to list (default: current directory)"},"limit":{"type":"number","description":"Maximum number of entries to return (default: 500)"}}
                 }),
             ),
             "List directory contents",
@@ -50,7 +50,7 @@ impl Tool for LsTool {
             context.cwd(),
             input.get("path").and_then(Value::as_str).unwrap_or("."),
         )?;
-        let limit = optional_positive_usize(&input, "limit", DEFAULT_LIMIT)?;
+        let limit = optional_result_limit(&input, "limit", DEFAULT_LIMIT)?;
         let metadata = tokio::fs::metadata(&path)
             .await
             .map_err(|error| match error.kind() {
@@ -82,9 +82,10 @@ impl Tool for LsTool {
         )
         .map_err(|error| execution(format!("Could not initialize filename collation: {error}")))?;
         entries.sort_by(|(left, _), (right, _)| {
-            left.to_string_lossy()
-                .to_lowercase()
-                .cmp(&right.to_string_lossy().to_lowercase())
+            collator.compare(
+                &left.to_string_lossy().to_lowercase(),
+                &right.to_string_lossy().to_lowercase(),
+            )
         });
 
         let mut results = Vec::new();
@@ -182,6 +183,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn floors_numeric_entry_limits_like_pi() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("first"), "").unwrap();
+        std::fs::write(directory.path().join("second"), "").unwrap();
+        for limit in [-1.0, 0.0, 1.9] {
+            let result = run_ls(directory.path(), json!({"limit":limit}))
+                .await
+                .unwrap();
+            assert_eq!(result.details.as_ref().unwrap()["entryLimitReached"], 1);
+            assert!(result_text(&result).starts_with("first\n"));
+            assert!(!result_text(&result).contains("second"));
+        }
+    }
+
+    #[tokio::test]
     async fn sorts_case_insensitively_and_includes_dotfiles() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("z"), "").unwrap();
@@ -192,6 +208,41 @@ mod tests {
         let result = run_ls(dir.path(), json!({})).await.unwrap();
 
         assert_eq!(result_text(&result), ".hidden\na\nB\nz");
+    }
+
+    #[tokio::test]
+    async fn sorts_latin_accents_and_punctuation_like_the_pi_locale_oracle() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "z",
+            "B",
+            "a",
+            ".hidden",
+            "éclair",
+            "eclair",
+            "École",
+            "eagle",
+            "apple",
+            "a-b",
+            "a_b",
+            "ab",
+            "a.b",
+            "file10",
+            "file2",
+            "über",
+            "ångström",
+            "äther",
+            "_a",
+            "-a",
+        ] {
+            std::fs::write(dir.path().join(name), "").unwrap();
+        }
+        let result = run_ls(dir.path(), json!({})).await.unwrap();
+        // Current Node's en-US a.toLowerCase().localeCompare(b.toLowerCase()).
+        assert_eq!(
+            result_text(&result),
+            "_a\n-a\n.hidden\na\na_b\na-b\na.b\nab\nångström\napple\näther\nB\neagle\neclair\néclair\nÉcole\nfile10\nfile2\nüber\nz"
+        );
     }
 
     #[tokio::test]

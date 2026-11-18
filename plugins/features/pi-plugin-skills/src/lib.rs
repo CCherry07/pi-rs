@@ -62,6 +62,72 @@ pub struct SkillInfo {
     pub disable_model_invocation: bool,
 }
 
+/// Model-facing metadata shared with the Coding prompt's mutable options.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillPromptEntry {
+    pub name: String,
+    pub description: String,
+    pub file_path: PathBuf,
+    #[serde(default)]
+    pub base_dir: PathBuf,
+    #[serde(default)]
+    pub source_info: serde_json::Value,
+    #[serde(default)]
+    pub disable_model_invocation: bool,
+}
+
+impl From<&SkillInfo> for SkillPromptEntry {
+    fn from(skill: &SkillInfo) -> Self {
+        Self {
+            name: skill.name.clone(),
+            description: skill.description.clone(),
+            file_path: skill.file_path.clone(),
+            base_dir: skill
+                .file_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf(),
+            source_info: serde_json::to_value(skill_source_info(skill))
+                .unwrap_or(serde_json::Value::Null),
+            disable_model_invocation: skill.disable_model_invocation,
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct SkillPromptText {
+    pub text: String,
+    pub contributions: Vec<pi_core::PromptContribution>,
+}
+
+/// The plugin owns catalog formatting even when a product renderer composes
+/// its section from options edited by another extension.
+pub fn render_skill_prompt_options(
+    skills: &[SkillPromptEntry],
+    selected: &[String],
+    hidden: &[String],
+) -> SkillPromptText {
+    let Some(reader) = SkillFileReadTool::from_selection(selected, hidden) else {
+        return SkillPromptText::default();
+    };
+    let skills = skills
+        .iter()
+        .map(|skill| SkillInfo {
+            name: skill.name.clone(),
+            description: skill.description.clone(),
+            file_path: skill.file_path.clone(),
+            content: String::new(),
+            disable_model_invocation: skill.disable_model_invocation,
+        })
+        .collect::<Vec<_>>();
+    let rendered = format_skills_for_prompt(&skills, reader);
+    SkillPromptText {
+        text: rendered.prompt.trim().to_string(),
+        contributions: rendered.contributions,
+    }
+}
+
 /// Observes successful explicit skill expansion. Catalog advertisement alone
 /// is not usage. Observers must be best effort and must not change the catalog.
 pub trait SkillActivityObserver: Send + Sync {
@@ -117,6 +183,7 @@ pub struct SourcedSkillCatalog<T> {
 pub struct SkillCatalog {
     skills: Arc<Vec<SkillInfo>>,
     diagnostics: Arc<Vec<SkillDiagnostic>>,
+    command_sources: Arc<HashMap<PathBuf, pi_plugin::CommandSourceInfo>>,
 }
 
 /// Per-run projection requested from a [`SkillCatalog`].
@@ -171,9 +238,54 @@ impl SkillCatalog {
             options.include_defaults,
             options.project_trusted,
         );
+        let roots = skill_roots(
+            &cwd,
+            &agent_dir,
+            &options.additional_paths,
+            options.include_defaults,
+            options.project_trusted,
+        );
+        let user_roots = [
+            Some(agent_dir.join("skills")),
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".agents/skills")),
+        ];
+        let command_sources = skills
+            .iter()
+            .map(|skill| {
+                let root = roots.iter().find(|root| skill.file_path.starts_with(root));
+                let scope = if root
+                    .is_some_and(|root| user_roots.iter().flatten().any(|user| user == root))
+                {
+                    pi_plugin::CommandSourceScope::User
+                } else if root.is_some_and(|root| {
+                    root.starts_with(&cwd)
+                        && !options
+                            .additional_paths
+                            .iter()
+                            .any(|path| absolute(&cwd.join(path)) == *root)
+                }) {
+                    pi_plugin::CommandSourceScope::Project
+                } else {
+                    pi_plugin::CommandSourceScope::Temporary
+                };
+                let mut info = skill_source_info(skill);
+                info.scope = scope;
+                info.base_dir = root.map(|root| {
+                    if root.is_file() {
+                        root.parent().unwrap_or(root)
+                    } else {
+                        root
+                    }
+                    .to_string_lossy()
+                    .into_owned()
+                });
+                (skill.file_path.clone(), info)
+            })
+            .collect();
         Self {
             skills: Arc::new(skills),
             diagnostics: Arc::new(diagnostics),
+            command_sources: Arc::new(command_sources),
         }
     }
 
@@ -181,6 +293,7 @@ impl SkillCatalog {
         Self {
             skills: Arc::new(skills.into_iter().collect()),
             diagnostics: Arc::new(Vec::new()),
+            command_sources: Arc::new(HashMap::new()),
         }
     }
 
@@ -369,10 +482,31 @@ pub fn load_sourced_skills<T: Clone>(
 struct SkillCommand {
     skill: SkillInfo,
     activity_observer: Option<Arc<dyn SkillActivityObserver>>,
+    source_info: pi_plugin::CommandSourceInfo,
+}
+
+fn skill_source_info(skill: &SkillInfo) -> pi_plugin::CommandSourceInfo {
+    pi_plugin::CommandSourceInfo {
+        path: skill.file_path.to_string_lossy().into_owned(),
+        source: "local".to_string(),
+        scope: pi_plugin::CommandSourceScope::Temporary,
+        origin: pi_plugin::CommandSourceOrigin::TopLevel,
+        base_dir: skill
+            .file_path
+            .parent()
+            .map(|path| path.to_string_lossy().into_owned()),
+        changelog_path: None,
+    }
 }
 
 #[async_trait]
 impl Command for SkillCommand {
+    fn metadata(&self) -> Option<pi_plugin::CommandMetadata> {
+        Some(pi_plugin::CommandMetadata {
+            source: pi_plugin::CommandSource::Skill,
+            source_info: self.source_info.clone(),
+        })
+    }
     fn spec(&self) -> CommandSpec {
         CommandSpec {
             name: format!("skill:{}", self.skill.name),
@@ -432,6 +566,12 @@ impl Plugin for SkillsPlugin {
             context.register_command(Arc::new(SkillCommand {
                 skill: skill.clone(),
                 activity_observer: self.activity_observer.clone(),
+                source_info: self
+                    .catalog
+                    .command_sources
+                    .get(&skill.file_path)
+                    .cloned()
+                    .unwrap_or_else(|| skill_source_info(skill)),
             }))?;
         }
         Ok(())
@@ -442,14 +582,41 @@ impl Plugin for SkillsPlugin {
         _context: AgentPluginContext,
         event: BeforeAgentStartEvent,
     ) -> Result<BeforeAgentStartPatch, PluginError> {
-        if !event.active_tools.iter().any(|tool| tool == "read") {
-            return Ok(BeforeAgentStartPatch::default());
-        }
         let projection = self.prompt_projector.as_ref().map_or_else(
             || self.catalog.all_for_prompt(),
             |projector| projector.project(&event, &self.catalog),
         );
-        let catalog = format_skills_for_prompt(projection.skills());
+        if let Some(state) = &event.prompt_state
+            && state.options().get("skills").is_some()
+        {
+            let entries = projection
+                .skills()
+                .iter()
+                .map(|skill| {
+                    let mut entry = SkillPromptEntry::from(skill);
+                    if let Some(source) = self.catalog.command_sources.get(&skill.file_path) {
+                        entry.source_info =
+                            serde_json::to_value(source).unwrap_or(serde_json::Value::Null);
+                    }
+                    entry
+                })
+                .collect::<Vec<_>>();
+            let mut options = state.options().clone();
+            options["skills"] = serde_json::to_value(entries)
+                .map_err(|error| PluginError::Failure(error.to_string()))?;
+            return Ok(BeforeAgentStartPatch {
+                prompt_state: Some(state.with_options(options).map_err(PluginError::Failure)?),
+                ..Default::default()
+            });
+        }
+        let hidden = event
+            .prompt_state
+            .as_ref()
+            .map_or(&[][..], |state| state.hidden_tools());
+        let Some(reader) = SkillFileReadTool::from_selection(&event.active_tools, hidden) else {
+            return Ok(BeforeAgentStartPatch::default());
+        };
+        let catalog = format_skills_for_prompt(projection.skills(), reader);
         if catalog.prompt.is_empty() {
             return Ok(BeforeAgentStartPatch::default());
         }
@@ -457,6 +624,7 @@ impl Plugin for SkillsPlugin {
             prompt_contributions: catalog.contributions,
             system_prompt: Some(format!("{}{}", event.system_prompt, catalog.prompt)),
             messages: Vec::new(),
+            prompt_state: None,
         })
     }
 }
@@ -719,7 +887,43 @@ struct FormattedSkillPrompt {
     contributions: Vec<pi_core::PromptContribution>,
 }
 
-fn format_skills_for_prompt(skills: &[SkillInfo]) -> FormattedSkillPrompt {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SkillFileReadTool {
+    Read,
+    Bash,
+    Indirect,
+}
+
+impl SkillFileReadTool {
+    fn from_selection(selected: &[String], hidden: &[String]) -> Option<Self> {
+        let selected = |name| selected.iter().any(|tool| tool == name);
+        let hidden = |name| hidden.iter().any(|tool| tool == name);
+        if selected("read") && !hidden("read") {
+            Some(Self::Read)
+        } else if selected("bash") && !hidden("bash") {
+            Some(Self::Bash)
+        } else if selected("read") || selected("bash") {
+            Some(Self::Indirect)
+        } else {
+            None
+        }
+    }
+
+    fn instruction(self) -> &'static str {
+        match self {
+            Self::Read => {
+                "Use the read tool to load a skill's file when the task matches its description."
+            }
+            Self::Bash => "Use bash to load a skill's file when the task matches its description.",
+            Self::Indirect => "Load a skill's file when the task matches its description.",
+        }
+    }
+}
+
+fn format_skills_for_prompt(
+    skills: &[SkillInfo],
+    reader: SkillFileReadTool,
+) -> FormattedSkillPrompt {
     let visible = skills
         .iter()
         .filter(|skill| !skill.disable_model_invocation)
@@ -727,8 +931,9 @@ fn format_skills_for_prompt(skills: &[SkillInfo]) -> FormattedSkillPrompt {
     if visible.is_empty() {
         return FormattedSkillPrompt::default();
     }
-    let mut prompt = String::from(
-        "\n\nThe following skills provide specialized instructions for specific tasks.\nUse the read tool to load a skill's file when the task matches its description.\nWhen a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\n<available_skills>\n",
+    let mut prompt = format!(
+        "\n\nThe following skills provide specialized instructions for specific tasks.\n{}\nResolve relative paths against the skill's directory (parent of SKILL.md). Use absolute paths in tool calls.\n\n<available_skills>\n",
+        reader.instruction(),
     );
     let mut contributions = Vec::with_capacity(visible.len());
     for skill in visible {
@@ -881,7 +1086,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn before_agent_start_contributes_visible_catalog_only_with_read() {
+    async fn before_agent_start_contributes_visible_catalog_with_read() {
         let plugin = SkillsPlugin::from_skills([
             SkillInfo {
                 name: "visible".into(),
@@ -908,6 +1113,7 @@ mod tests {
                     signal,
                 ),
                 BeforeAgentStartEvent {
+                    prompt_state: None,
                     system_prompt: "base".into(),
                     input_messages: Vec::new(),
                     active_tools: vec!["read".into()],
@@ -932,30 +1138,101 @@ mod tests {
     }
 
     #[test]
+    fn skill_reader_prefers_declared_readers_and_supports_indirect_loadouts() {
+        for (selected, hidden, expected) in [
+            (vec!["read", "bash"], vec![], Some(SkillFileReadTool::Read)),
+            (vec!["bash"], vec![], Some(SkillFileReadTool::Bash)),
+            (
+                vec!["read", "bash"],
+                vec!["read"],
+                Some(SkillFileReadTool::Bash),
+            ),
+            (
+                vec!["read"],
+                vec!["read"],
+                Some(SkillFileReadTool::Indirect),
+            ),
+            (
+                vec!["bash"],
+                vec!["bash"],
+                Some(SkillFileReadTool::Indirect),
+            ),
+            (vec!["write"], vec![], None),
+        ] {
+            assert_eq!(
+                SkillFileReadTool::from_selection(
+                    &selected.into_iter().map(str::to_string).collect::<Vec<_>>(),
+                    &hidden.into_iter().map(str::to_string).collect::<Vec<_>>(),
+                ),
+                expected,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn bash_only_sessions_receive_the_skill_catalog() {
+        let plugin = SkillsPlugin::from_skills([SkillInfo {
+            name: "inspect".into(),
+            description: "Inspect things".into(),
+            file_path: "/skills/inspect/SKILL.md".into(),
+            content: "body".into(),
+            disable_model_invocation: false,
+        }]);
+        let (_, signal) = AbortHandle::new();
+        let patch = plugin
+            .before_agent_start(
+                AgentPluginContext::unavailable_for_testing(
+                    PluginId::new("skills"),
+                    RunId::new("run"),
+                    "/project".into(),
+                    signal,
+                ),
+                BeforeAgentStartEvent {
+                    prompt_state: None,
+                    system_prompt: "base".into(),
+                    input_messages: Vec::new(),
+                    active_tools: vec!["bash".into()],
+                    provider_id: ProviderId::new("provider"),
+                    model_id: ModelId::new("model"),
+                },
+            )
+            .await
+            .unwrap();
+        let prompt = patch.system_prompt.unwrap();
+        assert!(prompt.contains("Use bash to load a skill's file"));
+        assert!(prompt.contains("Resolve relative paths against the skill's directory (parent of SKILL.md). Use absolute paths in tool calls."));
+        assert!(!prompt.contains("Use the read tool"));
+        assert!(prompt.contains("<name>inspect</name>"));
+    }
+
+    #[test]
     fn model_visible_catalog_escapes_every_xml_field_and_preserves_order() {
-        let catalog = format_skills_for_prompt(&[
-            SkillInfo {
-                name: "a&b".into(),
-                description: "Use <this> & \"that\" 'now'".into(),
-                file_path: "/skills/<bad>&\"quoted\"/SKILL.md".into(),
-                content: "first".into(),
-                disable_model_invocation: false,
-            },
-            SkillInfo {
-                name: "hidden".into(),
-                description: "must not be rendered".into(),
-                file_path: "/hidden/SKILL.md".into(),
-                content: "hidden".into(),
-                disable_model_invocation: true,
-            },
-            SkillInfo {
-                name: "second".into(),
-                description: "second".into(),
-                file_path: "/second/SKILL.md".into(),
-                content: "second".into(),
-                disable_model_invocation: false,
-            },
-        ]);
+        let catalog = format_skills_for_prompt(
+            &[
+                SkillInfo {
+                    name: "a&b".into(),
+                    description: "Use <this> & \"that\" 'now'".into(),
+                    file_path: "/skills/<bad>&\"quoted\"/SKILL.md".into(),
+                    content: "first".into(),
+                    disable_model_invocation: false,
+                },
+                SkillInfo {
+                    name: "hidden".into(),
+                    description: "must not be rendered".into(),
+                    file_path: "/hidden/SKILL.md".into(),
+                    content: "hidden".into(),
+                    disable_model_invocation: true,
+                },
+                SkillInfo {
+                    name: "second".into(),
+                    description: "second".into(),
+                    file_path: "/second/SKILL.md".into(),
+                    content: "second".into(),
+                    disable_model_invocation: false,
+                },
+            ],
+            SkillFileReadTool::Read,
+        );
 
         let prompt = &catalog.prompt;
         assert_eq!(

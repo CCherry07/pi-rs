@@ -58,6 +58,7 @@ impl AnthropicFallbackModel {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedAnthropicMessagesCompat {
+    pub supports_strict_tools: bool,
     pub supports_eager_tool_input_streaming: bool,
     pub supports_long_cache_retention: bool,
     pub send_session_affinity_headers: bool,
@@ -84,6 +85,7 @@ pub(crate) fn compatibility(request: &ProviderRequest) -> ResolvedAnthropicMessa
         id.contains("-4-5") || id.contains("-4-6") || id.contains("-4-7") || id.contains("-5-")
     });
     ResolvedAnthropicMessagesCompat {
+        supports_strict_tools: configured.supports_strict_tools.unwrap_or(false),
         supports_eager_tool_input_streaming: configured
             .supports_eager_tool_input_streaming
             .unwrap_or(true),
@@ -101,7 +103,10 @@ pub(crate) fn compatibility(request: &ProviderRequest) -> ResolvedAnthropicMessa
 }
 
 /// Projects a semantic request into the Anthropic Messages payload.
-pub fn request_body(request: &ProviderRequest, mode: AnthropicMode) -> Value {
+pub fn request_body(
+    request: &ProviderRequest,
+    mode: AnthropicMode,
+) -> Result<Value, ProviderError> {
     let compat = compatibility(request);
     let deferred_names = if compat.supports_tool_references {
         request
@@ -129,35 +134,15 @@ pub fn request_body(request: &ProviderRequest, mode: AnthropicMode) -> Value {
         .tools
         .iter()
         .filter(|tool| !deferred_names.contains(&tool.name))
-        .map(|tool| {
-            let mut value = json!({
-                "name": outbound_tool_name(&tool.name, mode),
-                "description": tool.description,
-                "input_schema": tool.parameters
-            });
-            if compat.supports_eager_tool_input_streaming {
-                value["eager_input_streaming"] = Value::Bool(true);
-            }
-            value
-        })
-        .collect::<Vec<_>>();
+        .map(|tool| tool_value(tool, mode, &compat, false))
+        .collect::<Result<Vec<_>, _>>()?;
     tools.extend(
         request
             .tools
             .iter()
             .filter(|tool| deferred_names.contains(&tool.name))
-            .map(|tool| {
-                let mut value = json!({
-                    "name": outbound_tool_name(&tool.name, mode),
-                    "description": tool.description,
-                    "input_schema": tool.parameters,
-                    "defer_loading": true
-                });
-                if compat.supports_eager_tool_input_streaming {
-                    value["eager_input_streaming"] = Value::Bool(true);
-                }
-                value
-            }),
+            .map(|tool| tool_value(tool, mode, &compat, true))
+            .collect::<Result<Vec<_>, _>>()?,
     );
     let mut system = Vec::new();
     if mode == AnthropicMode::ClaudeCode {
@@ -263,7 +248,70 @@ pub fn request_body(request: &ProviderRequest, mode: AnthropicMode) -> Value {
             body["tools"] = Value::Array(tools);
         }
     }
-    body
+    Ok(body)
+}
+
+fn tool_value(
+    tool: &pi_core::ToolSpec,
+    mode: AnthropicMode,
+    compat: &ResolvedAnthropicMessagesCompat,
+    deferred: bool,
+) -> Result<Value, ProviderError> {
+    let strict = pi_provider::resolve_json_schema_sampling_with(
+        tool,
+        compat.supports_strict_tools,
+        anthropic_unsupported,
+    )
+    .map_err(ProviderError::Protocol)?;
+    let schema = strict.as_ref().unwrap_or(&tool.parameters);
+    let mut input = json!({"type":"object","properties":schema.get("properties").cloned().unwrap_or_else(||json!({})),"required":schema.get("required").cloned().unwrap_or_else(||json!([]))});
+    for key in ["additionalProperties", "$defs", "definitions"] {
+        if let Some(value) = schema.get(key) {
+            input[key] = value.clone();
+        }
+    }
+    if let Some(mut transformed) = strict.clone() {
+        transformed
+            .as_object_mut()
+            .expect("strict object")
+            .extend(input.as_object().expect("object").clone());
+        input = transformed;
+    }
+    let mut value = json!({"name":outbound_tool_name(&tool.name,mode),"description":tool.description,"input_schema":input});
+    if strict.is_some() {
+        value["strict"] = json!(true);
+    }
+    if deferred {
+        value["defer_loading"] = json!(true);
+    }
+    if compat.supports_eager_tool_input_streaming {
+        value["eager_input_streaming"] = json!(true);
+    }
+    Ok(value)
+}
+fn anthropic_unsupported(key: &str, value: &Value) -> bool {
+    match key {
+        "minimum" | "maximum" | "exclusiveMinimum" | "exclusiveMaximum" | "multipleOf"
+        | "maxItems" | "uniqueItems" | "minContains" | "maxContains" | "minProperties"
+        | "maxProperties" => true,
+        "minItems" => value != &json!(0) && value != &json!(1),
+        "format" => !value.as_str().is_some_and(|format| {
+            [
+                "date-time",
+                "time",
+                "date",
+                "duration",
+                "email",
+                "hostname",
+                "uri",
+                "ipv4",
+                "ipv6",
+                "uuid",
+            ]
+            .contains(&format)
+        }),
+        _ => false,
+    }
 }
 
 fn thinking_budget(level: pi_core::ThinkingLevel) -> u64 {
@@ -776,7 +824,7 @@ impl StreamState {
     }
 }
 
-fn outbound_tool_name(name: &str, mode: AnthropicMode) -> String {
+pub(crate) fn outbound_tool_name(name: &str, mode: AnthropicMode) -> String {
     if mode != AnthropicMode::ClaudeCode {
         return name.to_string();
     }
@@ -826,6 +874,55 @@ mod tests {
     use pi_core::{ModelId, ThinkingLevel, ToolExecutionMode, ToolSpec, UserMessage};
 
     #[test]
+    fn strict_schema_rejects_anthropic_keywords_and_preserves_non_strict_definitions() {
+        let request = ProviderRequest {
+            model: "claude".into(),
+            model_spec: None,
+            system_prompt: String::new(),
+            messages: vec![],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Off,
+            thinking_budgets: None,
+            max_output_tokens: None,
+            headers: Default::default(),
+            sampling_params: Default::default(),
+            session_id: None,
+        };
+        let mut compat = compatibility(&request);
+        compat.supports_strict_tools = true;
+        let mut tool = ToolSpec {
+            name: "read".into(),
+            label: String::new(),
+            description: String::new(),
+            parameters: json!({"type":"object","properties":{"line":{"type":"integer","minimum":1}}}),
+            output_schema: None,
+            constrained_sampling: Some(pi_core::ConstrainedSampling::JsonSchema {
+                strict: pi_core::ToolSchemaStrict::Prefer,
+            }),
+            execution_mode: ToolExecutionMode::Parallel,
+            prompt_snippet: None,
+            prompt_guidelines: vec![],
+        };
+        let body = tool_value(&tool, AnthropicMode::Standard, &compat, false).unwrap();
+        assert!(body.get("strict").is_none());
+        tool.constrained_sampling = Some(pi_core::ConstrainedSampling::JsonSchema {
+            strict: pi_core::ToolSchemaStrict::Require,
+        });
+        assert!(
+            tool_value(&tool, AnthropicMode::Standard, &compat, false)
+                .unwrap_err()
+                .to_string()
+                .contains("minimum")
+        );
+        tool.constrained_sampling = None;
+        tool.parameters = json!({"type":"object","properties":{"value":{"$ref":"#/$defs/value"}},"$defs":{"value":{"type":"string"}},"additionalProperties":false,"anyOf":[]});
+        let body = tool_value(&tool, AnthropicMode::Standard, &compat, false).unwrap();
+        assert_eq!(body["input_schema"]["$defs"], tool.parameters["$defs"]);
+        assert_eq!(body["input_schema"]["additionalProperties"], false);
+        assert!(body["input_schema"].get("anyOf").is_none());
+    }
+
+    #[test]
     fn claude_code_mode_adds_identity_and_maps_tool_names() {
         let mut model = pi_core::ModelSpec::new(
             "anthropic",
@@ -841,6 +938,8 @@ mod tests {
             system_prompt: "system".to_string(),
             messages: vec![Message::User(UserMessage::text("hello", 0))],
             tools: vec![ToolSpec {
+                output_schema: None,
+                constrained_sampling: None,
                 name: "read".to_string(),
                 label: "Read".to_string(),
                 description: "read".to_string(),
@@ -856,7 +955,7 @@ mod tests {
             sampling_params: Default::default(),
             session_id: None,
         };
-        let body = request_body(&request, AnthropicMode::ClaudeCode);
+        let body = request_body(&request, AnthropicMode::ClaudeCode).unwrap();
         assert_eq!(
             body["system"][0]["text"],
             "You are Claude Code, Anthropic's official CLI for Claude."

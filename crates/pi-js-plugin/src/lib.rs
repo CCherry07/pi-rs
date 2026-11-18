@@ -1,4 +1,6 @@
 mod context;
+#[cfg(test)]
+mod tool_result_patch_tests;
 
 pub use context::*;
 
@@ -170,6 +172,26 @@ mod wire_tests {
     }
 
     #[test]
+    fn complete_tool_results_preserve_structured_content() {
+        let wire = json!({
+            "content": [{"type":"text", "text":"result"}],
+            "structuredContent": {"answer":42, "nested":["value"]},
+            "details": {"source":"extension"},
+        });
+        let parsed: super::JsToolResult = serde_json::from_value(wire.clone()).unwrap();
+        let result: pi_core::ToolResult = parsed.into();
+        assert_eq!(
+            result.structured_content,
+            Some(wire["structuredContent"].clone())
+        );
+        assert_eq!(result.details, Some(wire["details"].clone()));
+        assert_eq!(
+            super::tool_result_value(&result)["structuredContent"],
+            wire["structuredContent"]
+        );
+    }
+
+    #[test]
     fn host_notification_fields_use_camel_case() {
         let cancel = serde_json::to_value(JsHostOperation::Cancel {
             invocation_id: "invocation-1".to_string(),
@@ -325,6 +347,8 @@ pub struct JsCommandManifest {
     pub description: String,
     #[serde(default)]
     pub argument_hint: Option<String>,
+    #[serde(default)]
+    pub source_info: Option<pi_plugin::CommandSourceInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -434,6 +458,7 @@ pub struct JsHookBatchError {
 #[serde(rename_all = "camelCase")]
 pub enum JsInvocationKind {
     Tool,
+    UserBash,
     ToolPrepareArguments,
     Command,
     AgentHook,
@@ -476,6 +501,15 @@ pub trait JsCallbackDispatcher: Send + Sync {
         invocation: JsInvocation,
         context: PluginContextHandle,
         _updates: ToolUpdateSink,
+    ) -> Result<Value, JsCallbackError> {
+        self.invoke(invocation, context).await
+    }
+
+    async fn invoke_with_bash_output(
+        &self,
+        invocation: JsInvocation,
+        context: PluginContextHandle,
+        _output: pi_plugin::BashOutputSink,
     ) -> Result<Value, JsCallbackError> {
         self.invoke(invocation, context).await
     }
@@ -912,6 +946,17 @@ impl JsCallbackDispatcher for HostCallbackDispatcher {
             .await
     }
 
+    async fn invoke_with_bash_output(
+        &self,
+        invocation: JsInvocation,
+        context: PluginContextHandle,
+        output: pi_plugin::BashOutputSink,
+    ) -> Result<Value, JsCallbackError> {
+        self.host
+            .invoke_with_bash_output(invocation, context, output)
+            .await
+    }
+
     async fn invoke_hook_batch(
         &self,
         invocation: JsHookBatchInvocation,
@@ -995,6 +1040,9 @@ const PROVIDER_HOOKS: &[&str] = &[
 ];
 const SESSION_HOOKS: &[&str] = &[
     "session_start",
+    "model_select",
+    "thinking_level_select",
+    "user_bash",
     "session_info_changed",
     "session_before_switch",
     "session_before_fork",
@@ -1479,11 +1527,18 @@ impl ContextHookBatch for JsContextHooks {
                     context: agent_plugin_context_value(context),
                 })
                 .collect();
+            let visible_messages: Arc<Vec<Message>> = Arc::new(
+                messages
+                    .iter()
+                    .filter(|message| !matches!(message, Message::System(_)))
+                    .cloned()
+                    .collect(),
+            );
             let response = self
                 .lease
                 .invoke_context_hook_batch(
                     callbacks,
-                    Arc::clone(&messages),
+                    Arc::clone(&visible_messages),
                     context.plugin_context_handle(),
                     context.signal(),
                 )
@@ -1517,10 +1572,11 @@ impl ContextHookBatch for JsContextHooks {
             }
             if let Some(replacement) = response.replacement {
                 match serde_json::from_value::<Vec<Message>>(replacement.messages) {
-                    Ok(replacement) => {
-                        messages = Arc::new(replacement);
+                    Ok(replacement) if replacement != *visible_messages => {
+                        messages = Arc::new(restore_system_messages(&messages, replacement));
                         changed = true;
                     }
+                    Ok(_) => {}
                     Err(error) => {
                         let (context, hook) = &remaining[response.processed - 1];
                         report_agent_hook_error(
@@ -1538,6 +1594,44 @@ impl ContextHookBatch for JsContextHooks {
             messages: changed.then(|| Arc::unwrap_or_clone(messages)),
         })
     }
+}
+
+fn restore_system_messages(current: &[Message], mut returned: Vec<Message>) -> Vec<Message> {
+    let mut head: Option<pi_core::SystemMessage> = None;
+    let mut content = Vec::new();
+    for message in current {
+        let Message::System(message) = message else {
+            continue;
+        };
+        let head = head.get_or_insert_with(|| pi_core::SystemMessage {
+            content: Vec::new(),
+            sections: Vec::new(),
+            timestamp_ms: message.timestamp_ms,
+        });
+        let text = message.instruction_text();
+        if !text.is_empty() {
+            content.push(text);
+        }
+        for (name, value) in &message.sections {
+            if let Some(index) = head.sections.iter().position(|(key, _)| key == name) {
+                if value.is_some() {
+                    head.sections[index].1.clone_from(value);
+                } else {
+                    head.sections.remove(index);
+                }
+            } else if value.is_some() {
+                head.sections.push((name.clone(), value.clone()));
+            }
+        }
+    }
+    if let Some(mut head) = head {
+        if !content.is_empty() {
+            head.content =
+                pi_core::SystemMessage::text(content.join("\n\n"), head.timestamp_ms).content;
+        }
+        returned.insert(0, Message::System(head));
+    }
+    returned
 }
 
 impl JsPlugin {
@@ -2080,13 +2174,19 @@ impl Plugin for JsPlugin {
     ) -> Result<BeforeAgentStartPatch, PluginError> {
         let original_system_prompt = event.system_prompt;
         let mut system_prompt = original_system_prompt.clone();
+        let mut prompt_state = event.prompt_state;
         let mut messages = Vec::new();
         let (prompt, images) = pi_prompt_input(&event.input_messages);
         let plugin_context = context.plugin_context_handle();
-        let system_prompt_options = plugin_context
-            .access_for_adapter()
-            .and_then(|access| access.system_prompt_options(PluginContextScope::Command))
-            .unwrap_or_else(|_| json!({ "cwd": context.cwd() }));
+        let mut system_prompt_options = prompt_state
+            .as_ref()
+            .map(|state| state.options().clone())
+            .unwrap_or_else(|| {
+                plugin_context
+                    .access_for_adapter()
+                    .and_then(|access| access.system_prompt_options(PluginContextScope::Command))
+                    .unwrap_or_else(|_| json!({ "cwd": context.cwd() }))
+            });
         let hooks = self.hook_snapshot("before_agent_start").await?;
         for hook in &hooks {
             let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
@@ -2095,8 +2195,9 @@ impl Plugin for JsPlugin {
                 "prompt": prompt,
                 "systemPrompt": system_prompt,
                 "systemPromptOptions": system_prompt_options,
+                "supportsSystemPromptOptions": prompt_state.is_some(),
                 "inputMessages": event.input_messages,
-                "activeTools": event.active_tools,
+                "activeTools": prompt_state.as_ref().map(|state| state.active_tools()).unwrap_or(&event.active_tools),
                 "providerId": event.provider_id.as_str(),
                 "modelId": event.model_id.as_str(),
             });
@@ -2123,8 +2224,28 @@ impl Plugin for JsPlugin {
                     continue;
                 }
             };
+            if let Some(options) = result.get("__systemPromptOptions")
+                && let Some(state) = &prompt_state
+            {
+                match state.with_options(options.clone()) {
+                    Ok(state) => {
+                        system_prompt = state.text().to_string();
+                        system_prompt_options = state.options().clone();
+                        prompt_state = Some(state);
+                    }
+                    Err(error) => callback_context.report_hook_error("before_agent_start", error),
+                }
+            }
+            if let Some(error) = result.get("__promptError").and_then(Value::as_str) {
+                callback_context.report_hook_error("before_agent_start", error.to_string());
+            }
             if let Some(replacement) = result.get("systemPrompt").and_then(Value::as_str) {
                 system_prompt = replacement.to_string();
+                if let Some(state) = prompt_state.take() {
+                    let state = state.with_text(system_prompt.clone());
+                    system_prompt_options = state.options().clone();
+                    prompt_state = Some(state);
+                }
             }
             if let Some(message) = result.get("message") {
                 match before_agent_start_message(message) {
@@ -2137,7 +2258,9 @@ impl Plugin for JsPlugin {
         }
         Ok(BeforeAgentStartPatch {
             prompt_contributions: Vec::new(),
-            system_prompt: (system_prompt != original_system_prompt).then_some(system_prompt),
+            system_prompt: (prompt_state.is_none() && system_prompt != original_system_prompt)
+                .then_some(system_prompt),
+            prompt_state,
             messages,
         })
     }
@@ -2167,12 +2290,12 @@ impl Plugin for JsPlugin {
     async fn agent_settled(
         &self,
         context: AgentPluginContext,
-        _event: AgentSettledEvent,
+        event: AgentSettledEvent,
     ) -> Result<(), PluginError> {
         self.notify_hooks(
             "agent_settled",
             &context,
-            json!({ "type": "agent_settled" }),
+            json!({ "type": "agent_settled", "aborted": event.aborted }),
         )
         .await
     }
@@ -2522,17 +2645,27 @@ impl Plugin for JsPlugin {
                     hook,
                     callback_context.plugin_context_handle(),
                     agent_plugin_context_value(&callback_context),
-                    json!({
-                        "type": "tool_result",
-                        "toolCallId": event.tool_call.id.as_str(),
-                        "toolName": event.tool_call.name,
-                        "input": event.validated_args,
-                        "content": result.content,
-                        "details": result.details,
-                        "usage": result.usage,
-                        "addedToolNames": result.added_tool_names,
-                        "isError": result.is_error,
-                    }),
+                    {
+                        let mut payload = json!({
+                            "type": "tool_result",
+                            "toolCallId": event.tool_call.id.as_str(),
+                            "toolName": event.tool_call.name,
+                            "input": event.validated_args,
+                            "content": result.content,
+                            "structuredContent": result.structured_content,
+                            "details": result.details,
+                            "usage": result.usage,
+                            "addedToolNames": result.added_tool_names,
+                            "isError": result.is_error,
+                        });
+                        if result.structured_content.is_none() {
+                            payload
+                                .as_object_mut()
+                                .expect("event object")
+                                .remove("structuredContent");
+                        }
+                        payload
+                    },
                     callback_context.signal(),
                 )
                 .await
@@ -2589,6 +2722,72 @@ impl Plugin for JsPlugin {
         .await
     }
 
+    async fn model_select(
+        &self,
+        context: &SessionPluginContext,
+        event: &pi_plugin::ModelSelectEvent,
+    ) -> Result<(), PluginError> {
+        let mut wire = json!({"type":"model_select", "model":event.model, "source":event.source});
+        if let Some(previous) = &event.previous_model {
+            wire["previousModel"] = json!(previous);
+        }
+        self.session_notify("model_select", context, wire).await
+    }
+
+    async fn thinking_level_select(
+        &self,
+        context: &SessionPluginContext,
+        event: &pi_plugin::ThinkingLevelSelectEvent,
+    ) -> Result<(), PluginError> {
+        self.session_notify("thinking_level_select", context, json!({
+            "type":"thinking_level_select", "level":event.level, "previousLevel":event.previous_level,
+        })).await
+    }
+
+    async fn user_bash(
+        &self,
+        context: &SessionPluginContext,
+        event: &pi_plugin::UserBashEvent,
+    ) -> Result<Option<pi_plugin::UserBashOverride>, PluginError> {
+        for hook in self.session_hook_snapshot("user_bash").await? {
+            let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
+            let result = self.lease.invoke(
+                &hook.callback_id,
+                JsInvocationKind::SessionHook,
+                json!({"hook":"user_bash", "context":session_context_value(&callback_context), "event": {
+                    "type":"user_bash", "command":event.command,
+                    "excludeFromContext":event.exclude_from_context, "cwd":event.cwd,
+                }}),
+                callback_context.plugin_context_handle(),
+                Some(&event.signal),
+            ).await.map_err(|error| PluginError::Hook {
+                plugin_id: hook.plugin_id.clone(), hook: "user_bash",
+                message: match error {
+                    JsInvokeError::Aborted => "JavaScript user bash hook was aborted".into(),
+                    JsInvokeError::Callback(error) => error.to_string(),
+                },
+            })?;
+            if result.is_null() {
+                continue;
+            }
+            let result: JsUserBashOverride =
+                serde_json::from_value(result).map_err(invalid_session_result)?;
+            return Ok(Some(match result {
+                JsUserBashOverride::Result { result } => {
+                    pi_plugin::UserBashOverride::Result(result)
+                }
+                JsUserBashOverride::Operations {
+                    operations_callback_id,
+                } => pi_plugin::UserBashOverride::Operations(Arc::new(JsUserBashOperations {
+                    callback_id: operations_callback_id,
+                    lease: self.lease.clone(),
+                    context: callback_context.plugin_context_handle(),
+                })),
+            }));
+        }
+        Ok(None)
+    }
+
     async fn session_before_switch(
         &self,
         context: &SessionPluginContext,
@@ -2604,6 +2803,7 @@ impl Plugin for JsPlugin {
                     "targetSessionFile": event.target_session_file,
                 }),
                 None,
+                true,
             )
             .await?;
         if result.is_null() {
@@ -2631,6 +2831,7 @@ impl Plugin for JsPlugin {
                     "position": session_fork_position(event.position),
                 }),
                 None,
+                true,
             )
             .await?;
         if result.is_null() {
@@ -2676,6 +2877,7 @@ impl Plugin for JsPlugin {
                     "willRetry": event.will_retry,
                 }),
                 Some(&event.signal),
+                true,
             )
             .await?;
         if result.is_null() {
@@ -2775,6 +2977,7 @@ impl Plugin for JsPlugin {
                     },
                 }),
                 Some(&event.signal),
+                true,
             )
             .await?;
         if result.is_null() {
@@ -2818,6 +3021,7 @@ impl Plugin for JsPlugin {
 fn tool_result_value(result: &ToolResult) -> Value {
     json!({
         "content": result.content,
+        "structuredContent": result.structured_content,
         "details": result.details,
         "usage": result.usage,
         "addedToolNames": result.added_tool_names,
@@ -2829,6 +3033,7 @@ fn tool_result_value(result: &ToolResult) -> Value {
 struct JsCommand {
     callback_id: String,
     spec: CommandSpec,
+    source_info: Option<pi_plugin::CommandSourceInfo>,
     lease: Arc<JsGenerationLease>,
 }
 
@@ -2836,6 +3041,7 @@ impl JsCommand {
     fn new(manifest: JsCommandManifest, lease: Arc<JsGenerationLease>) -> Self {
         Self {
             callback_id: manifest.callback_id,
+            source_info: manifest.source_info,
             spec: CommandSpec {
                 name: manifest.invocation_name,
                 description: manifest.description,
@@ -2857,6 +3063,15 @@ enum JsCommandOutcome {
 impl Command for JsCommand {
     fn spec(&self) -> CommandSpec {
         self.spec.clone()
+    }
+
+    fn metadata(&self) -> Option<pi_plugin::CommandMetadata> {
+        self.source_info
+            .clone()
+            .map(|source_info| pi_plugin::CommandMetadata {
+                source: pi_plugin::CommandSource::Extension,
+                source_info,
+            })
     }
 
     async fn execute(
@@ -2895,6 +3110,78 @@ struct JsProviderPlugin {
     hooks: Vec<JsAgentHook>,
     dynamic_hooks: bool,
     lease: Arc<JsGenerationLease>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+enum JsUserBashOverride {
+    Result {
+        result: pi_plugin::UserBashResult,
+    },
+    Operations {
+        #[serde(rename = "operationsCallbackId")]
+        operations_callback_id: String,
+    },
+}
+
+struct JsUserBashOperations {
+    callback_id: String,
+    lease: Arc<JsGenerationLease>,
+    context: PluginContextHandle,
+}
+
+struct BashInvocationGuard {
+    lease: Arc<JsGenerationLease>,
+    invocation_id: String,
+    finished: bool,
+}
+
+impl Drop for BashInvocationGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.lease.dispatcher.cancel(&self.invocation_id);
+        }
+    }
+}
+
+#[async_trait]
+impl pi_plugin::UserBashOperations for JsUserBashOperations {
+    async fn execute(
+        &self,
+        request: pi_plugin::UserBashRequest,
+    ) -> Result<Option<i32>, PluginError> {
+        let invocation_id = format!(
+            "js-invocation-{}",
+            NEXT_JS_INVOCATION_ID.fetch_add(1, Ordering::Relaxed)
+        );
+        let mut guard = BashInvocationGuard {
+            lease: self.lease.clone(),
+            invocation_id: invocation_id.clone(),
+            finished: false,
+        };
+        let invocation = JsInvocation {
+            invocation_id,
+            generation_id: self.lease.generation_id.clone(),
+            callback_id: self.callback_id.clone(),
+            kind: JsInvocationKind::UserBash,
+            payload: json!({"command":request.command, "cwd":request.cwd}),
+        };
+        let result = tokio::select! {
+            result = self.lease.dispatcher.invoke_with_bash_output(invocation, self.context.clone(), request.on_data) => result,
+            () = request.signal.wait() => return Err(PluginError::Failure("custom shell execution aborted".into())),
+        };
+        guard.finished = true;
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Exit {
+            exit_code: Option<i32>,
+        }
+        let result: Exit = serde_json::from_value(
+            result.map_err(|error| PluginError::Failure(error.to_string()))?,
+        )
+        .map_err(invalid_session_result)?;
+        Ok(result.exit_code)
+    }
 }
 
 impl JsProviderPlugin {
@@ -3131,6 +3418,7 @@ impl JsPlugin {
         context: &SessionPluginContext,
         event: Value,
         signal: Option<&AbortSignal>,
+        stop_on_cancel: bool,
     ) -> Result<Value, PluginError> {
         let mut last = Value::Null;
         let hooks = self.session_hook_snapshot(name).await?;
@@ -3168,7 +3456,7 @@ impl JsPlugin {
             if !result.is_null() {
                 let cancelled = result.get("cancel").and_then(Value::as_bool) == Some(true);
                 last = result;
-                if cancelled {
+                if cancelled && stop_on_cancel {
                     break;
                 }
             }
@@ -3182,7 +3470,7 @@ impl JsPlugin {
         context: &SessionPluginContext,
         event: Value,
     ) -> Result<(), PluginError> {
-        self.session_invoke(name, context, event, None)
+        self.session_invoke(name, context, event, None, false)
             .await
             .map(drop)
     }
@@ -3321,6 +3609,8 @@ impl JsTool {
             callback_id: manifest.callback_id,
             prepare_callback_id: manifest.prepare_callback_id,
             spec: ToolSpec {
+                output_schema: None,
+                constrained_sampling: None,
                 name: manifest.name,
                 label: manifest.label,
                 description: manifest.description,
@@ -3339,6 +3629,8 @@ impl JsTool {
 struct JsToolResult {
     content: Vec<ContentBlock>,
     #[serde(default)]
+    structured_content: Option<Value>,
+    #[serde(default)]
     details: Option<Value>,
     #[serde(default)]
     usage: Option<Usage>,
@@ -3355,6 +3647,8 @@ struct JsToolResult {
 struct JsToolResultPatch {
     #[serde(default)]
     content: Option<Vec<ContentBlock>>,
+    #[serde(default, deserialize_with = "present_structured_content")]
+    structured_content: Option<Value>,
     #[serde(default)]
     details: Option<Value>,
     #[serde(default)]
@@ -3367,10 +3661,17 @@ struct JsToolResultPatch {
     terminate: Option<bool>,
 }
 
+fn present_structured_content<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(deserializer).map(Some)
+}
+
 impl JsToolResultPatch {
     fn into_core(self) -> ToolResultPatch {
         ToolResultPatch {
             content: self.content,
+            structured_content: self.structured_content,
             details: self.details,
             usage: self.usage,
             added_tool_names: self.added_tool_names,
@@ -3382,6 +3683,9 @@ impl JsToolResultPatch {
     fn merge(&mut self, next: &Self) {
         if next.content.is_some() {
             self.content.clone_from(&next.content);
+            self.structured_content.clone_from(&next.structured_content);
+        } else if next.structured_content.is_some() {
+            self.structured_content.clone_from(&next.structured_content);
         }
         if next.details.is_some() {
             self.details.clone_from(&next.details);
@@ -3405,6 +3709,7 @@ impl From<JsToolResult> for ToolResult {
     fn from(result: JsToolResult) -> Self {
         Self {
             content: result.content,
+            structured_content: result.structured_content,
             details: result.details,
             usage: result.usage,
             added_tool_names: result.added_tool_names,

@@ -130,7 +130,8 @@ impl ModelsContextAccess for PiPluginContext {
             return Ok(false);
         }
         session
-            .set_model(provider, model_id)
+            .set_model_with_hooks(provider, model_id)
+            .await
             .map_err(context_failed)?;
         Ok(true)
     }

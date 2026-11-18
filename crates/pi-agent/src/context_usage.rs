@@ -61,10 +61,16 @@ pub(crate) fn estimate_request(
         usage.tokens = usage.tokens.saturating_add(tokens);
         usage.items.push(ContextUsageItem { name, tokens });
     };
+    let ordinary_messages = request
+        .messages
+        .iter()
+        .filter(|message| !matches!(message, Message::System(_)))
+        .collect::<Vec<_>>();
+    let system_prompt = pi_core::SystemMessage::fold(&request.system_prompt, &request.messages);
     add(
         Messages,
-        format!("{} messages", request.messages.len()),
-        request.messages.iter().map(message_tokens).sum(),
+        format!("{} messages", ordinary_messages.len()),
+        ordinary_messages.into_iter().map(message_tokens).sum(),
     );
     for tool in &request.tools {
         let category = if registries
@@ -115,8 +121,7 @@ pub(crate) fn estimate_request(
         .chain(namespace_sources.iter())
         .filter(|source| !source.text.is_empty())
     {
-        let occurrence = request
-            .system_prompt
+        let occurrence = system_prompt
             .match_indices(&source.text)
             .map(|(start, text)| start..start + text.len())
             .find(|range| {
@@ -133,7 +138,7 @@ pub(crate) fn estimate_request(
     add(
         SystemPrompt,
         "System prompt".into(),
-        tokens(request.system_prompt.len().saturating_sub(attributed_bytes)),
+        tokens(system_prompt.len().saturating_sub(attributed_bytes)),
     );
     let mut undeclared_mcp_tools = registries
         .tool_discoveries()

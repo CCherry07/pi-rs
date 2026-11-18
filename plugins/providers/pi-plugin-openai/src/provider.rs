@@ -81,6 +81,11 @@ impl Provider for OpenAiCompatibleProvider {
         signal: AbortSignal,
     ) -> Result<ProviderStream, ProviderError> {
         let headers = self.headers(&request);
+        let grammar_properties = pi_provider::grammar_tool_input_properties(
+            &request.tools,
+            ResolvedOpenAiCompletionsCompat::for_request(&request).supports_open_ai_grammar_tools,
+        )
+        .map_err(ProviderError::Protocol)?;
         let supports_finish_reason =
             ResolvedOpenAiCompletionsCompat::for_request(&request).supports_finish_reason;
         let endpoint = request
@@ -90,7 +95,7 @@ impl Provider for OpenAiCompatibleProvider {
             .map(completions_endpoint)
             .unwrap_or_else(|| self.endpoint());
         let payload = context
-            .before_provider_request(&signal, request_body(&request))
+            .before_provider_request(&signal, request_body(&request)?)
             .await?;
         let response = post_json_with_provider_hooks(
             self.transport.as_ref(),
@@ -127,7 +132,7 @@ impl Provider for OpenAiCompatibleProvider {
                 metadata: ResponseMetadata::new(provider_id, model.clone(), API_NAME, now_ms()),
             });
             let mut decoder = SseDecoder::new();
-            let mut state = ChunkState::for_model(supports_finish_reason, &model);
+            let mut state = ChunkState::for_model(supports_finish_reason, &model).with_grammar(grammar_properties);
             loop {
                 let next = tokio::select! {
                     _ = signal.wait() => {

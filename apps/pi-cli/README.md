@@ -136,6 +136,26 @@ Environment variables are supported as an alternative, including `OPENAI_API_KEY
 and a service-account file; Bedrock supports its AWS profile/static credential chain and
 `AWS_BEARER_TOKEN_BEDROCK`. Explicit CLI credentials take precedence over stored credentials.
 
+## Tool selection
+
+New sessions start with `read`, `bash`, `edit`, and `write`, in that order. Optional `grep`,
+`find`, `ls`, `powershell`, and `codemode` tools are registered for explicit selection.
+PowerShell execution requires Windows. Set `defaultTools` in settings.json or pass `--tools`
+to choose the active tools. MCP configuration may enable its codemode or tool-search entry point.
+Enabling the `hashline`, `memory`, `subagents`, or `schedule` feature adds that capability's tools.
+
+```json
+{
+  "defaultTools": ["read", "bash", "edit", "write", "codemode"],
+  "codemode": { "mode": "on", "inlineBudget": 3000 },
+  "features": { "hashline": false, "memory": false, "subagents": false, "schedule": false }
+}
+```
+
+`codemode.mode` accepts `on` (direct tools remain declared) or `only` (their declarations move
+inside codemode). `inlineBudget` bounds the estimated tokens used for nested tool declarations.
+`features.hashline` adds `hashline_edit` and enables `hashline: true` on read/grep.
+
 ## Product modes
 
 | Mode            | Command                         | Best for                                                    |
@@ -150,10 +170,16 @@ and a service-account file; Bedrock supports its AWS profile/static credential c
 
 `--json` writes the Pi coding-agent v3 session header followed by delta-only Pi session events.
 `--mode rpc` accepts strict LF-delimited JSON commands and emits correlated responses plus the same
-event projection. Its Node host supports extension confirmations and notifications through
-`extension_ui_request` / `extension_ui_response`; custom terminal UI and other dialog kinds require
-the TUI frontend. Prompt receipts report `started`, `queued` or `handled` after input preparation.
+event projection. Its Node host supports extension confirmation, selection, input and editor
+dialogs, notifications, status, text widgets, titles and editor replacement through
+`extension_ui_request` / `extension_ui_response`. Custom terminal components use the TUI frontend.
+Prompt receipts report `started`, `queued` or `handled` after input preparation; `agent_settled`
+reports final settlement and whether the run was aborted. An `abort` response waits for the
+session to become idle. Extension-requested shutdown lets the current command and run finish,
+while stdin EOF and process signals start disposal. Extension logs are routed to stderr.
 Persistent drafts expose their intended `sessionFile` before lazy first-response persistence.
+RPC input uses LF framing, accepts CRLF and preserves Unicode separators inside JSON strings.
+Send file contents or images through RPC commands; startup `@file` arguments are rejected.
 See [Sikemux integration](SIKEMUX.md) for executable selection and native-history boundaries.
 
 `--no-session` keeps the session in memory, including responses, new-session replacements, reloads
@@ -685,8 +711,8 @@ Interactive runs prompt when needed; `--print` and `--json` default to untrusted
 decision or CLI flag decides otherwise. Use `--approve` / `-a` or `--no-approve` / `-na` for a
 run-local override.
 
-Like current Pi, `HERMES.md`, `AGENTS.md`, and `CLAUDE.md` context discovery is independent of
-project trust. Trusted repositories may provide `.hermes/skills` and `.agents/skills`; skills
+`AGENTS.override.md`, `AGENTS.md`, and `CLAUDE.md` context discovery is independent of
+project trust. Enabling memory also permits the optional `HERMES.md` context source. Trusted repositories may provide `.hermes/skills` and `.agents/skills`; skills
 under `~/.agents/skills` are also supported.
 
 ## Runtime feature switches
@@ -694,7 +720,7 @@ under `~/.agents/skills` are also supported.
 Run `/features` to choose global defaults or settings for the trusted project. Use `↑` / `↓`
 to navigate, `Space` to toggle a capability, and `Enter` to save and reload. `Esc` cancels
 without writing settings. `/features global` and `/features project` open that scope directly;
-untrusted projects can edit only global defaults. All six capabilities can be disabled, and
+untrusted projects can edit only global defaults. All seven capabilities can be disabled, and
 `/features` remains available to turn them back on.
 
 Only changed flags are saved, preserving other settings and inherited defaults. Global changes
@@ -708,6 +734,7 @@ trusted project's `.pi/settings.json`:
 ```json
 {
   "features": {
+    "hashline": false,
     "memory": true,
     "subagents": true,
     "schedule": false,
@@ -718,7 +745,9 @@ trusted project's `.pi/settings.json`:
 }
 ```
 
-Every field defaults to `true`. Project fields override global fields individually. Run `/reload`
+`skills`, `promptTemplates`, and `sessionTransfer` default to `true`.
+`memory`, `subagents`, `schedule`, and `hashline` default to `false`; enable them explicitly
+to use those capabilities. Project fields override global fields individually. Run `/reload`
 to apply changes to the current TUI session, or start a new session; other open sessions keep their
 current generation. A failed generation rebuild keeps the previous session active. Disabling a
 feature removes its built-in plugins, commands, tools and background work while keeping saved

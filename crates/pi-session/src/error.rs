@@ -35,6 +35,12 @@ pub enum SessionError {
     Busy,
     #[error("session is closed")]
     Closed,
+    #[error("Nothing to compact (session too small)")]
+    NothingToCompact,
+    #[error("Already compacted")]
+    AlreadyCompacted,
+    #[error("{0}")]
+    CompactionFailed(String),
     #[error("{0} cancelled")]
     Cancelled(&'static str),
 }

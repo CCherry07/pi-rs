@@ -207,7 +207,7 @@ impl Provider for MistralCompatibleProvider {
             .unwrap_or_else(|| mistral_endpoint(&self.config.base_url));
         let headers = self.headers(&request);
         let payload = context
-            .before_provider_request(&signal, request_body(&request))
+            .before_provider_request(&signal, request_body(&request)?)
             .await?;
         let response = post_json_with_provider_hooks(
             self.transport.as_ref(),
@@ -245,7 +245,7 @@ impl Provider for MistralCompatibleProvider {
     }
 }
 
-pub fn request_body(request: &ProviderRequest) -> Value {
+pub fn request_body(request: &ProviderRequest) -> Result<Value, ProviderError> {
     let supports_images = request
         .model_spec
         .as_ref()
@@ -267,23 +267,16 @@ pub fn request_body(request: &ProviderRequest) -> Value {
         "messages": messages
     });
     if !request.tools.is_empty() {
-        payload["tools"] = Value::Array(
-            request
-                .tools
-                .iter()
-                .map(|tool| {
-                    json!({
-                        "type": "function",
-                        "function": {
-                            "name": tool.name,
-                            "description": tool.description,
-                            "parameters": tool.parameters,
-                            "strict": false
-                        }
-                    })
-                })
-                .collect(),
-        );
+        let supports = request
+            .model_spec
+            .as_ref()
+            .and_then(|model| model.compat.as_ref())
+            .and_then(|compat| compat["supportsStrictMode"].as_bool())
+            .unwrap_or(false);
+        payload["tools"]=Value::Array(request.tools.iter().map(|tool|{
+            let strict=pi_provider::resolve_json_schema_sampling(tool,supports).map_err(ProviderError::Protocol)?;
+            Ok(json!({"type":"function","function":{"name":tool.name,"description":tool.description,"parameters":strict.as_ref().unwrap_or(&tool.parameters),"strict":strict.is_some()}}))
+        }).collect::<Result<Vec<_>,ProviderError>>()?);
     }
     if let Some(max_tokens) = request.max_output_tokens {
         payload["max_tokens"] = json!(max_tokens);
@@ -316,7 +309,7 @@ pub fn request_body(request: &ProviderRequest) -> Value {
     if let Value::Object(payload) = &mut payload {
         payload.extend(request.sampling_params.clone());
     }
-    payload
+    Ok(payload)
 }
 
 fn project_message(
@@ -966,6 +959,8 @@ mod tests {
             system_prompt: "system".to_string(),
             messages: Vec::new(),
             tools: vec![ToolSpec {
+                output_schema: None,
+                constrained_sampling: None,
                 name: "read".to_string(),
                 label: "Read".to_string(),
                 description: "Read a file".to_string(),
@@ -994,14 +989,30 @@ mod tests {
     }
 
     #[test]
+    fn strict_tools_follow_catalog_capability() {
+        let mut request = request("mistral-small-latest");
+        request.tools[0].constrained_sampling = Some(pi_core::ConstrainedSampling::JsonSchema {
+            strict: pi_core::ToolSchemaStrict::Require,
+        });
+        assert!(request_body(&request).is_err());
+        request.model_spec.as_mut().unwrap().compat = Some(json!({"supportsStrictMode":true}));
+        let body = request_body(&request).unwrap();
+        assert_eq!(body["tools"][0]["function"]["strict"], true);
+        assert_eq!(
+            body["tools"][0]["function"]["parameters"]["required"],
+            json!(["path"])
+        );
+    }
+
+    #[test]
     fn reasoning_payload_uses_model_specific_mistral_controls() {
-        let prompt_mode = request_body(&request("magistral-medium-latest"));
+        let prompt_mode = request_body(&request("magistral-medium-latest")).unwrap();
         assert_eq!(prompt_mode["prompt_mode"], "reasoning");
         assert_eq!(prompt_mode["prompt_cache_key"], "session-1");
         assert_eq!(prompt_mode["max_tokens"], 1234);
         assert_eq!(prompt_mode["tools"][0]["function"]["strict"], false);
 
-        let effort = request_body(&request("mistral-small-latest"));
+        let effort = request_body(&request("mistral-small-latest")).unwrap();
         assert_eq!(effort["reasoning_effort"], "high");
         assert!(effort.get("prompt_mode").is_none());
     }

@@ -81,6 +81,7 @@ impl Domain {
                                     context.workspace.cwd().display()
                                 ),
                                 options: Some(json!({"policy": policy, "tools": tools})),
+                                ..Default::default()
                             })
                         });
                     prepared.resource_options =

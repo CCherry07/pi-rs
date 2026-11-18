@@ -768,11 +768,6 @@ impl SessionState {
                         let entry = self.entry_by_id(&id).ok_or_else(|| {
                             HistoryError::InvalidForkTarget(format!("entry not found: {id}"))
                         })?;
-                        if !matches!(entry.entry, SessionEntry::Message(_)) {
-                            return Err(HistoryError::InvalidForkTarget(format!(
-                                "entry is not a message: {id}"
-                            )));
-                        }
                         let effective_position = position.unwrap_or(if entry_id.is_some() {
                             ForkPosition::Before
                         } else {
@@ -780,7 +775,16 @@ impl SessionState {
                         });
                         match effective_position {
                             ForkPosition::At => Some(entry.id.clone()),
-                            ForkPosition::Before => entry.parent_id.clone(),
+                            ForkPosition::Before => {
+                                if !matches!(&entry.entry, SessionEntry::Message(message)
+                                    if matches!(message.message.as_standard(), Some(pi_core::Message::User(_))))
+                                {
+                                    return Err(HistoryError::InvalidForkTarget(
+                                        "Invalid entry ID for forking".to_string(),
+                                    ));
+                                }
+                                entry.parent_id.clone()
+                            }
                         }
                     }
                 };

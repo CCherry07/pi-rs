@@ -179,11 +179,50 @@ pub(crate) fn session_options(
             base_delay_ms: settings.retry.base_delay_ms,
         })
         .initial_model(initial_model)
+        .model_switch(pi_session::ModelSwitchPolicy {
+            scope_patterns: settings.enabled_models.clone().unwrap_or_default(),
+            default_thinking_level: settings
+                .default_thinking_level
+                .map(|level| settings_thinking_level(None, Some(level))),
+            model_thinking_levels: settings
+                .model_thinking_levels
+                .iter()
+                .map(|(model, level)| (model.clone(), settings_thinking_level(None, Some(*level))))
+                .collect(),
+        })
         .shell_executor(Arc::new(crate::session::CodingShellExecutor::new(
             settings.shell_path.as_deref().map(expand_tilde_path),
             settings.shell_command_prefix.clone(),
         )))
         .compaction_policy(Arc::new(crate::session::CodingCompactionPolicy))
+}
+
+pub(crate) struct CodingSessionSettings(pub pi_settings::SettingsManager);
+
+impl pi_session::SessionSettingsWriter for CodingSessionSettings {
+    fn write(&self, setting: pi_session::SessionSetting) -> Result<(), String> {
+        let queue_mode = |mode| match mode {
+            QueueMode::All => QueueModeSetting::All,
+            QueueMode::OneAtATime => QueueModeSetting::OneAtATime,
+        };
+        let preference = match setting {
+            pi_session::SessionSetting::SteeringMode(mode) => {
+                pi_settings::SessionPreference::SteeringMode(queue_mode(mode))
+            }
+            pi_session::SessionSetting::FollowUpMode(mode) => {
+                pi_settings::SessionPreference::FollowUpMode(queue_mode(mode))
+            }
+            pi_session::SessionSetting::AutoCompaction(enabled) => {
+                pi_settings::SessionPreference::AutoCompaction(enabled)
+            }
+            pi_session::SessionSetting::AutoRetry(enabled) => {
+                pi_settings::SessionPreference::AutoRetry(enabled)
+            }
+        };
+        self.0
+            .set_session_preference(preference)
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[cfg(test)]

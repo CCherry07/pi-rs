@@ -1,18 +1,17 @@
 use async_trait::async_trait;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
-use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, sinks::Lossy};
+use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
 use ignore::{WalkBuilder, overrides::OverrideBuilder};
 use pi_core::{PluginId, ToolCallId, ToolResult, ToolSpec};
 use pi_plugin::{Plugin, RegisterContext, Tool, ToolContext, ToolError, ToolUpdateSink};
 use pi_tool_support::with_prompt;
 use pi_tool_support::{
-    execution, invalid, optional_positive_usize, require_str, resolve_to_cwd, spec,
-    truncate_lines_by_bytes,
+    execution, hashline_tag, invalid, optional_number, optional_result_limit, require_str,
+    resolve_to_cwd, spec, truncate_lines_by_bytes,
 };
 use serde_json::{Map, Value, json};
-use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 const DEFAULT_LIMIT: usize = 100;
@@ -21,6 +20,33 @@ const MAX_LINE_CHARS: usize = 500;
 
 pub struct GrepPlugin;
 pub struct GrepTool;
+
+pub struct ConfiguredGrepPlugin {
+    hashline: bool,
+}
+
+impl ConfiguredGrepPlugin {
+    pub fn new(hashline: bool) -> Self {
+        Self { hashline }
+    }
+}
+
+struct ConfiguredGrepTool {
+    hashline: bool,
+}
+
+#[pi_plugin::plugin]
+impl Plugin for ConfiguredGrepPlugin {
+    fn id(&self) -> PluginId {
+        PluginId::new("grep-tool")
+    }
+
+    fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
+        context.register_tool(Arc::new(ConfiguredGrepTool {
+            hashline: self.hashline,
+        }))
+    }
+}
 #[pi_plugin::plugin]
 impl Plugin for GrepPlugin {
     fn id(&self) -> PluginId {
@@ -36,14 +62,13 @@ impl Tool for GrepTool {
         with_prompt(
             spec(
                 "grep",
-                "Search text files for a pattern. Returns matching lines with file paths and line numbers. Respects .gitignore. Output is truncated to 100 matches or 50KB. Long lines are truncated to 500 chars.",
+                "Search file contents for a pattern. Returns matching lines with file paths and line numbers. Respects .gitignore. Output is truncated to 100 matches or 50KB (whichever is hit first). Long lines are truncated to 500 chars.",
                 json!({
                     "type":"object","properties":{
-                        "pattern":{"type":"string"},"path":{"type":"string","description":"Directory or file to search (default: current directory)"},"glob":{"type":"string"},
-                        "ignoreCase":{"type":"boolean"},"literal":{"type":"boolean"},
-                        "context":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1},
-                        "hashline":{"type":"boolean"}
-                    },"required":["pattern"],"additionalProperties":false
+                        "pattern":{"type":"string","description":"Search pattern (regex or literal string)"},"path":{"type":"string","description":"Directory or file to search (default: current directory)"},"glob":{"type":"string","description":"Filter files by glob pattern relative to path, e.g. 'src/**/*.ts'. Without '/', e.g. '*.ts', it matches file names at any depth"},
+                        "ignoreCase":{"type":"boolean","description":"Case-insensitive search (default: false)"},"literal":{"type":"boolean","description":"Treat pattern as literal string instead of regex (default: false)"},
+                        "context":{"type":"number","description":"Number of lines to show before and after each match (default: 0)"},"limit":{"type":"number","description":"Maximum number of matches to return (default: 100)"}
+                    },"required":["pattern"]
                 }),
             ),
             "Search file contents for patterns (respects .gitignore)",
@@ -58,86 +83,118 @@ impl Tool for GrepTool {
         input: Value,
         _updates: ToolUpdateSink,
     ) -> Result<ToolResult, ToolError> {
-        let pattern = require_str(&input, "pattern")?.to_string();
-        let path = resolve_to_cwd(
-            context.cwd(),
-            input.get("path").and_then(Value::as_str).unwrap_or("."),
-        )?;
-        let glob = input.get("glob").and_then(Value::as_str).map(str::to_owned);
-        let ignore_case = input
-            .get("ignoreCase")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let literal = input
-            .get("literal")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let context_lines = input
-            .get("context")
-            .and_then(Value::as_u64)
-            .and_then(|v| usize::try_from(v).ok())
-            .unwrap_or(0);
-        let limit = optional_positive_usize(&input, "limit", DEFAULT_LIMIT)?;
-        let hashline = input
+        execute_grep(false, context, input).await
+    }
+}
+
+#[async_trait]
+impl Tool for ConfiguredGrepTool {
+    fn spec(&self) -> ToolSpec {
+        let mut spec = GrepTool.spec();
+        if self.hashline {
+            spec.parameters["properties"]["hashline"] = json!({"type":"boolean"});
+        }
+        spec
+    }
+
+    async fn execute(
+        &self,
+        context: ToolContext,
+        _id: ToolCallId,
+        input: Value,
+        _updates: ToolUpdateSink,
+    ) -> Result<ToolResult, ToolError> {
+        execute_grep(self.hashline, context, input).await
+    }
+}
+
+async fn execute_grep(
+    enable_hashline: bool,
+    context: ToolContext,
+    input: Value,
+) -> Result<ToolResult, ToolError> {
+    let pattern = require_str(&input, "pattern")?.to_string();
+    let path = resolve_to_cwd(
+        context.cwd(),
+        input.get("path").and_then(Value::as_str).unwrap_or("."),
+    )?;
+    let glob = input.get("glob").and_then(Value::as_str).map(str::to_owned);
+    let ignore_case = input
+        .get("ignoreCase")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let literal = input
+        .get("literal")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let context_lines = optional_number(&input, "context")?
+        .unwrap_or(0.0)
+        .floor()
+        .clamp(0.0, 9_007_199_254_740_991.0) as usize;
+    let limit = optional_result_limit(&input, "limit", DEFAULT_LIMIT)?;
+    let hashline = enable_hashline
+        && input
             .get("hashline")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let matcher = build_matcher(&pattern, literal, ignore_case)?;
-        let search_root = path.clone();
-        let metadata = std::fs::metadata(&path)
-            .map_err(|_| execution(format!("Path not found: {}", path.display())))?;
-        let search_is_directory = metadata.is_dir();
-        if !search_is_directory && !metadata.is_file() {
-            return Err(execution(format!(
-                "Path is not a file or directory: {}",
-                path.display()
-            )));
-        }
-        let signal = context.signal().clone();
-        let result = tokio::task::spawn_blocking(move || {
-            search_files(&path, glob.as_deref(), &matcher, limit, &signal)
-        })
-        .await
-        .map_err(|e| execution(e.to_string()))??;
-
-        if result.matches.is_empty() {
-            return Ok(ToolResult::text("No matches found"));
-        }
-
-        let (output_lines, lines_truncated) = format_matches(
-            &result.matches,
-            &search_root,
-            search_is_directory,
-            context_lines,
-            hashline,
-        )?;
-        let (mut text, truncation) = truncate_lines_by_bytes(&output_lines, MAX_OUTPUT_BYTES);
-        let mut notices = Vec::new();
-        let mut details = Map::new();
-        if result.match_limit_reached {
-            notices.push(format!(
-                "{limit} matches limit reached. Use limit={} for more, or refine pattern",
-                limit.saturating_mul(2)
-            ));
-            details.insert("matchLimitReached".into(), json!(limit));
-        }
-        if let Some(truncation) = truncation {
-            notices.push("50.0KB limit reached".to_string());
-            details.insert("truncation".into(), truncation);
-        }
-        if lines_truncated {
-            notices.push(
-                "Some lines truncated to 500 chars. Use read tool to see full lines".to_string(),
-            );
-            details.insert("linesTruncated".into(), Value::Bool(true));
-        }
-        if !notices.is_empty() {
-            text.push_str(&format!("\n\n[{}]", notices.join(". ")));
-        }
-        let mut tool_result = ToolResult::text(text);
-        tool_result.details = (!details.is_empty()).then_some(Value::Object(details));
-        Ok(tool_result)
+    let matcher = build_matcher(&pattern, literal, ignore_case)?;
+    let metadata = std::fs::metadata(&path)
+        .map_err(|_| execution(format!("Path not found: {}", path.display())))?;
+    let search_is_directory = metadata.is_dir();
+    if !search_is_directory && !metadata.is_file() {
+        return Err(execution(format!(
+            "Path is not a file or directory: {}",
+            path.display()
+        )));
     }
+    let signal = context.signal().clone();
+    let result = tokio::task::spawn_blocking(move || {
+        search_files(
+            &path,
+            glob.as_deref(),
+            &matcher,
+            SearchOptions {
+                limit,
+                context_lines,
+                hashline,
+            },
+            &signal,
+        )
+    })
+    .await
+    .map_err(|e| execution(e.to_string()))??;
+
+    if result.match_count == 0 {
+        return Ok(ToolResult::text("No matches found"));
+    }
+
+    let (mut text, truncation) = truncate_lines_by_bytes(&result.lines, MAX_OUTPUT_BYTES);
+    let mut notices = Vec::new();
+    let mut details = Map::new();
+    if result.match_limit_reached {
+        notices.push(format!(
+            "{limit} matches limit reached. Use limit={} for more, or refine pattern",
+            limit.saturating_mul(2)
+        ));
+        details.insert("matchLimitReached".into(), json!(limit));
+    }
+    if let Some(mut truncation) = truncation {
+        truncation["totalLines"] = json!(result.output_line_count);
+        truncation["totalBytes"] = json!(result.output_bytes.saturating_sub(1));
+        notices.push("50.0KB limit reached".to_string());
+        details.insert("truncation".into(), truncation);
+    }
+    if result.lines_truncated {
+        notices
+            .push("Some lines truncated to 500 chars. Use read tool to see full lines".to_string());
+        details.insert("linesTruncated".into(), Value::Bool(true));
+    }
+    if !notices.is_empty() {
+        text.push_str(&format!("\n\n[{}]", notices.join(". ")));
+    }
+    let mut tool_result = ToolResult::text(text);
+    tool_result.details = (!details.is_empty()).then_some(Value::Object(details));
+    Ok(tool_result)
 }
 
 fn build_matcher(
@@ -156,29 +213,35 @@ fn build_matcher(
         .map_err(|error| invalid(format!("invalid pattern: {error}")))
 }
 
-#[derive(Debug)]
-struct MatchRecord {
-    path: PathBuf,
-    line_number: u64,
-    line: String,
+#[derive(Clone, Copy)]
+struct SearchOptions {
+    limit: usize,
+    context_lines: usize,
+    hashline: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct SearchOutcome {
-    matches: Vec<MatchRecord>,
+    lines: Vec<String>,
+    match_count: usize,
     match_limit_reached: bool,
+    lines_truncated: bool,
+    output_bytes: usize,
+    output_line_count: usize,
 }
 
 fn search_files(
     path: &Path,
     glob: Option<&str>,
     matcher: &RegexMatcher,
-    limit: usize,
+    options: SearchOptions,
     signal: &pi_core::AbortSignal,
 ) -> Result<SearchOutcome, ToolError> {
-    let mut records = Vec::new();
+    let mut outcome = SearchOutcome::default();
     let mut searcher = SearcherBuilder::new()
         .line_number(true)
+        .before_context(options.context_lines)
+        .after_context(options.context_lines)
         .binary_detection(BinaryDetection::quit(b'\0'))
         .build();
     let metadata = std::fs::metadata(path).map_err(|error| execution(error.to_string()))?;
@@ -188,10 +251,15 @@ fn search_files(
         path.parent().unwrap_or(path)
     };
     let overrides = glob
+        .filter(|pattern| !pattern.is_empty())
         .map(|pattern| {
             let mut builder = OverrideBuilder::new(override_root);
+            let (negation, pattern) = pattern
+                .strip_prefix('!')
+                .map_or(("", pattern), |p| ("!", p));
+            let pattern = format!("{negation}{}", pattern.trim_start_matches("./"));
             builder
-                .add(pattern)
+                .add(&pattern)
                 .map_err(|error| invalid(format!("invalid glob: {error}")))?;
             builder
                 .build()
@@ -199,13 +267,37 @@ fn search_files(
         })
         .transpose()?;
 
-    if metadata.is_file() {
-        if overrides
-            .as_ref()
-            .is_none_or(|matcher| !matcher.matched(path, false).is_ignore())
-        {
-            search_file(&mut searcher, matcher, path, &mut records, limit, signal)?;
+    let mut search = |file: &Path| -> Result<bool, ToolError> {
+        let mut sink = SearchSink {
+            display_path: format_path(file, path, metadata.is_dir()),
+            options,
+            signal,
+            outcome: &mut outcome,
+            trailing_context_end: None,
+            had_bom: false,
+        };
+        // Inspect the BOM on the same opened stream, only for the optional anchor extension.
+        // The searcher's decoder strips it, while read's anchor helper includes it in line one.
+        let result = if options.hashline {
+            let file = std::fs::File::open(file).map_err(|error| execution(error.to_string()))?;
+            let mut reader = BufReader::new(file);
+            sink.had_bom = reader
+                .fill_buf()
+                .map_err(|error| execution(error.to_string()))?
+                .starts_with(b"\xef\xbb\xbf");
+            searcher.search_reader(matcher, reader, &mut sink)
+        } else {
+            searcher.search_path(matcher, file, &mut sink)
+        };
+        result.map_err(|error| execution(format!("{}: {error}", file.display())))?;
+        if signal.is_aborted() {
+            return Err(ToolError::Aborted);
         }
+        Ok(sink.outcome.match_limit_reached)
+    };
+    if metadata.is_file() {
+        // Like rg, explicitly named files are searched even when a glob would exclude them.
+        search(path)?;
     } else {
         let mut builder = WalkBuilder::new(path);
         builder
@@ -213,6 +305,9 @@ fn search_files(
             .git_ignore(true)
             .git_global(true)
             .git_exclude(true);
+        if let Some(overrides) = overrides {
+            builder.overrides(overrides);
+        }
         for entry in builder.build() {
             if signal.is_aborted() {
                 return Err(ToolError::Aborted);
@@ -221,177 +316,92 @@ fn search_files(
             if !entry.file_type().is_some_and(|kind| kind.is_file()) {
                 continue;
             }
-            if overrides
-                .as_ref()
-                .is_some_and(|matcher| matcher.matched(entry.path(), false).is_ignore())
-            {
-                continue;
-            }
-            search_file(
-                &mut searcher,
-                matcher,
-                entry.path(),
-                &mut records,
-                limit,
-                signal,
-            )?;
-            if records.len() >= limit {
+            if search(entry.path())? {
                 break;
             }
         }
     }
-    Ok(SearchOutcome {
-        match_limit_reached: records.len() >= limit,
-        matches: records,
-    })
+    Ok(outcome)
 }
 
-fn search_file(
-    searcher: &mut Searcher,
-    matcher: &RegexMatcher,
-    path: &Path,
-    records: &mut Vec<MatchRecord>,
-    limit: usize,
-    signal: &pi_core::AbortSignal,
-) -> Result<(), ToolError> {
-    let record_path = path.to_path_buf();
-    searcher
-        .search_path(
-            matcher,
-            path,
-            Lossy(|line_number, line| {
-                if signal.is_aborted() {
-                    return Ok(false);
-                }
-                records.push(MatchRecord {
-                    path: record_path.clone(),
-                    line_number,
-                    line: sanitize_line(line),
-                });
-                Ok(records.len() < limit)
-            }),
-        )
-        .map_err(|error| execution(format!("{}: {error}", path.display())))?;
-    if signal.is_aborted() {
-        Err(ToolError::Aborted)
-    } else {
-        Ok(())
-    }
+struct SearchSink<'a> {
+    display_path: String,
+    options: SearchOptions,
+    signal: &'a pi_core::AbortSignal,
+    outcome: &'a mut SearchOutcome,
+    trailing_context_end: Option<u64>,
+    had_bom: bool,
 }
 
-fn format_matches(
-    records: &[MatchRecord],
-    search_root: &Path,
-    search_is_directory: bool,
-    context_lines: usize,
-    hashline: bool,
-) -> Result<(Vec<String>, bool), ToolError> {
-    let mut output = Vec::new();
-    let mut lines_truncated = false;
-    let mut batch_start = 0;
-    while batch_start < records.len() {
-        let path = &records[batch_start].path;
-        let mut batch_end = batch_start + 1;
-        while batch_end < records.len() && records[batch_end].path == *path {
-            batch_end += 1;
+impl SearchSink<'_> {
+    fn record(&mut self, line_number: u64, bytes: &[u8], is_match: bool) -> bool {
+        if self.signal.is_aborted() {
+            return false;
         }
-        let batch = &records[batch_start..batch_end];
-        let display_path = format_path(path, search_root, search_is_directory);
-        let context = if context_lines == 0 {
-            None
-        } else {
-            Some(
-                load_context_lines(path, batch, context_lines).map_err(|error| {
-                    execution(format!(
-                        "cannot read {} for context: {error}",
-                        path.display()
-                    ))
-                })?,
-            )
-        };
-
-        for record in batch {
-            if let Some(context) = &context {
-                let start = record
-                    .line_number
-                    .saturating_sub(u64::try_from(context_lines).unwrap_or(u64::MAX))
-                    .max(1);
-                let end = record
-                    .line_number
-                    .saturating_add(u64::try_from(context_lines).unwrap_or(u64::MAX));
-                for (&line_number, line) in context.range(start..=end) {
-                    let (body, was_truncated) = format_line(line, line_number, hashline);
-                    lines_truncated |= was_truncated;
-                    if line_number == record.line_number {
-                        output.push(format!("{display_path}:{line_number}: {body}"));
-                    } else {
-                        output.push(format!("{display_path}-{line_number}- {body}"));
-                    }
-                }
-            } else {
-                let (body, was_truncated) = format_line(&record.line, record.line_number, hashline);
-                lines_truncated |= was_truncated;
-                output.push(format!("{display_path}:{}: {body}", record.line_number));
-            }
-        }
-        batch_start = batch_end;
-    }
-    Ok((output, lines_truncated))
-}
-
-fn load_context_lines(
-    path: &Path,
-    records: &[MatchRecord],
-    context_lines: usize,
-) -> std::io::Result<BTreeMap<u64, String>> {
-    let context = u64::try_from(context_lines).unwrap_or(u64::MAX);
-    let mut ranges = records
-        .iter()
-        .map(|record| {
-            (
-                record.line_number.saturating_sub(context).max(1),
-                record.line_number.saturating_add(context),
-            )
-        })
-        .collect::<Vec<_>>();
-    ranges.sort_unstable();
-    let mut merged: Vec<(u64, u64)> = Vec::new();
-    for (start, end) in ranges {
-        if let Some((_, previous_end)) = merged.last_mut()
-            && start <= previous_end.saturating_add(1)
-        {
-            *previous_end = (*previous_end).max(end);
-        } else {
-            merged.push((start, end));
-        }
-    }
-
-    let mut selected = BTreeMap::new();
-    let mut reader = BufReader::new(std::fs::File::open(path)?);
-    let mut buffer = Vec::new();
-    let mut line_number = 0u64;
-    let mut range_index = 0usize;
-    loop {
-        buffer.clear();
-        if reader.read_until(b'\n', &mut buffer)? == 0 {
-            break;
-        }
-        line_number += 1;
-        while range_index < merged.len() && line_number > merged[range_index].1 {
-            range_index += 1;
-        }
-        if range_index >= merged.len() {
-            break;
-        }
-        let (start, end) = merged[range_index];
-        if line_number >= start && line_number <= end {
-            selected.insert(
-                line_number,
-                sanitize_line(&String::from_utf8_lossy(&buffer)),
+        let below_limit = self.outcome.match_count < self.options.limit;
+        let in_window = self
+            .trailing_context_end
+            .is_some_and(|end| line_number <= end);
+        if below_limit || in_window {
+            let text = String::from_utf8_lossy(bytes);
+            let line = sanitize_line(&text);
+            let (body, truncated) =
+                format_line(line, line_number, self.options.hashline, self.had_bom);
+            self.outcome.lines_truncated |= truncated;
+            let separator = if below_limit && is_match { ':' } else { '-' };
+            let rendered = format!(
+                "{}{separator}{line_number}{separator} {body}",
+                self.display_path
             );
+            // Keep one line past the byte cap for the shared truncator, then count only.
+            if self.outcome.output_bytes.saturating_sub(1) <= MAX_OUTPUT_BYTES {
+                self.outcome.lines.push(rendered.clone());
+            }
+            self.outcome.output_bytes += rendered.len() + 1;
+            self.outcome.output_line_count += 1;
+        }
+        if below_limit {
+            if is_match {
+                self.outcome.match_count += 1;
+                if self.outcome.match_count == self.options.limit {
+                    self.trailing_context_end =
+                        Some(line_number.saturating_add(self.options.context_lines as u64));
+                }
+            }
+            true
+        } else {
+            self.outcome.match_limit_reached |= is_match;
+            // Another match is proof of truncation, but finish the last allowed trailing window.
+            !self.outcome.match_limit_reached
+                || self
+                    .trailing_context_end
+                    .is_some_and(|end| line_number < end)
         }
     }
-    Ok(selected)
+}
+
+impl Sink for SearchSink<'_> {
+    type Error = std::io::Error;
+
+    fn matched(&mut self, _searcher: &Searcher, mat: &SinkMatch<'_>) -> Result<bool, Self::Error> {
+        Ok(self.record(
+            mat.line_number().expect("line numbers enabled"),
+            mat.bytes(),
+            true,
+        ))
+    }
+
+    fn context(
+        &mut self,
+        _searcher: &Searcher,
+        context: &SinkContext<'_>,
+    ) -> Result<bool, Self::Error> {
+        Ok(self.record(
+            context.line_number().expect("line numbers enabled"),
+            context.bytes(),
+            false,
+        ))
+    }
 }
 
 fn format_path(path: &Path, search_root: &Path, search_is_directory: bool) -> String {
@@ -403,51 +413,80 @@ fn format_path(path: &Path, search_root: &Path, search_is_directory: bool) -> St
     display.to_string_lossy().replace('\\', "/")
 }
 
-fn sanitize_line(line: &str) -> String {
-    line.trim_end_matches('\n').replace('\r', "")
+fn sanitize_line(line: &str) -> &str {
+    let line = line.strip_suffix('\n').unwrap_or(line);
+    line.strip_suffix('\r').unwrap_or(line)
 }
 
-fn format_line(line: &str, line_number: u64, hashline: bool) -> (String, bool) {
-    let hash_value = hashline.then(|| {
+fn format_line(line: &str, line_number: u64, hashline: bool, had_bom: bool) -> (String, bool) {
+    let tag = hashline.then(|| {
         let index = usize::try_from(line_number.saturating_sub(1)).unwrap_or(usize::MAX);
-        hash(index, line)
+        hashline_tag(index, line, had_bom)
     });
     let (line, truncated) = truncate_line(line);
-    if hashline {
-        (
-            format!("{line_number}#{}:{line}", hash_value.unwrap()),
-            truncated,
-        )
+    if let Some(tag) = tag {
+        (format!("{tag}:{line}"), truncated)
     } else {
         (line, truncated)
     }
 }
 
 fn truncate_line(line: &str) -> (String, bool) {
-    if line.chars().count() <= MAX_LINE_CHARS {
-        return (line.to_string(), false);
+    let mut units = 0;
+    for (offset, ch) in line.char_indices() {
+        units += ch.len_utf16();
+        if units > MAX_LINE_CHARS {
+            return (format!("{}... [truncated]", &line[..offset]), true);
+        }
     }
-    let truncated = line.chars().take(MAX_LINE_CHARS).collect::<String>();
-    (format!("{truncated}... [truncated]"), true)
-}
-
-fn hash(index: usize, line: &str) -> String {
-    let mut value = index as u32;
-    for byte in line.bytes() {
-        value = value.wrapping_mul(16777619) ^ u32::from(byte);
-    }
-    let chars = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    format!(
-        "{}{}",
-        chars[((value / 26) % 26) as usize] as char,
-        chars[(value % 26) as usize] as char
-    )
+    (line.to_string(), false)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use pi_core::AbortHandle;
+
+    #[tokio::test]
+    async fn hashline_output_requires_configured_extension() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("a.txt"), "needle").unwrap();
+        assert!(
+            GrepTool.spec().parameters["properties"]
+                .get("hashline")
+                .is_none()
+        );
+        let tool = ConfiguredGrepTool { hashline: true };
+        assert!(
+            tool.spec().parameters["properties"]
+                .get("hashline")
+                .is_some()
+        );
+        let plain = run_grep(
+            directory.path(),
+            json!({"pattern":"needle","hashline":true}),
+        )
+        .await;
+        assert_eq!(result_text(&plain), "a.txt:1: needle");
+        let (_, signal) = AbortHandle::new();
+        let (updates, _) = ToolUpdateSink::channel();
+        let tagged = tool
+            .execute(
+                ToolContext::standalone(directory.path().into(), signal),
+                ToolCallId::new("grep"),
+                json!({"pattern":"needle","hashline":true}),
+                updates,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result_text(&tagged),
+            format!(
+                "a.txt:1: {}:needle",
+                pi_tool_support::hashline_tag(0, "needle", false)
+            )
+        );
+    }
 
     async fn run_grep(cwd: &Path, input: Value) -> ToolResult {
         let (_, signal) = AbortHandle::new();
@@ -483,7 +522,7 @@ mod tests {
             .execute(
                 ToolContext::standalone(dir.path().to_path_buf(), signal),
                 ToolCallId::new("1"),
-                json!({"pattern":"hello","glob":"*.txt"}),
+                json!({"pattern":"hello"}),
                 updates,
             )
             .await
@@ -494,6 +533,50 @@ mod tests {
         };
         assert!(text.contains("visible.txt"));
         assert!(!text.contains("ignored.txt"));
+    }
+
+    #[tokio::test]
+    async fn glob_overrides_gitignore_and_explicit_files_override_globs_like_rg() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(dir.path().join("ignored.txt"), "needle").unwrap();
+        let globbed = run_grep(dir.path(), json!({"pattern":"needle", "glob":"*.txt"})).await;
+        assert_eq!(result_text(&globbed), "ignored.txt:1: needle");
+        let explicit = run_grep(
+            dir.path(),
+            json!({"pattern":"needle", "path":"ignored.txt", "glob":"*.rs"}),
+        )
+        .await;
+        assert_eq!(result_text(&explicit), "ignored.txt:1: needle");
+    }
+
+    #[tokio::test]
+    async fn configured_hashline_uses_read_tags_with_bom_and_original_long_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let long = format!("needle {}", "x".repeat(600));
+        std::fs::write(
+            dir.path().join("a.txt"),
+            format!("\u{feff}needle\r\n{long}\n"),
+        )
+        .unwrap();
+        let (_, signal) = AbortHandle::new();
+        let (updates, _) = ToolUpdateSink::channel();
+        let result = ConfiguredGrepTool { hashline: true }
+            .execute(
+                ToolContext::standalone(dir.path().into(), signal),
+                ToolCallId::new("grep"),
+                json!({"pattern":"needle", "hashline":true}),
+                updates,
+            )
+            .await
+            .unwrap();
+        let text = result_text(&result);
+        assert!(text.starts_with(&format!(
+            "a.txt:1: {}:needle\n",
+            hashline_tag(0, "needle", true)
+        )));
+        assert!(text.contains(&format!("a.txt:2: {}:", hashline_tag(1, &long, true))));
     }
 
     #[tokio::test]
@@ -514,8 +597,123 @@ mod tests {
 
         assert!(text.contains("matches.txt:2: needle one"));
         assert!(text.contains("matches.txt:6: needle two"));
-        assert!(text.contains("2 matches limit reached"));
-        assert_eq!(result.details.as_ref().unwrap()["matchLimitReached"], 2);
+        assert!(!text.contains("matches limit reached"));
+        assert!(result.details.is_none());
+    }
+
+    #[tokio::test]
+    async fn merges_overlapping_context_and_keeps_match_markers() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.txt"),
+            "before\nneedle one\nneedle two\nafter\n",
+        )
+        .unwrap();
+        let result = run_grep(
+            dir.path(),
+            json!({"pattern":"needle", "context":1, "limit":2}),
+        )
+        .await;
+        assert_eq!(
+            result_text(&result),
+            "a.txt-1- before\na.txt:2: needle one\na.txt:3: needle two\na.txt-4- after"
+        );
+        assert!(result.details.is_none());
+    }
+
+    #[tokio::test]
+    async fn extra_matches_in_the_last_window_are_context_and_prove_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.txt"),
+            "before\nneedle one\nneedle two\nafter\noutside\nneedle three\n",
+        )
+        .unwrap();
+        let result = run_grep(
+            dir.path(),
+            json!({"pattern":"needle", "context":2, "limit":1}),
+        )
+        .await;
+        assert_eq!(
+            result_text(&result),
+            "a.txt-1- before\na.txt:2: needle one\na.txt-3- needle two\na.txt-4- after\n\n[1 matches limit reached. Use limit=2 for more, or refine pattern]"
+        );
+        assert_eq!(result.details.as_ref().unwrap()["matchLimitReached"], 1);
+    }
+
+    #[tokio::test]
+    async fn preserves_embedded_cr_and_truncates_at_utf16_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let even = "😀".repeat(251);
+        let odd = format!("a{}", "😀".repeat(250));
+        std::fs::write(
+            dir.path().join("a.txt"),
+            format!("left\rright\r\n{even}\n{odd}\nend\r"),
+        )
+        .unwrap();
+        let result = run_grep(dir.path(), json!({"pattern":"."})).await;
+        assert_eq!(
+            result_text(&result),
+            format!(
+                "a.txt:1: left\rright\na.txt:2: {}... [truncated]\na.txt:3: a{}... [truncated]\na.txt:4: end\n\n[Some lines truncated to 500 chars. Use read tool to see full lines]",
+                "😀".repeat(250),
+                "😀".repeat(249)
+            )
+        );
+        assert_eq!(result.details.as_ref().unwrap()["linesTruncated"], true);
+    }
+
+    #[tokio::test]
+    async fn globs_are_root_relative_and_strip_dot_slash_prefixes() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["root/src/a.ts", "root/pkg/src/b.ts", "elsewhere/src/c.ts"] {
+            let path = dir.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "needle").unwrap();
+        }
+        for glob in ["src/*.ts", "./src/*.ts", "././src/*.ts"] {
+            let result = run_grep(
+                dir.path(),
+                json!({"pattern":"needle", "path":"root", "glob":glob}),
+            )
+            .await;
+            assert_eq!(result_text(&result), "src/a.ts:1: needle", "{glob}");
+        }
+        let recursive = run_grep(
+            dir.path(),
+            json!({"pattern":"needle", "path":"root", "glob":"**/src/*.ts"}),
+        )
+        .await;
+        assert!(result_text(&recursive).contains("src/a.ts:1: needle"));
+        assert!(result_text(&recursive).contains("pkg/src/b.ts:1: needle"));
+        let excluded = run_grep(
+            dir.path(),
+            json!({"pattern":"needle", "path":"root", "glob":"!./src/*.ts"}),
+        )
+        .await;
+        assert_eq!(result_text(&excluded), "pkg/src/b.ts:1: needle");
+    }
+
+    #[tokio::test]
+    async fn floors_numeric_limits_and_context_like_pi() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("a.txt"),
+            "before\nneedle\nafter\nneedle\nend",
+        )
+        .unwrap();
+        for limit in [-1.0, 0.0, 1.9] {
+            let result = run_grep(
+                directory.path(),
+                json!({"pattern":"needle", "limit":limit, "context":1.9}),
+            )
+            .await;
+            let text = result_text(&result);
+            assert!(text.contains("before"));
+            assert!(text.contains("after"));
+            assert!(!text.contains("end"));
+            assert_eq!(result.details.as_ref().unwrap()["matchLimitReached"], 1);
+        }
     }
 
     #[tokio::test]

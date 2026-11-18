@@ -518,6 +518,12 @@ function archiveStandalone(
 
   try {
     copyFileSync(builtBinary, stagedBinary);
+    const documentationRoot = join(stageDirectory, "share", "pi-rs");
+    mkdirSync(documentationRoot, { recursive: true });
+    copyFileSync(join(packageDirectory, "README.md"), join(documentationRoot, "README.md"));
+    for (const child of ["docs", "examples"]) {
+      cpSync(join(packageDirectory, child), join(documentationRoot, child), { recursive: true });
+    }
     if (target.platform !== "win32") chmodSync(stagedBinary, 0o755);
     stripArtifact(stagedBinary, target);
     signMacArtifact(stagedBinary, target);
@@ -645,6 +651,9 @@ function stageRootPackage(
     cpSync(source, join(destination, "dist", child), { recursive: true });
   }
   copyFileSync(join(packageDirectory, "README.md"), join(destination, "README.md"));
+  for (const child of ["docs", "examples"]) {
+    cpSync(join(packageDirectory, child), join(destination, child), { recursive: true });
+  }
 
   const optionalDependencies = Object.fromEntries(
     supportedNativeTargets.map((target) => [
@@ -660,7 +669,7 @@ function stageRootPackage(
     repository: configuration.packageManifest.repository,
     type: configuration.packageManifest.type,
     bin: configuration.packageManifest.bin,
-    files: ["dist/bin", "dist/src", "README.md"],
+    files: ["dist/bin", "dist/src", "README.md", "docs", "examples"],
     exports: configuration.packageManifest.exports,
     dependencies: configuration.packageManifest.dependencies,
     optionalDependencies,

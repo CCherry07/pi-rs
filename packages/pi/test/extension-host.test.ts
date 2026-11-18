@@ -90,6 +90,13 @@ test('suffixes duplicate command invocation names in extension order', async () 
     request: { projectTrusted: true, extensionPaths: [first, second], mode: 'print' },
   })))
   const commands = manifest.agentPlugins.flatMap(plugin => plugin.commands)
+  assert.deepEqual(commands.map(command => command.sourceInfo), [first, second].map(path => ({
+    path,
+    source: 'local',
+    scope: 'temporary',
+    origin: 'top-level',
+    baseDir: root,
+  })))
   assert.deepEqual(
     commands.map(command => [command.name, command.invocationName, command.description]),
     [
@@ -2006,7 +2013,147 @@ test('before_agent_start preserves message injection and exposes the chained sys
       details: { source: 'fixture' },
     },
     systemPrompt: 'base|previous|current',
+    __systemPromptOptions: { cwd: root },
   })
+})
+
+test('before_agent_start returns mutated options after an undefined result and renders both prompt getters', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-host-prompt-options-'))
+  const extension = join(root, 'prompt-options.ts')
+  await writeFile(extension, `
+    export default function (pi: any) {
+      pi.on("before_agent_start", (event: any, ctx: any) => {
+        event.systemPromptOptions.sections.hint = "changed";
+        const eventPrompt = event.systemPrompt;
+        event.systemPromptOptions.appendSystemPrompt = "tail";
+        const contextPrompt = ctx.getSystemPrompt();
+        event.systemPromptOptions.observed = [eventPrompt, contextPrompt];
+      });
+    }
+  `)
+  const host = new ExtensionHost()
+  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
+    type: 'prepareGeneration',
+    request: { projectTrusted: true, extensionPaths: [extension], mode: 'print' },
+  })))
+  const hook = manifest.agentPlugins[0]?.hooks[0]
+  assert.ok(hook)
+  const queries: Record<string, unknown>[] = []
+  const nativeContext: NativeExtensionContext = {
+    query(rawOperation) {
+      const operation = parseJson(rawOperation) as { type: string; options: { customPrompt: string; sections: { hint: string }; appendSystemPrompt: string } }
+      assert.equal(operation.type, 'renderSystemPrompt')
+      queries.push(operation)
+      return JSON.stringify(`${operation.options.customPrompt}|${operation.options.sections.hint}|${operation.options.appendSystemPrompt}`)
+    },
+    notify() {},
+    async request() { return 'null' },
+  }
+  const result = parseJson(await host.dispatch(JSON.stringify({
+    type: 'invoke',
+    invocation: {
+      invocationId: 'prompt-options', generationId: manifest.generationId,
+      callbackId: hook.callbackId, kind: 'agentHook',
+      payload: {
+        context: { cwd: root },
+        event: {
+          type: 'before_agent_start', systemPrompt: 'stale prompt', supportsSystemPromptOptions: true,
+          systemPromptOptions: { customPrompt: 'base', sections: {}, appendSystemPrompt: '' },
+        },
+      },
+    },
+  }), nativeContext))
+  assert.deepEqual(result, {
+    __systemPromptOptions: {
+      customPrompt: 'base', sections: { hint: 'changed' }, appendSystemPrompt: 'tail',
+      observed: ['base|changed|', 'base|changed|tail'],
+    },
+  })
+  assert.equal(queries.length, 2)
+})
+
+test('before_agent_start preserves prompt option mutations when a handler throws', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-host-prompt-error-'))
+  const extension = join(root, 'prompt-error.ts')
+  await writeFile(extension, `
+    export default function (pi: any) {
+      pi.on("before_agent_start", (event: any) => {
+        event.systemPromptOptions.sections.hint = "retained hint";
+        throw new Error("handler failed after mutation");
+      });
+    }
+  `)
+  const host = new ExtensionHost()
+  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
+    type: 'prepareGeneration',
+    request: { projectTrusted: true, extensionPaths: [extension], mode: 'print' },
+  })))
+  const hook = manifest.agentPlugins[0]?.hooks[0]
+  assert.ok(hook)
+  const result = parseJson(await host.dispatch(JSON.stringify({
+    type: 'invoke',
+    invocation: {
+      invocationId: 'prompt-error', generationId: manifest.generationId,
+      callbackId: hook.callbackId, kind: 'agentHook',
+      payload: {
+        context: { cwd: root },
+        event: {
+          type: 'before_agent_start', systemPrompt: 'base', supportsSystemPromptOptions: true,
+          systemPromptOptions: { sections: {} },
+        },
+      },
+    },
+  })))
+  assert.deepEqual(result, {
+    __systemPromptOptions: { sections: { hint: 'retained hint' } },
+    __promptError: 'handler failed after mutation',
+  })
+})
+
+test('before_agent_start retains the chained prompt when options rendering is unavailable', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-host-prompt-fallback-'))
+  const extension = join(root, 'prompt-fallback.ts')
+  await writeFile(extension, `
+    export default function (pi: any) {
+      pi.on("before_agent_start", (event: any, ctx: any) => {
+        event.systemPromptOptions.appendSystemPrompt = "changed";
+        return { systemPrompt: event.systemPrompt + "|" + ctx.getSystemPrompt() };
+      });
+    }
+  `)
+  const host = new ExtensionHost()
+  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
+    type: 'prepareGeneration',
+    request: { projectTrusted: true, extensionPaths: [extension], mode: 'print' },
+  })))
+  const hook = manifest.agentPlugins[0]?.hooks[0]
+  assert.ok(hook)
+  const nativeContext: NativeExtensionContext = {
+    query() { throw new Error('rendering is unavailable') },
+    notify() {},
+    async request() { return 'null' },
+  }
+  for (const native of [undefined, nativeContext]) {
+    const result = parseJson(await host.dispatch(JSON.stringify({
+      type: 'invoke',
+      invocation: {
+        invocationId: 'prompt-fallback', generationId: manifest.generationId,
+        callbackId: hook.callbackId, kind: 'agentHook',
+        payload: {
+          context: { cwd: root },
+          event: {
+            type: 'before_agent_start', systemPrompt: 'chained',
+            supportsSystemPromptOptions: native === undefined,
+            systemPromptOptions: { appendSystemPrompt: '' },
+          },
+        },
+      },
+    }), native))
+    assert.deepEqual(result, {
+      systemPrompt: 'chained|chained',
+      __systemPromptOptions: { appendSystemPrompt: 'changed' },
+    })
+  }
 })
 
 test('input images and message_end replacements cross the JavaScript host unchanged', async () => {

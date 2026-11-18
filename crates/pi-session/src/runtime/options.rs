@@ -1,5 +1,6 @@
 //! Session initialization options and model-selection policy.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use globset::GlobBuilder;
@@ -23,6 +24,8 @@ pub struct AgentSessionOptions {
     pub compaction_policy: Option<Arc<dyn SessionCompactionPolicy>>,
     /// Product-level model request to merge with a resumed session model.
     pub initial_model: InitialModelRequest,
+    pub model_switch: ModelSwitchPolicy,
+    pub settings_writer: Option<Arc<dyn SessionSettingsWriter>>,
     /// Generation-local tools the product enables when restoring a session.
     /// The product owns this policy; session replay only reconciles names
     /// against the new registry and persists the resulting selection.
@@ -72,6 +75,14 @@ impl Default for AutoRetrySettings {
 }
 
 impl AgentSessionOptions {
+    pub fn settings_writer(mut self, writer: Arc<dyn SessionSettingsWriter>) -> Self {
+        self.settings_writer = Some(writer);
+        self
+    }
+    pub fn model_switch(mut self, policy: ModelSwitchPolicy) -> Self {
+        self.model_switch = policy;
+        self
+    }
     pub fn compaction(mut self, compaction: CompactionSettings) -> Self {
         self.compaction = compaction;
         self
@@ -123,6 +134,34 @@ impl AgentSessionOptions {
         self.initial_model_fallback_message = message;
         self
     }
+}
+
+/// Product choices applied whenever a session selects a different model.
+#[derive(Debug, Clone, Default)]
+pub struct ModelSwitchPolicy {
+    pub scope_patterns: Vec<String>,
+    pub default_thinking_level: Option<ThinkingLevel>,
+    pub model_thinking_levels: BTreeMap<String, ThinkingLevel>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelCycleResult {
+    pub model: ModelSpec,
+    pub thinking_level: ThinkingLevel,
+    pub is_scoped: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionSetting {
+    SteeringMode(pi_agent::QueueMode),
+    FollowUpMode(pi_agent::QueueMode),
+    AutoCompaction(bool),
+    AutoRetry(bool),
+}
+
+/// Product-owned persistence for explicit session preference changes.
+pub trait SessionSettingsWriter: Send + Sync {
+    fn write(&self, setting: SessionSetting) -> Result<(), String>;
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

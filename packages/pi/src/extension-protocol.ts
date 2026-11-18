@@ -3,7 +3,7 @@ import { getAgentDir } from './extension-ui-paths.js'
 
 const jsonObjectSchema = z.looseObject({})
 const hostModeSchema = z.enum(['tui', 'print', 'json', 'rpc'])
-const invocationKindSchema = z.enum(['tool', 'toolPrepareArguments', 'command', 'agentHook', 'providerHook', 'sessionHook'])
+const invocationKindSchema = z.enum(['tool', 'toolPrepareArguments', 'command', 'agentHook', 'providerHook', 'sessionHook', 'userBash'])
 export const toolExecutionModeSchema = z.enum(['parallel', 'sequential'])
 
 const generationRequestSchema = z.strictObject({
@@ -158,6 +158,14 @@ const commandManifestSchema = z.strictObject({
   invocationName: z.string(),
   description: z.string(),
   argumentHint: z.string().optional(),
+  sourceInfo: z.strictObject({
+    path: z.string(),
+    source: z.string(),
+    scope: z.enum(['user', 'project', 'temporary']),
+    origin: z.enum(['package', 'top-level']),
+    baseDir: z.string().optional(),
+    changelogPath: z.string().optional(),
+  }).optional(),
 })
 
 const providerRegistrationManifestSchema = z.strictObject({

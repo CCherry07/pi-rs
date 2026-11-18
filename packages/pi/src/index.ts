@@ -44,11 +44,27 @@ export class PiNodeHost {
   }
 
   async runWithExitCode(): Promise<number> {
-    const binding = this.nativeBinding ?? loadNativeBinding();
-    const code = await binding.runPi(this.arguments, (operation, context) =>
-      this.extensionHost.dispatch(operation, context),
-    );
-    return code ?? 0;
+    const rpc = this.arguments.some((argument, index) => argument === "--mode=rpc"
+      || (argument === "--mode" && this.arguments[index + 1] === "rpc"));
+    // Replace Node's default terminating handlers before Rust installs its chained
+    // signal handlers. RpcSignals owns graceful disposal and repeated-signal exit.
+    const deferToNative = (): void => {};
+    const signals: NodeJS.Signals[] = rpc && process.platform !== "win32" ? ["SIGTERM", "SIGHUP"] : [];
+    for (const signal of signals) process.on(signal, deferToNative);
+    const originalWrite = process.stdout.write;
+    const diagnosticsWrite = process.stderr.write.bind(process.stderr);
+    // Rust owns the protocol descriptor. Extension logging follows Pi's stderr policy.
+    if (rpc) process.stdout.write = diagnosticsWrite;
+    try {
+      const binding = this.nativeBinding ?? loadNativeBinding();
+      const code = await binding.runPi(this.arguments, (operation, context) =>
+        this.extensionHost.dispatch(operation, context),
+      );
+      return code ?? 0;
+    } finally {
+      for (const signal of signals) process.off(signal, deferToNative);
+      if (rpc && process.stdout.write === diagnosticsWrite) process.stdout.write = originalWrite;
+    }
   }
 }
 

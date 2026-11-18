@@ -1,5 +1,7 @@
 use base64::Engine;
 use pi_core::{ContentBlock, ImageContent, TextContent};
+use std::collections::HashMap;
+use std::io::Write;
 
 use crate::source::MAX_OUTPUT_BYTES;
 
@@ -29,13 +31,8 @@ impl Output {
         }
         let remaining = budget.saturating_sub(self.retained_bytes);
         if kind == "image" {
-            if !mime.starts_with("image/")
-                || mime.len() <= 6
-                || mime.len() > 100
+            if image_extension(mime).is_none()
                 || value.is_empty()
-                || !mime[6..]
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || b".+-".contains(&byte))
                 || base64::engine::general_purpose::STANDARD
                     .decode(value)
                     .is_err()
@@ -109,6 +106,7 @@ impl Output {
         // by producing arbitrarily many item labels or console newlines.
         let generated = content.split_off(1);
         let mut remaining = self.budget;
+        let mut image_labels = HashMap::new();
         for block in generated {
             match block {
                 ContentBlock::Text(mut text) => {
@@ -122,6 +120,10 @@ impl Output {
                 }
                 ContentBlock::Image(image) if image.data.len() <= remaining => {
                     remaining -= image.data.len();
+                    let label = image_labels
+                        .entry(image.data.clone())
+                        .or_insert_with(|| save_image(&image));
+                    content.push(ContentBlock::Text(TextContent::new(label.clone())));
                     content.push(ContentBlock::Image(image));
                 }
                 _ => self.truncated = true,
@@ -139,6 +141,44 @@ impl Output {
             ))));
         }
         content
+    }
+}
+
+fn image_extension(mime: &str) -> Option<&'static str> {
+    match mime {
+        "image/png" => Some(".png"),
+        "image/jpeg" => Some(".jpg"),
+        "image/gif" => Some(".gif"),
+        "image/webp" => Some(".webp"),
+        _ => None,
+    }
+}
+
+fn save_image(image: &ImageContent) -> String {
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(&image.data) {
+        Ok(bytes) => bytes,
+        Err(error) => return format!("[Image could not be saved: {error}]"),
+    };
+    let size = if bytes.len() < 1024 {
+        format!("{}B", bytes.len())
+    } else if bytes.len() < 1024 * 1024 {
+        format!("{:.1}KB", bytes.len() as f64 / 1024.0)
+    } else {
+        format!("{:.1}MB", bytes.len() as f64 / (1024.0 * 1024.0))
+    };
+    let kind = format!("{}, {size}", image.mime_type);
+    let saved = (|| -> std::io::Result<_> {
+        let mut file = tempfile::Builder::new()
+            .prefix("pi-codemode-")
+            .suffix(image_extension(&image.mime_type).unwrap_or(".img"))
+            .tempfile()?;
+        file.write_all(&bytes)?;
+        let (_, path) = file.keep().map_err(|error| error.error)?;
+        Ok(path)
+    })();
+    match saved {
+        Ok(path) => format!("[Image saved to {} ({kind})]", path.display()),
+        Err(error) => format!("[Image ({kind}) could not be saved: {error}]"),
     }
 }
 

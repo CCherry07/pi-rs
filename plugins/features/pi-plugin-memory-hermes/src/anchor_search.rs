@@ -548,6 +548,7 @@ fn compact_reason(reason: &str) -> String {
 
 fn tool_result(text: String, details: Value, is_error: bool) -> ToolResult {
     ToolResult {
+        structured_content: None,
         content: vec![ContentBlock::Text(TextContent::new(text))],
         details: Some(details),
         usage: None,

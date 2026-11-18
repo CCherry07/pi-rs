@@ -10,6 +10,21 @@ use pi_core::{ModelId, ProviderId, ThinkingLevel};
 use pi_runtime::{PiRuntime, PreparedRuntimeConfiguration, RuntimeConfigurationPatch};
 
 impl AgentSession {
+    pub fn update_setting(&self, setting: crate::SessionSetting) -> Result<(), SessionError> {
+        self.ensure_open()?;
+        if let Some(writer) = &self.settings_writer {
+            writer.write(setting).map_err(SessionError::Runtime)?;
+        }
+        match setting {
+            crate::SessionSetting::SteeringMode(mode) => self.set_steering_mode(mode),
+            crate::SessionSetting::FollowUpMode(mode) => self.set_follow_up_mode(mode),
+            crate::SessionSetting::AutoCompaction(enabled) => {
+                self.set_auto_compaction_enabled(enabled)
+            }
+            crate::SessionSetting::AutoRetry(enabled) => self.set_auto_retry_enabled(enabled),
+        }
+        Ok(())
+    }
     pub fn auto_compaction_enabled(&self) -> bool {
         self.compaction_settings().enabled
     }
@@ -76,20 +91,87 @@ impl AgentSession {
     }
 
     pub fn set_model(&self, provider: ProviderId, model_id: ModelId) -> Result<(), SessionError> {
-        let _operation = self.try_begin_operation()?;
+        self.set_model_with_thinking(provider, model_id, None)
+    }
+
+    pub fn scoped_models(&self) -> Vec<pi_plugin::ScopedModel> {
+        self.scoped_models.clone()
+    }
+
+    /// Cycles the product's scoped catalog, or all available models when no scope is configured.
+    pub fn cycle_model(&self) -> Result<Option<crate::ModelCycleResult>, SessionError> {
+        let available = self.runtime.available_models();
+        let is_scoped = !self.scoped_models.is_empty();
+        let choices: Vec<_> = if is_scoped {
+            self.scoped_models
+                .iter()
+                .filter(|scoped| {
+                    available.iter().any(|model| {
+                        model.provider == scoped.model.provider && model.id == scoped.model.id
+                    })
+                })
+                .cloned()
+                .collect()
+        } else {
+            available
+                .into_iter()
+                .map(|model| pi_plugin::ScopedModel {
+                    model,
+                    thinking_level: None,
+                })
+                .collect()
+        };
+        let state = self.runtime.agent().state();
+        let current = choices.iter().position(|choice| {
+            choice.model.provider == state.provider_id && choice.model.id == state.model_id
+        });
+        if choices.is_empty() || (choices.len() == 1 && current.is_some()) {
+            return Ok(None);
+        }
+        let next = &choices[current.map_or(0, |index| (index + 1) % choices.len())];
+        self.set_model_with_thinking(
+            next.model.provider.clone(),
+            next.model.id.clone(),
+            next.thinking_level,
+        )?;
+        Ok(Some(crate::ModelCycleResult {
+            model: next.model.clone(),
+            thinking_level: self.runtime.agent().thinking_level(),
+            is_scoped,
+        }))
+    }
+
+    fn set_model_with_thinking(
+        &self,
+        provider: ProviderId,
+        model_id: ModelId,
+        explicit: Option<ThinkingLevel>,
+    ) -> Result<(), SessionError> {
+        self.ensure_open()?;
+        let _operation = if self.activity.accepts_live_messages() {
+            None
+        } else {
+            Some(self.try_begin_operation()?)
+        };
         let previous_thinking = self.runtime.agent().thinking_level();
+        let requested_thinking = explicit
+            .or_else(|| {
+                self.model_switch
+                    .model_thinking_levels
+                    .get(&format!("{provider}/{model_id}"))
+                    .copied()
+            })
+            .or(self.model_switch.default_thinking_level)
+            .unwrap_or(previous_thinking);
         let thinking_level =
-            clamp_thinking_for_model(&self.runtime, &provider, &model_id, previous_thinking);
-        let prepared = self
-            .runtime
-            .prepare_configuration(RuntimeConfigurationPatch {
-                model: Some(pi_core::ModelSelection {
-                    provider: provider.clone(),
-                    model_id: model_id.clone(),
-                }),
-                thinking_level: Some(thinking_level),
-                ..RuntimeConfigurationPatch::default()
-            })?;
+            clamp_thinking_for_model(&self.runtime, &provider, &model_id, requested_thinking);
+        let prepared = self.runtime.prepare_model_configuration(
+            Some(pi_core::ModelSelection {
+                provider: provider.clone(),
+                model_id: model_id.clone(),
+            }),
+            Some(thinking_level),
+        )?;
         let thinking_changed = (thinking_level != previous_thinking).then_some(thinking_level);
         let mut entries = vec![SessionEntry::ModelChange(ModelChangeEntry {
             provider,
@@ -100,11 +182,20 @@ impl AgentSession {
                 thinking_level: thinking_level.as_str().to_string(),
             }));
         }
-        self.commit_configuration(prepared, entries, thinking_changed)
+        self.commit_configuration(prepared, entries, thinking_changed)?;
+        if thinking_changed.is_some() {
+            self.emit_thinking_level_select(thinking_level, previous_thinking);
+        }
+        Ok(())
     }
 
     pub fn set_thinking_level(&self, thinking_level: ThinkingLevel) -> Result<(), SessionError> {
-        let _operation = self.try_begin_operation()?;
+        self.ensure_open()?;
+        let _operation = if self.activity.accepts_live_messages() {
+            None
+        } else {
+            Some(self.try_begin_operation()?)
+        };
         let state = self.runtime.agent().state();
         let thinking_level = clamp_thinking_for_model(
             &self.runtime,
@@ -117,14 +208,13 @@ impl AgentSession {
         }
         let prepared = self
             .runtime
-            .prepare_configuration(RuntimeConfigurationPatch {
-                thinking_level: Some(thinking_level),
-                ..RuntimeConfigurationPatch::default()
-            })?;
+            .prepare_model_configuration(None, Some(thinking_level))?;
         let entry = SessionEntry::ThinkingLevelChange(ThinkingLevelEntry {
             thinking_level: thinking_level.as_str().to_string(),
         });
-        self.commit_configuration(prepared, vec![entry], Some(thinking_level))
+        self.commit_configuration(prepared, vec![entry], Some(thinking_level))?;
+        self.emit_thinking_level_select(thinking_level, state.thinking_level);
+        Ok(())
     }
 
     pub(super) fn commit_configuration(
@@ -156,16 +246,24 @@ impl AgentSession {
         Ok(())
     }
 
-    /// Applies the synchronous plugin adapter's name change. The adapter
-    /// dispatches the async session-plugin hook after publishing the metadata.
-    pub(crate) fn set_name_immediate(
-        &self,
-        name: Option<String>,
-    ) -> Result<Option<String>, SessionError> {
-        let _operation = self.try_begin_operation()?;
+    /// Updates the product name immediately and dispatches its observer without delaying the caller.
+    pub fn set_session_name(&self, name: Option<String>) -> Result<(), SessionError> {
+        self.ensure_open()?;
+        let _operation = if self.activity.accepts_live_messages() {
+            None
+        } else {
+            Some(self.try_begin_operation()?)
+        };
         let normalized = self.set_name_locked(name)?;
         self.events.publish_session_info(normalized.clone());
-        Ok(normalized)
+        let driver = std::sync::Arc::clone(&self.plugin_driver);
+        let context = self.session_dispatch_context().clone();
+        self.executor.spawn(async move {
+            driver
+                .session_info_changed(&context, &SessionInfoChangedEvent { name: normalized })
+                .await;
+        });
+        Ok(())
     }
 
     pub(super) fn set_name_locked(
@@ -189,7 +287,8 @@ impl AgentSession {
             let name = sanitized.trim().to_string();
             (!name.is_empty()).then_some(name)
         });
-        self.store.set_name(normalized.clone())?;
+        let entry = self.store.set_name_with_entry(normalized.clone())?;
+        self.events.publish_entry(entry);
         Ok(normalized)
     }
 }

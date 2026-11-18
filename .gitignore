@@ -28,3 +28,7 @@ docs/
 /apps/pi-desktop/
 /packages/pi-desktop-sdk/
 /plugins/features/pi-plugin-subagents/desktop/
+
+# Installed model-facing product documentation.
+!/packages/pi/docs/
+!/packages/pi/docs/**

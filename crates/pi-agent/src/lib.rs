@@ -12,7 +12,8 @@ mod tool_scheduler;
 
 pub use agent::{
     Agent, AgentConfigurationPatch, AgentOptions, AgentRestoreState, AgentRuntime,
-    AgentStateSnapshot, PreparedAgentConfiguration, PromptInput, SubscriptionId, WeakAgent,
+    AgentStateSnapshot, PreparedAgentConfiguration, PreparedAgentModelConfiguration, PromptInput,
+    SubscriptionId, WeakAgent,
 };
 pub use agent_loop::{
     AgentLoopConfig, AgentLoopError, AgentLoopOutcome, AgentLoopServices, AgentLoopStop,

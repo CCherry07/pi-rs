@@ -96,6 +96,8 @@ struct OrderLookup {
 impl Tool for OrderLookup {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
+            output_schema: None,
+            constrained_sampling: None,
             name: "lookup_order".into(),
             label: "Look up order".into(),
             description: "Returns an order's fulfillment status.".into(),

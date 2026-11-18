@@ -31,6 +31,8 @@ struct LookupOrder;
 impl Tool for LookupOrder {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
+            output_schema: None,
+            constrained_sampling: None,
             name: "lookup_order".into(),
             label: "Look up order".into(),
             description: "Finds the fulfillment status of an order by its identifier.".into(),

@@ -204,6 +204,7 @@ impl<'a> RegisterContext<'a> {
 #[derive(Debug, Clone)]
 pub struct BeforeAgentStartEvent {
     pub system_prompt: String,
+    pub prompt_state: Option<crate::RunSystemPrompt>,
     pub input_messages: Vec<Message>,
     pub active_tools: Vec<String>,
     pub provider_id: ProviderId,
@@ -214,6 +215,7 @@ pub struct BeforeAgentStartEvent {
 pub struct BeforeAgentStartPatch {
     pub prompt_contributions: Vec<pi_core::PromptContribution>,
     pub system_prompt: Option<String>,
+    pub prompt_state: Option<crate::RunSystemPrompt>,
     pub messages: Vec<Message>,
 }
 
@@ -228,7 +230,9 @@ pub struct AgentEndEvent {
 /// Fired by product/session orchestration after the low-level Agent is idle
 /// and no automatic retry, compaction, or queued continuation remains.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct AgentSettledEvent;
+pub struct AgentSettledEvent {
+    pub aborted: bool,
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnStartEvent {
@@ -366,6 +370,8 @@ pub struct ToolResultEvent {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ToolResultPatch {
     pub content: Option<Vec<ContentBlock>>,
+    /// Replacing content without this field drops potentially stale structured output.
+    pub structured_content: Option<Value>,
     pub details: Option<Value>,
     pub usage: Option<Usage>,
     pub added_tool_names: Option<Vec<String>>,
@@ -377,6 +383,10 @@ impl ToolResultPatch {
     pub fn apply(self, result: &mut ToolResult) {
         if let Some(content) = self.content {
             result.content = content;
+            result.structured_content = None;
+        }
+        if let Some(structured_content) = self.structured_content {
+            result.structured_content = Some(structured_content);
         }
         if let Some(details) = self.details {
             result.details = Some(details);
@@ -685,6 +695,30 @@ pub trait Plugin: Send + Sync {
         Ok(())
     }
 
+    async fn model_select(
+        &self,
+        _context: &SessionPluginContext,
+        _event: &ModelSelectEvent,
+    ) -> std::result::Result<(), PluginError> {
+        Ok(())
+    }
+
+    async fn thinking_level_select(
+        &self,
+        _context: &SessionPluginContext,
+        _event: &ThinkingLevelSelectEvent,
+    ) -> std::result::Result<(), PluginError> {
+        Ok(())
+    }
+
+    async fn user_bash(
+        &self,
+        _context: &SessionPluginContext,
+        _event: &UserBashEvent,
+    ) -> std::result::Result<Option<UserBashOverride>, PluginError> {
+        Ok(None)
+    }
+
     async fn session_before_switch(
         &self,
         _context: &SessionPluginContext,
@@ -792,7 +826,7 @@ pub struct PluginDriver {
     pub(super) plugins: Vec<RegisteredPlugin>,
     routes: AgentHookRoutes,
     context_batches: Vec<Vec<usize>>,
-    session_routes: [Vec<usize>; 10],
+    session_routes: [Vec<usize>; SESSION_HOOKS.len()],
     pub(super) diagnostics: PluginDiagnosticSink,
     context_epoch: PluginContextEpoch,
 }
@@ -843,7 +877,8 @@ impl PluginDriver {
         let mut seen = std::collections::HashSet::new();
         let mut registered = Vec::with_capacity(plugins.len());
         let mut routes = AgentHookRoutes::default();
-        let mut session_routes: [Vec<usize>; 10] = std::array::from_fn(|_| Vec::new());
+        let mut session_routes: [Vec<usize>; SESSION_HOOKS.len()] =
+            std::array::from_fn(|_| Vec::new());
         for plugin in plugins {
             let id = plugin.id();
             if !seen.insert(id.clone()) {
@@ -1050,7 +1085,15 @@ impl PluginDriver {
                     continue;
                 }
             };
+            if let Some(prompt_state) = patch.prompt_state {
+                event.system_prompt = prompt_state.text().to_string();
+                event.active_tools = prompt_state.active_tools().to_vec();
+                event.prompt_state = Some(prompt_state);
+            }
             if let Some(system_prompt) = patch.system_prompt {
+                if let Some(state) = event.prompt_state.take() {
+                    event.prompt_state = Some(state.with_text(system_prompt.clone()));
+                }
                 event.system_prompt = system_prompt;
             }
             prompt_contributions.extend(patch.prompt_contributions);
@@ -1059,6 +1102,7 @@ impl PluginDriver {
         Ok(BeforeAgentStartPatch {
             prompt_contributions,
             system_prompt: Some(event.system_prompt),
+            prompt_state: event.prompt_state,
             messages,
         })
     }

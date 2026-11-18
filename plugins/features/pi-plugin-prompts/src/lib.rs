@@ -241,6 +241,35 @@ impl Command for PromptTemplateCommand {
         }
     }
 
+    fn metadata(&self) -> Option<pi_plugin::CommandMetadata> {
+        let source = &self.template.source;
+        Some(pi_plugin::CommandMetadata {
+            source: pi_plugin::CommandSource::Prompt,
+            source_info: pi_plugin::CommandSourceInfo {
+                path: self.template.file_path.to_string_lossy().into_owned(),
+                source: "local".to_string(),
+                scope: match source.kind {
+                    PromptTemplateSourceKind::Project => pi_plugin::CommandSourceScope::Project,
+                    PromptTemplateSourceKind::User => pi_plugin::CommandSourceScope::User,
+                    PromptTemplateSourceKind::Additional => {
+                        pi_plugin::CommandSourceScope::Temporary
+                    }
+                },
+                origin: pi_plugin::CommandSourceOrigin::TopLevel,
+                base_dir: Some(
+                    if source.root.is_file() {
+                        source.root.parent().unwrap_or(&source.root)
+                    } else {
+                        &source.root
+                    }
+                    .to_string_lossy()
+                    .into_owned(),
+                ),
+                changelog_path: None,
+            },
+        })
+    }
+
     async fn execute(
         &self,
         context: CommandContext,
@@ -453,35 +482,61 @@ fn diagnostic(
     }
 }
 
-/// Parses command arguments with Pi's simple single/double-quote rules.
+/// Parses command arguments with Pi's single/double-quote rules.
 pub fn parse_command_args(arguments: &str) -> Vec<String> {
+    let characters = arguments.chars().collect::<Vec<_>>();
     let mut parsed = Vec::new();
     let mut current = String::new();
+    let mut has_token = false;
     let mut quote = None;
-    for character in arguments.chars() {
+    let mut quote_start = 0;
+    let mut index = 0;
+    while index < characters.len() {
+        let character = characters[index];
         if let Some(expected) = quote {
-            if character == expected {
+            if character == '\\' && characters.get(index + 1) == Some(&expected) {
+                current.push(expected);
+                index += 1;
+            } else if character == expected {
                 quote = None;
             } else {
                 current.push(character);
             }
-        } else if matches!(character, '\'' | '"') {
+        } else if matches!(character, '\'' | '"') && !has_token {
             quote = Some(character);
-        } else if matches!(character, ' ' | '\t') {
-            if !current.is_empty() {
+            quote_start = index;
+            has_token = true;
+        } else if is_command_whitespace(character) {
+            if has_token {
                 parsed.push(std::mem::take(&mut current));
+                has_token = false;
             }
         } else {
             current.push(character);
+            has_token = true;
         }
+        if quote.is_some() && index == characters.len() - 1 {
+            // No closing quote: reread from its start, keeping the quote literal.
+            quote = None;
+            current.clear();
+            current.push(characters[quote_start]);
+            index = quote_start;
+        }
+        index += 1;
     }
-    if !current.is_empty() {
+    if has_token {
         parsed.push(current);
     }
     parsed
 }
 
-/// Substitutes `$N`, `$@`, `$ARGUMENTS`, `${@:N}`, and `${@:N:L}`.
+fn is_command_whitespace(character: char) -> bool {
+    // JavaScript's /\s/ includes BOM but not Unicode's NEXT LINE (U+0085).
+    character == '\u{feff}' || (character.is_whitespace() && character != '\u{85}')
+}
+
+/// Substitutes `$N`, `$@`, `$ARGUMENTS`, `${target:-default}`, and `${@:N[:L]}`.
+/// Argument and default values are inserted literally, without recursive expansion.
 pub fn substitute_args(content: &str, arguments: &[String]) -> String {
     let all_arguments = arguments.join(" ");
     let mut output = String::with_capacity(content.len());
@@ -502,6 +557,26 @@ pub fn substitute_args(content: &str, arguments: &[String]) -> String {
         if let Some(rest) = remaining.strip_prefix("$@") {
             output.push_str(&all_arguments);
             index = content.len() - rest.len();
+            continue;
+        }
+        if let Some(rest) = remaining.strip_prefix("${")
+            && let Some(end) = rest.find('}')
+            && let Some((target, default)) = rest[..end].split_once(":-")
+        {
+            let value = if matches!(target, "@" | "ARGUMENTS") {
+                Some(all_arguments.as_str())
+            } else if let Some(number) = parse_argument_number(target) {
+                number
+                    .checked_sub(1)
+                    .and_then(|argument_index| arguments.get(argument_index))
+                    .map(String::as_str)
+            } else {
+                output.push('$');
+                index += 1;
+                continue;
+            };
+            output.push_str(value.filter(|value| !value.is_empty()).unwrap_or(default));
+            index += 2 + end + 1;
             continue;
         }
         if let Some(rest) = remaining.strip_prefix("${@:")
@@ -533,10 +608,22 @@ pub fn substitute_args(content: &str, arguments: &[String]) -> String {
     output
 }
 
+fn parse_argument_number(value: &str) -> Option<usize> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    // A valid but oversized JS number still matches the placeholder; it is
+    // simply past the argument list rather than an invalid expression.
+    Some(value.parse().unwrap_or(usize::MAX))
+}
+
 fn substitute_slice(slice: &str, arguments: &[String]) -> Option<String> {
     let mut parts = slice.split(':');
-    let start = parts.next()?.parse::<usize>().ok()?.saturating_sub(1);
-    let length = parts.next().map(str::parse::<usize>).transpose().ok()?;
+    let start = parse_argument_number(parts.next()?)?.saturating_sub(1);
+    let length = match parts.next() {
+        Some(value) => Some(parse_argument_number(value)?),
+        None => None,
+    };
     if parts.next().is_some() {
         return None;
     }
@@ -746,6 +833,128 @@ mod tests {
             substitute_args("$1|$2|$9|${@:2}|${@:2:1}|$ARGUMENTS|$@", &arguments),
             "hello world|test||test third|test|hello world test third|hello world test third"
         );
+    }
+
+    #[test]
+    fn argument_parsing_matches_current_legacy_quote_and_whitespace_rules() {
+        // Cases from legacy/pi/packages/coding-agent/test/prompt-templates.test.ts.
+        let cases: &[(&str, &[&str])] = &[
+            (r#""" " ""#, &["", " "]),
+            ("a '' c", &["a", "", "c"]),
+            (r#"a """#, &["a", ""]),
+            (
+                "why doesn't the user's cache work",
+                &["why", "doesn't", "the", "user's", "cache", "work"],
+            ),
+            (r#""quoted \"text\"""#, &[r#"quoted "text""#]),
+            (r#"'it\'s here' next"#, &["it's here", "next"]),
+            (
+                r#""C:\dir\file" '\\server\share'"#,
+                &[r#"C:\dir\file"#, r#"\\server\share"#],
+            ),
+            (r#""it's" 'a\"b'"#, &["it's", r#"a\"b"#]),
+            (r#"say \"hi"#, &["say", r#"\"hi"#]),
+            ("'tis the season", &["'tis", "the", "season"]),
+            (r#"say "hello world"#, &["say", "\"hello", "world"]),
+            ("a '", &["a", "'"]),
+            (r#""abc\""#, &[r#""abc\""#]),
+            (r#""it's" 'x"#, &["it's", "'x"]),
+            ("a\n\n\tb  c", &["a", "b", "c"]),
+            ("\"line1\nline2\" second", &["line1\nline2", "second"]),
+            ("a\u{feff}b\u{a0}c\u{2028}d", &["a", "b", "c", "d"]),
+            ("a\u{85}b", &["a\u{85}b"]),
+            (r#""a""b c""#, &[r#"a"b"#, r#"c""#]),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(parse_command_args(input), *expected, "input: {input:?}");
+        }
+    }
+
+    #[test]
+    fn argument_defaults_match_legacy_without_recursive_substitution() {
+        let cases: &[(&str, &[&str], &str)] = &[
+            (
+                "List exactly ${1:-7} next steps",
+                &[],
+                "List exactly 7 next steps",
+            ),
+            ("${1:-7} ${2:-brief}", &["3"], "3 brief"),
+            ("${1:-7} ${2:-brief}", &["3", "verbose"], "3 verbose"),
+            ("Mode: ${1:-brief}", &[""], "Mode: brief"),
+            (
+                "${@:-default}\n${ARGUMENTS:-default}",
+                &[],
+                "default\ndefault",
+            ),
+            (
+                "${@:-default}|${ARGUMENTS:-default}",
+                &[""],
+                "default|default",
+            ),
+            ("${@:-default}|${ARGUMENTS:-default}", &["", ""], " | "),
+            (
+                "${@:-default}|${ARGUMENTS:-default}",
+                &["a", "b"],
+                "a b|a b",
+            ),
+            ("${1:-$ARGUMENTS}", &["$1"], "$1"),
+            ("${3:-$ARGUMENTS $@ $1}", &["a", "b"], "$ARGUMENTS $@ $1"),
+            ("${1:-seven steps}", &[], "seven steps"),
+            ("$1 ${2:-x} $ARGUMENTS", &["a"], "a x a"),
+            ("${0:-zero}|${01:-first}|${2:-}", &["a"], "zero|a|"),
+            ("${1:-a\nb}", &[], "a\nb"),
+            ("${1:-${2:-inner}}", &[], "${2:-inner}"),
+            (
+                "${name:-x}|${-1:-x}|${1:-open",
+                &[],
+                "${name:-x}|${-1:-x}|${1:-open",
+            ),
+            ("${@:+1}|${@:1:+1}", &["a"], "${@:+1}|${@:1:+1}"),
+            (
+                "${@:999999999999999999999999}|${@:1:999999999999999999999999}",
+                &["a", "b"],
+                "|a b",
+            ),
+        ];
+        for (template, args, expected) in cases {
+            let args = args
+                .iter()
+                .map(|arg| (*arg).to_string())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                substitute_args(template, &args),
+                *expected,
+                "template: {template:?}, args: {args:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_template_command_preserves_empty_args_for_defaults() {
+        let template = PromptTemplate {
+            name: "review".to_string(),
+            description: "Review a file".to_string(),
+            argument_hint: None,
+            content: "Review $2. Focus: ${1:-correctness}.".to_string(),
+            file_path: "/prompts/review.md".into(),
+            source: PromptTemplateSource {
+                kind: PromptTemplateSourceKind::User,
+                root: "/prompts".into(),
+            },
+        };
+        let runtime = pi_runtime::PiRuntime::builder()
+            .provider_plugin(ScriptedProviderPlugin::scripted([]))
+            .plugin(PromptTemplatesPlugin::from_templates([template]))
+            .build()
+            .unwrap();
+        for input in [r#"/review "" src/index.ts"#, "/review '' src/index.ts"] {
+            assert_eq!(
+                runtime.execute_command(input).await.unwrap(),
+                Some(CommandOutcome::TransformInput(
+                    "Review src/index.ts. Focus: correctness.".to_string()
+                ))
+            );
+        }
     }
 
     #[tokio::test]

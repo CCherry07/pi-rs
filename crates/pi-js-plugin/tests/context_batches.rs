@@ -57,10 +57,75 @@ impl JsCallbackDispatcher for Dispatcher {
                     });
                     break;
                 }
+                "same" => {
+                    result.replacement = Some(JsContextReplacement {
+                        messages: serde_json::to_value(invocation.messages.as_ref()).unwrap(),
+                    });
+                    break;
+                }
                 _ => {}
             }
         }
         Ok(result)
+    }
+}
+
+#[tokio::test]
+async fn context_transforms_preserve_current_system_sections_without_exposing_them() {
+    let original = vec![
+        Message::System(pi_core::SystemMessage {
+            content: Vec::new(),
+            sections: vec![
+                ("preamble".into(), Some("base".into())),
+                ("old".into(), Some("removed".into())),
+            ],
+            timestamp_ms: 1,
+        }),
+        Message::User(UserMessage::text("original", 2)),
+        Message::System(pi_core::SystemMessage {
+            content: Vec::new(),
+            sections: vec![
+                ("preamble".into(), Some("updated".into())),
+                ("old".into(), None),
+            ],
+            timestamp_ms: 3,
+        }),
+    ];
+    for callback in ["same", "replace"] {
+        let dispatcher = Arc::new(Dispatcher::default());
+        let generation = generation(dispatcher.clone(), &[("context", &[callback, "after"])]);
+        let driver = PluginDriver::new(generation.plugins()).unwrap();
+        let (_, signal) = AbortHandle::new();
+        let output = driver
+            .context(
+                &RunId::new("run"),
+                std::path::Path::new("."),
+                &signal,
+                original.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(dispatcher.batches.lock().unwrap().iter().all(|batch| {
+            batch
+                .messages
+                .iter()
+                .all(|message| !matches!(message, Message::System(_)))
+        }));
+        if callback == "same" {
+            assert_eq!(output, original);
+        } else {
+            assert_eq!(output.len(), 2);
+            let Message::System(head) = &output[0] else {
+                panic!("missing system head")
+            };
+            assert_eq!(head.sections, [("preamble".into(), Some("updated".into()))]);
+            assert_eq!(head.timestamp_ms, 1);
+            assert_eq!(pi_core::SystemMessage::fold("", &output), "updated");
+            assert_eq!(
+                output[1],
+                Message::User(UserMessage::text("replacement", 2))
+            );
+        }
     }
 }
 

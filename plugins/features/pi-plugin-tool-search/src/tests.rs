@@ -5,6 +5,8 @@ use super::*;
 
 fn spec(name: &str, description: &str, parameters: Value) -> ToolSpec {
     ToolSpec {
+        output_schema: None,
+        constrained_sampling: None,
         name: name.into(),
         label: name.into(),
         description: description.into(),

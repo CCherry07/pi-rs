@@ -170,6 +170,8 @@ impl Tool for AgentTool {
             ),
         };
         ToolSpec {
+            output_schema: None,
+            constrained_sampling: None,
             name: name.to_string(),
             label: label.to_string(),
             description: description.to_string(),

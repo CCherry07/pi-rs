@@ -72,8 +72,9 @@ trusted `<cwd>/.pi/settings.json` overrides individual fields:
 }
 ```
 
-Omitted fields default to `true`. Fields must be booleans; invalid values produce settings
-diagnostics and fall back to defaults, without discarding valid sibling fields. New sessions
+`hashline`, `memory`, `subagents`, and `schedule` default to `false`; `skills`,
+`promptTemplates`, and `sessionTransfer` default to `true`. Fields must be booleans; invalid values
+produce settings diagnostics and fall back to defaults, without discarding valid sibling fields. New sessions
 read current settings. Existing sessions apply changes when reloaded (TUI `/reload` or the
 managed session reload API); editing a file does not change live registries or other sessions.
 Malformed JSON retains that scope's last valid in-process document. If candidate generation
@@ -94,10 +95,10 @@ config.features = Features {
 let pi = Pi::builder(config).build()?;
 ```
 
-The available flags are `memory`, `subagents`, `schedule`, `skills`,
+The available flags are `hashline`, `memory`, `subagents`, `schedule`, `skills`,
 `prompt_templates`, and `session_transfer` (export/import/share commands).
 `Features::all()` is equivalent to `Features::default()`; `Features::none()` disables
-these six features while retaining providers, filesystem/shell tools, core session
+these seven features while retaining providers, filesystem/shell tools, core session
 management, and independently configured native/JavaScript/MCP plugins.
 
 Disabling a feature omits its built-in registration and corresponding session hooks,
@@ -106,6 +107,11 @@ disabled scheduling does not start its scheduler. Skills remain usable without
 subagents or memory. Feature-specific settings still apply when enabled.
 The host captures its ceiling and intersects it with the freshly loaded settings for each
 new/resumed/forked session and reload. The feature selection is not stored in session history.
+
+By default, settings enable `skills`, `promptTemplates`, and `sessionTransfer`.
+`hashline`, `memory`, `subagents`, and `schedule` require explicit enablement through settings.json
+or `/features`. The host ceiling permits them without automatically selecting them.
+New sessions use `read`, `bash`, `edit`, and `write`; use `defaultTools` for optional tools.
 
 These are **runtime flags, not Cargo features**: dependencies are still compiled.
 They select first-party composition, not a security boundary for explicitly loaded

@@ -3,6 +3,7 @@ mod activity;
 mod boundary;
 mod bridge;
 mod configuration;
+mod configuration_hooks;
 mod context;
 mod delivery;
 pub(crate) use delivery::SessionDelivery;
@@ -101,6 +102,7 @@ impl PromptOutcome {
 pub struct SessionInput {
     text: String,
     images: Option<Vec<ImageContent>>,
+    source: pi_plugin::InputSource,
 }
 
 impl SessionInput {
@@ -116,11 +118,18 @@ impl SessionInput {
         Self {
             text: text.into(),
             images: None,
+            source: pi_plugin::InputSource::Interactive,
         }
     }
 
     pub fn with_images(mut self, images: impl IntoIterator<Item = ImageContent>) -> Self {
         self.images = Some(images.into_iter().collect());
+        self
+    }
+
+    /// Identifies the submitting frontend for extension input hooks.
+    pub fn with_source(mut self, source: pi_plugin::InputSource) -> Self {
+        self.source = source;
         self
     }
 }
@@ -141,8 +150,12 @@ pub struct AgentSession {
     runtime: PiRuntime,
     store: SessionStore,
     runtime_inventory: SessionRuntimeInventory,
+    model_switch: ModelSwitchPolicy,
+    scoped_models: Vec<pi_plugin::ScopedModel>,
+    settings_writer: Option<Arc<dyn SessionSettingsWriter>>,
     context_updates: ContextUpdates,
     plugin_driver: Arc<PluginDriver>,
+    executor: tokio::runtime::Handle,
     session_dispatch_context: SessionDispatchContext,
     compaction_settings: Arc<RwLock<CompactionSettings>>,
     context_window: Option<u64>,

@@ -12,7 +12,7 @@ type ConvertFn = dyn Fn(Vec<Message>) -> BoxFuture<'static, Vec<Message>> + Send
 
 /// Projects agent messages into provider messages after context transformation.
 /// The callback owns its input; changing it does not change the stored transcript.
-/// By default, only user, assistant and tool-result messages reach the provider.
+/// By default, system, user, assistant and tool-result messages reach the provider.
 #[derive(Clone, Default)]
 pub struct ConvertToLlm(Option<Arc<ConvertFn>>);
 
@@ -38,7 +38,10 @@ impl ConvertToLlm {
                 .filter(|message| {
                     matches!(
                         message,
-                        Message::User(_) | Message::Assistant(_) | Message::ToolResult(_)
+                        Message::System(_)
+                            | Message::User(_)
+                            | Message::Assistant(_)
+                            | Message::ToolResult(_)
                     )
                 })
                 .collect(),

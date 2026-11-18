@@ -129,6 +129,7 @@ expected_project_trusted = {}
                 signal,
             ),
             BeforeAgentStartEvent {
+                prompt_state: None,
                 system_prompt: String::new(),
                 input_messages: Vec::new(),
                 active_tools: Vec::new(),

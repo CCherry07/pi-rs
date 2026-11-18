@@ -1,8 +1,10 @@
 use super::AgentSession;
 use super::activity::{ActivityPhase, CancellationStage, SessionActivity};
+use super::compaction::{CompactionCompleter, serialize_conversation};
 use crate::{
-    AgentMessage, BranchSummaryEntry, SessionBeforeTreeEvent, SessionContext, SessionDocument,
-    SessionError, SessionTreeEvent, TreePreparation, estimate_context_tokens, now_ms,
+    AgentMessage, BranchSummaryEntry, CompactionPreparation, FileOperations,
+    SessionBeforeTreeEvent, SessionContext, SessionDocument, SessionError, SessionTreeEvent,
+    TreePreparation, estimate_context_tokens, now_ms,
 };
 use pi_core::{AbortHandle, AbortSignal, ContentBlock, Message, StopReason, UserMessage};
 use pi_runtime::RuntimeCompletionRequest;
@@ -52,7 +54,8 @@ impl AgentSession {
         if let Some(label) = before.and_then(|result| result.label)
             && let Some(target_id) = leaf_id
         {
-            self.store.set_label(target_id, Some(label))?;
+            let entry = self.store.set_label_with_entry(target_id, Some(label))?;
+            self.events.publish_entry(entry);
         }
         self.finish_tree_change(previous_leaf, None, None).await?;
         Ok(context)
@@ -107,7 +110,7 @@ impl AgentSession {
         replace_instructions: bool,
         label: Option<String>,
     ) -> Result<String, SessionError> {
-        let _operation = self.activity.begin(ActivityPhase::Updating).await;
+        let _operation = self.activity.begin(ActivityPhase::Summarizing).await;
         self.ensure_open()?;
         let document = self.store.shared_document()?;
         self.store
@@ -181,23 +184,36 @@ impl AgentSession {
             self.active_context_window().unwrap_or(128_000),
             self.branch_summary_reserve_tokens,
         );
-        let (summary, usage) = if messages.is_empty() {
-            ("No content to summarize".to_string(), None)
+        let (summary, usage, details) = if messages.is_empty() {
+            ("No content to summarize".to_string(), None, None)
         } else {
-            let conversation = serde_json::to_string_pretty(&messages)
-                .map_err(|error| SessionError::InvalidPayload(error.to_string()))?;
+            let mut summary_preparation = CompactionPreparation {
+                messages_to_summarize: messages,
+                turn_prefix_messages: Vec::new(),
+                retained_tail: Vec::new(),
+                is_split_turn: false,
+                tokens_before: 0,
+                previous_summary: None,
+                file_ops: FileOperations::default(),
+                settings: self.compaction_settings(),
+            };
+            self.compaction_policy
+                .prepare_branch(&preparation.entries_to_summarize, &mut summary_preparation);
+            let conversation = serialize_conversation(&summary_preparation.messages_to_summarize);
             let prompt = self.compaction_policy.branch_prompt();
             let instructions = match (
-                &preparation.custom_instructions,
+                preparation
+                    .custom_instructions
+                    .as_deref()
+                    .filter(|value| !value.is_empty()),
                 preparation.replace_instructions,
             ) {
-                (Some(custom), true) => custom.clone(),
+                (Some(custom), true) => custom.to_string(),
                 (Some(custom), false) => format!("{prompt}\n\nAdditional focus: {custom}"),
                 (None, _) => prompt.to_string(),
             };
             let response = self
-                .runtime
-                .complete(
+                .complete_summary(
                     RuntimeCompletionRequest {
                         system_prompt: self.compaction_policy.system_prompt().to_string(),
                         messages: vec![Message::User(UserMessage::text(
@@ -207,31 +223,25 @@ impl AgentSession {
                             now_ms(),
                         ))],
                         model: None,
-                        thinking_level: self.runtime.agent().state().thinking_level,
+                        thinking_level: if self.runtime.model_capabilities().reasoning {
+                            self.runtime.agent().state().thinking_level
+                        } else {
+                            pi_core::ThinkingLevel::Off
+                        },
                         thinking_budgets: self.runtime.agent().thinking_budgets(),
-                        max_output_tokens: Some(2_048),
+                        max_output_tokens: None,
                     },
                     signal.clone(),
+                    crate::SummarizationSource::BranchSummary,
                 )
                 .await?;
             if signal.is_aborted() || response.stop_reason == StopReason::Aborted {
                 return Err(SessionError::Cancelled("session tree navigation"));
             }
-            if response.stop_reason == StopReason::Error {
-                return Err(SessionError::Runtime(
-                    response
-                        .error_message
-                        .unwrap_or_else(|| "branch summarization failed".into()),
-                ));
-            }
-            if response
-                .content
-                .iter()
-                .any(|block| matches!(block, ContentBlock::ToolCall(_)))
+            if let Some(error) =
+                super::compaction::summarization_failure(&response, "Branch summarization")
             {
-                return Err(SessionError::Runtime(
-                    "branch summarization attempted to call a tool".into(),
-                ));
+                return Err(SessionError::Runtime(error));
             }
             let text = response
                 .content
@@ -242,22 +252,16 @@ impl AgentSession {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            (
-                format!(
-                    "{PREAMBLE}{}",
-                    if text.is_empty() {
-                        "No summary generated"
-                    } else {
-                        &text
-                    }
-                ),
-                Some(response.usage),
-            )
+            let mut summary = format!("{PREAMBLE}{text}");
+            let details = self
+                .compaction_policy
+                .finalize(&summary_preparation, &mut summary);
+            (summary, Some(response.usage), details)
         };
         Ok(BranchSummaryEntry {
             from_id: String::new(),
             summary,
-            details: None,
+            details,
             usage,
         })
     }

@@ -115,7 +115,11 @@ impl AgentSession {
                         ContentBlock::Image(image) => Some(image),
                         _ => None,
                     });
-                    DeliveryPlan::Submit(SessionInput::new(text).with_images(images))
+                    DeliveryPlan::Submit(
+                        SessionInput::new(text)
+                            .with_images(images)
+                            .with_source(pi_plugin::InputSource::Extension),
+                    )
                 } else {
                     DeliveryPlan::Run(message)
                 }

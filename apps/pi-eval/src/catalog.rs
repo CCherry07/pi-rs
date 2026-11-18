@@ -439,6 +439,8 @@ struct ModelProbeTool;
 impl Tool for ModelProbeTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
+            output_schema: None,
+            constrained_sampling: None,
             name: "verify_fixture_model".to_string(),
             label: "Verify fixture model".to_string(),
             description: "Inspect the reloaded model catalog and submit the deterministic fixture model summary."
@@ -501,6 +503,7 @@ impl Tool for ModelProbeTool {
             }
         };
         Ok(ToolResult {
+            structured_content: None,
             details: Some(details),
             terminate: true,
             ..ToolResult::text("Model catalog probe submitted.")
@@ -528,6 +531,8 @@ struct NativeProviderProbeTool;
 impl Tool for NativeProviderProbeTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
+            output_schema: None,
+            constrained_sampling: None,
             name: "verify_native_provider".to_string(),
             label: "Verify native provider".to_string(),
             description: "Call the loaded native provider's success and failure streams, then submit the observed catalog, output, usage, and error propagation."
@@ -687,6 +692,8 @@ struct ProviderProbeTool {
 impl Tool for ProviderProbeTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
+            output_schema: None,
+            constrained_sampling: None,
             name: "verify_acme_provider".to_string(),
             label: "Verify Acme provider".to_string(),
             description:
@@ -787,6 +794,7 @@ impl Tool for ProviderProbeTool {
 
 fn provider_probe_result(details: serde_json::Value) -> ToolResult {
     ToolResult {
+        structured_content: None,
         details: Some(details),
         terminate: true,
         ..ToolResult::text("Provider probe submitted.")

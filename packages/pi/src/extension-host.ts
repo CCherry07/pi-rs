@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module'
-import { basename } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative } from 'node:path'
 
 import { createJiti } from 'jiti'
 import { z } from 'zod'
@@ -20,6 +20,7 @@ import type { PiExtensionCommandContext, PiExtensionContext } from './extension-
 import type { NativeExtensionContext } from './native-binding.js'
 import {
   type GenerationManifest,
+  type CommandManifest,
   type GenerationRequest,
   type HookBatchInvocation,
   type HookManifest,
@@ -48,6 +49,7 @@ const compatibilityResolver = new CompatibilityResolver(require, {
 const jsonObjectSchema = z.looseObject({})
 const toolResultSchema = z.looseObject({
   content: z.array(z.unknown()),
+  structuredContent: z.unknown().optional(),
   details: z.unknown().optional(),
   usage: z.unknown().optional(),
   isError: z.boolean().default(false),
@@ -206,6 +208,9 @@ const PROVIDER_HOOKS = new Set([
 ])
 const SESSION_HOOKS = new Set([
   'session_start',
+  'model_select',
+  'thinking_level_select',
+  'user_bash',
   'session_info_changed',
   'session_before_switch',
   'session_before_fork',
@@ -665,6 +670,24 @@ function extensionId(index: number, path: string): string {
   return `js:${index}:${basename(path).replace(/[^a-zA-Z0-9._-]/g, '-')}`
 }
 
+function commandSourceInfo(path: string, request: GenerationRequest): CommandManifest['sourceInfo'] {
+  const roots = [
+    { root: join(request.agentDir, 'extensions'), scope: 'user' as const },
+    { root: join(request.cwd, '.pi', 'extensions'), scope: 'project' as const },
+  ]
+  const match = roots.find(({ root }) => {
+    const child = relative(root, path)
+    return child === '' || (!child.startsWith('..') && !isAbsolute(child))
+  })
+  return {
+    path,
+    source: 'local',
+    scope: match?.scope ?? 'temporary',
+    origin: 'top-level',
+    baseDir: match?.root ?? dirname(path),
+  }
+}
+
 function replaceNamed<T extends { name: string }>(registrations: T[], registration: T): void {
   const existing = registrations.findIndex(candidate => candidate.name === registration.name)
   if (existing === -1) registrations.push(registration)
@@ -751,7 +774,7 @@ export class ExtensionHost {
           providerHooks: [],
           sessionHooks: [],
         }
-        const api = this.#createExtensionApi(generationId, id, path, contribution, diagnostics)
+        const api = this.#createExtensionApi(generationId, id, path, contribution, diagnostics, commandSourceInfo(path, request))
         const jiti = createJiti(import.meta.url, {
           alias: compatibilityResolver.aliases,
           virtualModules: compatibilityResolver.virtualModules,
@@ -801,6 +824,7 @@ export class ExtensionHost {
     path: string,
     contribution: Contribution,
     diagnostics: ExtensionDiagnostic[],
+    sourceInfo: CommandManifest['sourceInfo'],
   ): ExtensionApi {
     const state = this.#requireGeneration(generationId)
     const registeredFlags = new Set<string>()
@@ -886,8 +910,35 @@ export class ExtensionHost {
           const chainedSystemPrompt = event === 'before_agent_start' && typeof eventValue.systemPrompt === 'string'
             ? eventValue.systemPrompt
             : undefined
+          const currentSystemPrompt = chainedSystemPrompt === undefined
+            ? undefined
+            : () => {
+                this.#requireGeneration(generationId)
+                if (eventValue.supportsSystemPromptOptions !== true || typeof nativeContext?.query !== 'function') {
+                  return chainedSystemPrompt
+                }
+                return parseExternal(
+                  z.string(),
+                  parseJson(
+                    nativeContext.query(JSON.stringify({
+                      type: 'renderSystemPrompt',
+                      options: eventValue.systemPromptOptions,
+                    })),
+                    'native extension context renderSystemPrompt result',
+                  ),
+                  'native extension context renderSystemPrompt result',
+                )
+              }
+          if (currentSystemPrompt !== undefined) {
+            Object.defineProperty(eventValue, 'systemPrompt', {
+              configurable: true,
+              enumerable: true,
+              get: currentSystemPrompt,
+            })
+          }
           let result: unknown
           let boundaryError: string | undefined
+          let promptError: string | undefined
           try {
             result = await handler(
               eventValue,
@@ -897,12 +948,16 @@ export class ExtensionHost {
                 signal,
                 nativeContext,
                 false,
-                chainedSystemPrompt,
+                currentSystemPrompt,
               ),
             )
           } catch (error) {
-            if (event !== 'turn_end' && event !== 'agent_before_settle') throw error
-            boundaryError = error instanceof Error ? error.message : String(error)
+            if (event === 'before_agent_start' && eventValue.supportsSystemPromptOptions === true) {
+              promptError = error instanceof Error ? error.message : String(error)
+            } else {
+              if (event !== 'turn_end' && event !== 'agent_before_settle') throw error
+              boundaryError = error instanceof Error ? error.message : String(error)
+            }
           }
           const resultRecord = isRecord(result) ? result : undefined
           if (event === 'turn_end' || event === 'agent_before_settle') {
@@ -912,12 +967,16 @@ export class ExtensionHost {
               __boundaryError: boundaryError,
             }
           }
-          if (event === 'before_agent_start' && resultRecord) {
-            return parseExternal(
-              beforeAgentStartResultSchema,
-              resultRecord,
-              `pi.on("before_agent_start") result (${path})`,
-            )
+          if (event === 'before_agent_start' && (resultRecord || eventValue.systemPromptOptions !== undefined)) {
+            return {
+              ...(resultRecord ? parseExternal(
+                beforeAgentStartResultSchema,
+                resultRecord,
+                `pi.on("before_agent_start") result (${path})`,
+              ) : {}),
+              __systemPromptOptions: eventValue.systemPromptOptions,
+              ...(promptError === undefined ? {} : { __promptError: promptError }),
+            }
           }
           if (event === 'tool_call') {
             return { ...(resultRecord ?? {}), input: eventValue.input }
@@ -930,6 +989,7 @@ export class ExtensionHost {
             )
           }
           if (event === 'after_provider_response') return null
+          if (event === 'user_bash') return this.#prepareUserBashResult(state, pluginId, result)
           return result ?? null
         })
         target.push({ name: event, callbackId })
@@ -951,6 +1011,7 @@ export class ExtensionHost {
           name,
           description: options.description ?? '',
           argumentHint: options.argumentHint,
+          sourceInfo,
         })
       },
       registerShortcut: (key, value) => {
@@ -1102,6 +1163,38 @@ export class ExtensionHost {
     state.callbacks.set(callbackId, (invocation, signal, native) => state.ui.run(() => callback(invocation, signal, native)))
   }
 
+  #prepareUserBashResult(state: GenerationState, pluginId: string, value: unknown): unknown {
+    if (value === undefined) return null
+    const invalid = 'Invalid user_bash handler result: return undefined for local execution or exactly one valid { operations } or { result } object'
+    if (!isRecord(value) || (value.operations !== undefined) === (value.result !== undefined)) throw new Error(invalid)
+    if (value.result !== undefined) {
+      if (!isRecord(value.result) || !('exitCode' in value.result)) throw new Error(invalid)
+      const result = z.looseObject({
+        output: z.string(), exitCode: z.number().int().optional(), cancelled: z.boolean(),
+        truncated: z.boolean(), fullOutputPath: z.string().optional(),
+      }).safeParse(value.result)
+      if (!result.success) throw new Error(invalid)
+      return { result: result.data }
+    }
+    const operations = z.looseObject({ exec: callableSchema }).safeParse(value.operations)
+    if (!operations.success) throw new Error(invalid)
+    const callbackId = this.#nextCallbackId(state, pluginId, 'user-bash-operations')
+    this.#registerCallback(state, callbackId, async (invocation, signal, nativeContext) => {
+      try {
+        const payload = z.strictObject({ command: z.string(), cwd: z.string() }).parse(invocation.payload)
+        if (!nativeContext?.bashData) throw new Error('Custom bash operations require native output streaming')
+        const result = await callDynamic(operations.data.exec, value.operations, [payload.command, payload.cwd, {
+          signal,
+          onData: (bytes: Buffer) => nativeContext.bashData!(bytes),
+        }])
+        return z.looseObject({ exitCode: z.number().int().nullable() }).parse(result)
+      } finally {
+        state.callbacks.delete(callbackId)
+      }
+    })
+    return { operationsCallbackId: callbackId }
+  }
+
   #nextCallbackId(state: GenerationState, pluginId: string, kind: string): string {
     return `${pluginId}:${kind}:${state.nextCallbackId++}`
   }
@@ -1118,7 +1211,7 @@ export class ExtensionHost {
     signal: AbortSignal,
     nativeContext: NativeExtensionContext | undefined,
     command: boolean,
-    chainedSystemPrompt?: string,
+    currentSystemPrompt?: () => string,
   ): ExtensionContext | ExtensionCommandContext {
     const parsedContext = extensionContextInputSchema.parse(context)
     const state = this.#requireGeneration(generationId)
@@ -1134,11 +1227,8 @@ export class ExtensionHost {
         this.#requireGeneration(generationId)
       },
     })
-    if (chainedSystemPrompt !== undefined) {
-      contextFacade.getSystemPrompt = () => {
-        this.#requireGeneration(generationId)
-        return chainedSystemPrompt
-      }
+    if (currentSystemPrompt !== undefined) {
+      contextFacade.getSystemPrompt = currentSystemPrompt
     }
     return contextFacade
   }

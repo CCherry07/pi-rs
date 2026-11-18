@@ -249,6 +249,7 @@ impl Plugin for HermesMemoryPlugin {
             BeforeAgentStartPatch::default()
         } else {
             BeforeAgentStartPatch {
+                prompt_state: None,
                 prompt_contributions,
                 system_prompt: Some(format!("{}\n\n{addition}", event.system_prompt)),
                 messages: Vec::new(),

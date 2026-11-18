@@ -397,6 +397,9 @@ fn inject_agent_hook_interests(
             let variant = match function.sig.ident.to_string().as_str() {
                 "session_start" => quote!(Start),
                 "session_info_changed" => quote!(InfoChanged),
+                "model_select" => quote!(ModelSelect),
+                "thinking_level_select" => quote!(ThinkingLevelSelect),
+                "user_bash" => quote!(UserBash),
                 "session_before_switch" => quote!(BeforeSwitch),
                 "session_before_fork" => quote!(BeforeFork),
                 "session_before_compact" => quote!(BeforeCompact),

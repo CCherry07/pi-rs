@@ -8,15 +8,16 @@ use pi_core::{ModelId, ProviderId};
 use pi_js_plugin::JsPluginGeneration;
 use pi_plugin::{Plugin, PluginContext, PrepareContext, PrepareError};
 use pi_plugin_bash::{BashToolOptions, ConfiguredBashPlugin};
-use pi_plugin_codemode::CodemodePlugin;
+use pi_plugin_codemode::{CodemodeMode, CodemodeOptions, ConfiguredCodemodePlugin};
 use pi_plugin_edit::EditPlugin;
 use pi_plugin_find::FindPlugin;
-use pi_plugin_grep::GrepPlugin;
+use pi_plugin_grep::ConfiguredGrepPlugin;
 use pi_plugin_hashline_edit::HashlineEditPlugin;
 use pi_plugin_ls::LsPlugin;
 use pi_plugin_manager::loader::NativePlugins;
 use pi_plugin_memory_hermes::{HermesMemoryPlugin, managed_skill_roots};
 use pi_plugin_models::ModelsPlugin;
+use pi_plugin_powershell::PowerShellPlugin;
 use pi_plugin_prompts::{PromptTemplateLoaderOptions, PromptTemplatesPlugin};
 use pi_plugin_read::ConfiguredReadPlugin;
 use pi_plugin_schedule::{ScheduleOptions, SchedulePlugin};
@@ -25,6 +26,7 @@ use pi_plugin_skills::SkillsPlugin;
 use pi_plugin_subagents::{
     SubagentLoaderOptions, SubagentRuntime, SubagentSkillPromptProjector, SubagentsPlugin,
 };
+use pi_plugin_tool_search::ToolSearchPlugin;
 use pi_plugin_write::WritePlugin;
 use pi_runtime::{CompletionRetryPolicy, PiRuntime, RuntimeError};
 use pi_session::SessionGenerationOverlay;
@@ -39,16 +41,18 @@ use crate::dynamic_providers::DynamicProviderCandidate;
 use crate::features::FeaturesPlugin;
 use crate::{Config, expand_tilde_path};
 
-const BUILTIN_TOOL_NAMES: [&str; 18] = [
-    "codemode",
+const BUILTIN_TOOL_NAMES: [&str; 20] = [
     "read",
+    "bash",
+    "edit",
+    "write",
+    "powershell",
+    "codemode",
+    "tool_search",
     "grep",
     "find",
     "ls",
-    "write",
-    "edit",
     "hashline_edit",
-    "bash",
     "spawn_agent",
     "send_message",
     "followup_task",
@@ -122,7 +126,18 @@ impl GenerationComponents<'_> {
         );
 
         let builder = PiRuntime::builder()
-            .plugin_factory(CodemodePlugin::default)
+            .plugin_factory(|| ToolSearchPlugin)
+            .plugin_factory({
+                let options = CodemodeOptions {
+                    mode: match config.runtime_settings.codemode.mode {
+                        pi_settings::CodemodeModeSetting::On => CodemodeMode::On,
+                        pi_settings::CodemodeModeSetting::Only => CodemodeMode::Only,
+                    },
+                    inline_budget: config.runtime_settings.codemode.inline_budget,
+                    docs_path: crate::prompt::documentation_root().join("docs/codemode.md"),
+                };
+                move || ConfiguredCodemodePlugin::new(options.clone())
+            })
             .plugin_factory({
                 let features = self.features.clone();
                 move || features.clone()
@@ -154,21 +169,6 @@ impl GenerationComponents<'_> {
                 move || PromptTemplatesPlugin::load(prompt_template_options.clone())
             });
         }
-        let builder = match self.memory {
-            Some(memory) => {
-                let plugin: Arc<dyn pi_plugin::Plugin> = memory.clone();
-                builder.try_plugin_arc_factory(move || Ok::<_, String>(Arc::clone(&plugin)))
-            }
-            None => builder,
-        };
-        let mut builder = builder;
-        if features.subagents {
-            builder = builder.try_plugin_factory({
-                let subagents = self.subagents.clone();
-                let subagent_options = subagent_options.clone();
-                move || SubagentsPlugin::load(subagents.clone(), subagent_options.clone())
-            });
-        }
         if features.skills {
             builder = builder.plugin_factory({
                 let skill_options = skill_options.clone();
@@ -185,6 +185,21 @@ impl GenerationComponents<'_> {
                 }
             });
         }
+        let builder = match self.memory {
+            Some(memory) => {
+                let plugin: Arc<dyn pi_plugin::Plugin> = memory.clone();
+                builder.try_plugin_arc_factory(move || Ok::<_, String>(Arc::clone(&plugin)))
+            }
+            None => builder,
+        };
+        let mut builder = builder;
+        if features.subagents {
+            builder = builder.try_plugin_factory({
+                let subagents = self.subagents.clone();
+                let subagent_options = subagent_options.clone();
+                move || SubagentsPlugin::load(subagents.clone(), subagent_options.clone())
+            });
+        }
         if features.session_transfer {
             builder = builder.plugin_factory(SessionTransferPlugin::default);
         }
@@ -197,15 +212,22 @@ impl GenerationComponents<'_> {
         let builder = builder
             .plugin_factory({
                 let auto_resize_images = config.runtime_settings.images.auto_resize;
-                move || ConfiguredReadPlugin::new(auto_resize_images)
+                move || {
+                    ConfiguredReadPlugin::new(auto_resize_images).with_hashline(features.hashline)
+                }
             })
-            .plugin_factory(|| GrepPlugin)
+            .plugin_factory(move || ConfiguredGrepPlugin::new(features.hashline))
             .plugin_factory(|| FindPlugin)
             .plugin_factory(|| LsPlugin)
             .plugin_factory(|| WritePlugin)
             .plugin_factory(|| EditPlugin)
-            .plugin_factory(|| HashlineEditPlugin)
-            .plugin_factory(move || ConfiguredBashPlugin::new(bash_options.clone()));
+            .plugin_factory(move || ConfiguredBashPlugin::new(bash_options.clone()))
+            .plugin_factory(|| PowerShellPlugin);
+        let builder = if features.hashline {
+            builder.plugin_factory(|| HashlineEditPlugin)
+        } else {
+            builder
+        };
         let mut builder = self.native.apply_runtime(builder);
         if let Some(plugin) = self.mcp {
             let plugin = Arc::clone(plugin);
@@ -236,6 +258,7 @@ impl GenerationComponents<'_> {
 
         let mut resources = ResourceLoaderOptions::new(&config.cwd, &config.agent_dir);
         resources.project_trusted = project_trusted;
+        resources.include_hermes_context = memory_enabled;
 
         let runtime = builder
             .agent_options(AgentOptions {
@@ -254,7 +277,9 @@ impl GenerationComponents<'_> {
                         "spawn_agent" | "send_message" | "followup_task" | "wait_agent"
                         | "interrupt_agent" | "list_agents" => features.subagents,
                         "schedule" => features.schedule,
-                        _ => true,
+                        "read" | "bash" | "edit" | "write" => true,
+                        "hashline_edit" => features.hashline,
+                        _ => false,
                     })
                     .map(str::to_string)
                     .collect(),
@@ -442,6 +467,7 @@ mod tests {
         for drop_runtime_first in [false, true] {
             let directory = tempfile::tempdir().unwrap();
             let mut config = app_config(directory.path(), None);
+            config.runtime_settings.features.memory = true;
             config.features = crate::Features {
                 memory: true,
                 ..crate::Features::none()
@@ -567,10 +593,50 @@ mod tests {
     }
 
     #[test]
+    fn tool_search_is_registered_inactive_without_mcp_and_can_be_selected_explicitly() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = app_config(directory.path(), None);
+        config.features = crate::Features::none();
+        for tools in [
+            None,
+            Some(vec!["tool_search".to_string()]),
+            Some(Vec::new()),
+        ] {
+            config.runtime_settings.default_tools = tools.clone();
+            let runtime = build_runtime_with_codex_credentials(
+                &config,
+                false,
+                &NativePlugins::default(),
+                None,
+                None,
+                Some(pi_plugin_openai::CodexCredentials::default()),
+            )
+            .unwrap();
+            assert_eq!(
+                runtime
+                    .tool_specs()
+                    .iter()
+                    .filter(|tool| tool.name == "tool_search")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                runtime.active_tools(),
+                tools.unwrap_or_else(|| ["read", "bash", "edit", "write"]
+                    .map(str::to_string)
+                    .to_vec())
+            );
+            assert!(!additional_active_tools(&runtime, None).contains(&"tool_search".to_string()));
+        }
+    }
+
+    #[test]
     fn product_runtime_registers_schedule_without_creating_storage() {
         let directory = tempfile::tempdir().unwrap();
+        let mut config = app_config(directory.path(), None);
+        config.runtime_settings.features.schedule = true;
         let runtime = build_runtime_with_codex_credentials(
-            &app_config(directory.path(), None),
+            &config,
             false,
             &NativePlugins::default(),
             None,
@@ -591,7 +657,8 @@ mod tests {
     #[test]
     fn product_runtime_registers_the_agent_collaboration_tools() {
         let directory = tempfile::tempdir().unwrap();
-        let config = app_config(directory.path(), None);
+        let mut config = app_config(directory.path(), None);
+        config.runtime_settings.features.subagents = true;
         let runtime = build_runtime_with_codex_credentials(
             &config,
             false,
@@ -649,7 +716,8 @@ mod tests {
             "---\nname: deploy-demo\ndescription: Deploy the demo safely\n---\n\n## Procedure\n1. Run tests\n",
         )
         .unwrap();
-        let config = app_config(directory.path(), None);
+        let mut config = app_config(directory.path(), None);
+        config.runtime_settings.features.memory = true;
         let runtime = build_runtime_with_first_party_memory(&config)
             .await
             .unwrap();
@@ -720,7 +788,8 @@ mod tests {
             r#"{"version": 1, "provider": "local"}"#,
         )
         .unwrap();
-        let config = app_config(directory.path(), None);
+        let mut config = app_config(directory.path(), None);
+        config.runtime_settings.features.memory = true;
 
         let error = match build_runtime_with_first_party_memory(&config).await {
             Ok(_) => panic!("the removed local provider must not be accepted"),
@@ -746,6 +815,7 @@ mod tests {
         )
         .unwrap();
         let mut config = app_config(&agent_dir, None);
+        config.runtime_settings.features.subagents = true;
         config.cwd = project;
 
         let build = |project_trusted| {

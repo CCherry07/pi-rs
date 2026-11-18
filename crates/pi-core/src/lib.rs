@@ -28,8 +28,9 @@ pub use message::{
     ToolResultMessage, UserMessage,
 };
 pub use model::{
-    ModelCost, ModelCostTier, ModelInput, ModelSelection, ModelSpec, ResponseMetadata, StopReason,
-    ThinkingBudgets, ThinkingLevel,
+    ModelCost, ModelCostTier, ModelImageInputLimits, ModelImageResizeOptions, ModelInput,
+    ModelInputLimits, ModelSelection, ModelSpec, ResponseMetadata, StopReason, ThinkingBudgets,
+    ThinkingLevel,
 };
 pub use model_operations::{
     AnyModelSpec, ClassifierAnswer, ClassifierBoolCriteria, ClassifierContext, ClassifierModelSpec,
@@ -37,7 +38,10 @@ pub use model_operations::{
     ModelCallStopReason, ModelType,
 };
 pub use stream::{ContentMetadata, ResponseMetadataPatch, StreamEvent};
-pub use tool::{ToolExecutionMode, ToolResult, ToolSpec, ToolUpdate};
+pub use tool::{
+    ConstrainedSampling, GrammarFormat, ToolExecutionMode, ToolResult, ToolSchemaStrict, ToolSpec,
+    ToolUpdate,
+};
 pub use usage::{Usage, UsageCost};
 pub use workspace::{
     WorkspaceError, WorkspaceRoot, WorkspaceRootId, WorkspaceRootOwnership, WorkspaceSnapshot,

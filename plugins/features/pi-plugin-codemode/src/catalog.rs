@@ -4,6 +4,8 @@ use pi_plugin::ToolInfo;
 use pi_plugin_tool_search::{Bm25Ranker, ToolSearchDocument, create_tool_search_document};
 use serde_json::{Value, json};
 
+use crate::declarations::{identifier, sample_with_name};
+
 pub(crate) struct Catalog {
     tools: Vec<ToolInfo>,
     aliases: HashMap<String, usize>,
@@ -43,7 +45,7 @@ impl Catalog {
                 } else {
                     tool.spec.name.clone()
                 };
-                json!({"name": tool.spec.name, "jsName": js_name, "description": sample(tool)})
+                json!({"name": tool.spec.name, "jsName": js_name, "description": sample_with_name(&tool.spec, &js_name)})
             })
             .collect::<Vec<_>>();
         let declarations = serde_json::to_string(&entries).map_err(|e| e.to_string())?;
@@ -79,7 +81,7 @@ impl Catalog {
             "describeTool" => self
                 .aliases
                 .get(name)
-                .map(|index| Value::String(sample(&self.tools[*index]))),
+                .map(|index| Value::String(self.sample(*index))),
             "describeNamespace" => {
                 let matching = self
                     .tools
@@ -135,9 +137,8 @@ impl Catalog {
                         .iter()
                         .filter_map(|found| self.aliases.get(&found.name))
                         .map(|index| {
-                            let tool = &self.tools[*index];
                             let name = self.js_name(*index);
-                            json!({"name": name, "description": sample(tool)})
+                            json!({"name": name, "description": self.sample(*index)})
                         })
                         .collect(),
                 ))
@@ -158,44 +159,8 @@ impl Catalog {
             tool.spec.name.clone()
         }
     }
-}
 
-fn sample(tool: &ToolInfo) -> String {
-    let mut description = format!(
-        "{}\nCall tools[{}](arguments). Input JSON Schema: {}",
-        tool.spec.description,
-        json!(tool.spec.name),
-        tool.spec.parameters
-    );
-    if !tool.spec.prompt_guidelines.is_empty() {
-        description.push_str("\nGuidelines:\n");
-        description.push_str(&tool.spec.prompt_guidelines.join("\n"));
+    fn sample(&self, index: usize) -> String {
+        sample_with_name(&self.tools[index].spec, &self.js_name(index))
     }
-    if let Some(namespace) = &tool.discovery.namespace {
-        description.push_str(&format!(
-            "\nNamespace: {}. Use await describeNamespace({}) for instructions.",
-            namespace.name,
-            json!(namespace.name)
-        ));
-    }
-    description
-}
-
-fn identifier(name: &str) -> String {
-    let mut value = name
-        .chars()
-        .enumerate()
-        .map(|(index, c)| {
-            if c.is_ascii_alphabetic() || (index > 0 && c.is_ascii_digit()) || c == '_' || c == '$'
-            {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    if value.is_empty() {
-        value.insert(0, '_');
-    }
-    value
 }

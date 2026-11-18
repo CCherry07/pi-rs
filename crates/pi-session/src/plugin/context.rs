@@ -2,7 +2,7 @@ use crate::{AgentSession, AgentSessionReplacement, PiSession, SessionDocument, W
 use async_trait::async_trait;
 use pi_plugin::{
     NoticeLevel, PluginContextError, PluginContextReplacement, PluginContextScope,
-    PresentationMode, UiDialogRequest, UiDialogResponse,
+    PresentationMode, UiDialogRequest, UiDialogResponse, UiNotification,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -32,6 +32,13 @@ pub trait PluginUiBridge: Send + Sync {
     /// Delivers a transient notice through the frontend, including during startup.
     /// Returning false retains the session-event delivery path.
     fn notify(&self, _level: NoticeLevel, _message: String) -> Result<bool, String> {
+        Ok(false)
+    }
+    /// Delivers semantic presentation updates without requiring terminal surfaces.
+    fn notification(&self, notification: UiNotification) -> Result<bool, String> {
+        if let UiNotification::Notify { message, level } = notification {
+            return self.notify(level.unwrap_or(NoticeLevel::Info), message);
+        }
         Ok(false)
     }
     fn surface_snapshot(&self) -> Result<pi_plugin::UiSurfaceSnapshot, String> {

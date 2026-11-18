@@ -24,6 +24,8 @@ struct HookTool {
 impl Tool for HookTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
+            output_schema: None,
+            constrained_sampling: None,
             name: self.name.into(),
             label: self.name.into(),
             description: "Hook test".into(),
@@ -216,6 +218,7 @@ impl Plugin for LifecyclePlugin {
         self.record(&context, "before");
         tokio::task::yield_now().await;
         Ok(BeforeAgentStartPatch {
+            prompt_state: None,
             prompt_contributions: Vec::new(),
             system_prompt: Some(format!("{}\nprivate:{}", event.system_prompt, self.name)),
             ..BeforeAgentStartPatch::default()

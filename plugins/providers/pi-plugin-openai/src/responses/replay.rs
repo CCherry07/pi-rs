@@ -209,7 +209,7 @@ pub(super) fn project(message: &Message, model: Option<&ModelSpec>, position: us
                 ContentBlock::ToolCall(call)=>{
                     let mut parts=call.id.as_str().split('|');let id=parts.next().unwrap_or_default();
                     let mut value=json!({"type":"function_call","call_id":id,"name":call.name,"arguments":call.arguments.to_string()});
-                    if let Some(item)=parts.next().filter(|id|id.starts_with("fc_") && !different_model){value["id"]=json!(item);}
+                    if let Some(item)=parts.next().filter(|id|(id.starts_with("fc_") || (model.is_some() && id.starts_with("ctc_"))) && !different_model){value["id"]=json!(item);}
                     if same && let Some(namespace)=&call.namespace{value["namespace"]=json!(namespace);}
                     Some(value)
                 }

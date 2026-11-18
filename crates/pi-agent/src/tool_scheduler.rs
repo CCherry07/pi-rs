@@ -626,6 +626,7 @@ impl ToolScheduler {
         update: pi_core::ToolUpdate,
     ) {
         let partial_result = ToolResult {
+            structured_content: None,
             content: update.content,
             details: update.details,
             usage: None,
@@ -692,6 +693,8 @@ mod tests {
     impl Tool for RecordingTool {
         fn spec(&self) -> ToolSpec {
             ToolSpec {
+                output_schema: None,
+                constrained_sampling: None,
                 name: self.name.to_string(),
                 label: self.name.to_string(),
                 description: self.name.to_string(),
@@ -736,6 +739,8 @@ mod tests {
     impl Tool for DelayedTool {
         fn spec(&self) -> ToolSpec {
             ToolSpec {
+                output_schema: None,
+                constrained_sampling: None,
                 name: self.name.to_string(),
                 label: self.name.to_string(),
                 description: self.name.to_string(),
@@ -1213,6 +1218,8 @@ mod tests {
         impl Tool for AbortTextTool {
             fn spec(&self) -> ToolSpec {
                 ToolSpec {
+                    output_schema: None,
+                    constrained_sampling: None,
                     name: "abort-text".to_string(),
                     label: "abort-text".to_string(),
                     description: "abort-text".to_string(),

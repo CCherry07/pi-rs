@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     AbortSignal, CommandContextParts, CommandModelsContext, CommandSessionContext,
@@ -12,6 +13,55 @@ pub struct CommandSpec {
     pub name: String,
     pub description: String,
     pub argument_hint: Option<String>,
+}
+
+/// The resource that contributes a command, preserved by generation registries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandSourceInfo {
+    pub path: String,
+    pub source: String,
+    pub scope: CommandSourceScope,
+    pub origin: CommandSourceOrigin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changelog_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CommandSourceScope {
+    User,
+    Project,
+    Temporary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CommandSourceOrigin {
+    Package,
+    TopLevel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CommandSource {
+    Extension,
+    Prompt,
+    Skill,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandMetadata {
+    pub source: CommandSource,
+    pub source_info: CommandSourceInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandCatalogEntry {
+    pub spec: CommandSpec,
+    pub metadata: CommandMetadata,
 }
 
 #[derive(Clone)]
@@ -88,6 +138,11 @@ pub enum CommandError {
 #[async_trait]
 pub trait Command: Send + Sync {
     fn spec(&self) -> CommandSpec;
+
+    /// Resource owners supply provenance; native commands default to their plugin identity.
+    fn metadata(&self) -> Option<CommandMetadata> {
+        None
+    }
 
     async fn execute(
         &self,

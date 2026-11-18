@@ -56,6 +56,8 @@ impl Tool for ToolSearchTool {
 
     fn spec(&self) -> ToolSpec {
         ToolSpec {
+            output_schema: None,
+            constrained_sampling: None,
             name: TOOL_SEARCH_TOOL_NAME.into(),
             label: TOOL_SEARCH_TOOL_NAME.into(),
             description: TOOL_SEARCH_DESCRIPTION.into(),
@@ -126,6 +128,7 @@ impl Tool for ToolSearchTool {
         };
         context.signal().check().map_err(|_| ToolError::Aborted)?;
         Ok(ToolResult {
+            structured_content: None,
             details: Some(json!({"loaded": loaded})),
             added_tool_names: Some(loaded),
             ..ToolResult::text(text)

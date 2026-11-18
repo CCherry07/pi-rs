@@ -402,25 +402,67 @@ async fn stream_messages(
     signal: AbortSignal,
     mode: AnthropicMode,
 ) -> Result<ProviderStream, ProviderError> {
-    let payload = context
-        .before_provider_request(&signal, request_body(&request, mode))
-        .await?;
-    let response = post_json_with_provider_hooks(
-        transport.as_ref(),
-        &context,
-        endpoint,
-        headers,
-        &payload,
-        signal.clone(),
-    )
-    .await
-    .map_err(map_transport_error)?;
-    if !(200..300).contains(&response.status) {
+    let mut request = request;
+    let mut disabled = pi_provider::has_exceeded_strict_tool_limits(request.session_id.as_deref());
+    if disabled {
+        pi_provider::disable_preferred_strict_tools(&mut request.tools);
+    }
+    let mut diagnostic = None;
+    let response = loop {
+        let body = request_body(&request, mode)?;
+        let has_preferred = request
+            .tools
+            .iter()
+            .filter(|tool| pi_provider::prefers_json_schema_sampling(tool))
+            .any(|tool| {
+                let name = messages::outbound_tool_name(&tool.name, mode);
+                body["tools"].as_array().is_some_and(|tools| {
+                    tools
+                        .iter()
+                        .any(|entry| entry["name"] == name && entry["strict"] == true)
+                })
+            });
+        let payload = context.before_provider_request(&signal, body).await?;
+        let response = post_json_with_provider_hooks(
+            transport.as_ref(),
+            &context,
+            endpoint,
+            headers.clone(),
+            &payload,
+            signal.clone(),
+        )
+        .await
+        .map_err(map_transport_error)?;
+        if (200..300).contains(&response.status) {
+            break response;
+        }
+        let status = response.status;
         let message = read_error_response(response)
             .await
             .map_err(map_transport_error)?;
-        return Err(ProviderError::Failure(message));
-    }
+        let invalid_request = message
+            .split_once('\n')
+            .and_then(|(_, body)| serde_json::from_str::<serde_json::Value>(body).ok())
+            .is_some_and(|body| body["error"]["type"] == "invalid_request_error");
+        if disabled
+            || !has_preferred
+            || signal.is_aborted()
+            || status != 400
+            || !invalid_request
+            || !pi_provider::is_strict_tool_limit_error(&message)
+        {
+            return Err(ProviderError::Failure(message));
+        }
+        disabled = true;
+        pi_provider::mark_strict_tool_limits_exceeded(request.session_id.as_deref());
+        pi_provider::disable_preferred_strict_tools(&mut request.tools);
+        diagnostic = Some(serde_json::json!({
+            "type": "anthropic_strict_tools_fallback",
+            "timestamp": pi_utils::time::unix_timestamp_ms(),
+            "error": {"message": message},
+            "details": {"reason": "strict_tool_limits_exceeded"}
+        }));
+    };
     if response
         .content_type
         .as_deref()
@@ -431,13 +473,16 @@ async fn stream_messages(
             response.content_type.as_deref().unwrap_or("<missing>")
         )));
     }
-    Ok(messages_stream(
-        provider_id,
-        model,
-        ANTHROPIC_MESSAGES_API,
-        response.body,
-        signal,
-        mode,
+    Ok(pi_provider::with_provider_diagnostic(
+        messages_stream(
+            provider_id,
+            model,
+            ANTHROPIC_MESSAGES_API,
+            response.body,
+            signal,
+            mode,
+        ),
+        diagnostic,
     ))
 }
 
@@ -531,6 +576,135 @@ mod tests {
                 headers: Vec::new(),
                 body: Box::pin(futures::stream::empty()),
             })
+        }
+    }
+
+    struct StrictLimitTransport {
+        requests: Mutex<Vec<Value>>,
+        error_type: &'static str,
+    }
+
+    #[async_trait]
+    impl HttpTransport for StrictLimitTransport {
+        async fn post_json(
+            &self,
+            _: &str,
+            _: &BTreeMap<String, String>,
+            body: &Value,
+            _: AbortSignal,
+        ) -> Result<HttpResponse, TransportError> {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(body.clone());
+            let rejected = requests.len() == 1;
+            let body = if rejected {
+                serde_json::json!({"error":{"type":self.error_type,"message":"Too many strict tools (21)"}}).to_string().into_bytes()
+            } else {
+                Vec::new()
+            };
+            Ok(HttpResponse {
+                status: if rejected { 400 } else { 200 },
+                headers: vec![],
+                content_type: Some(
+                    if rejected {
+                        "application/json"
+                    } else {
+                        "text/event-stream"
+                    }
+                    .into(),
+                ),
+                body: Box::pin(futures::stream::iter([Ok(body)])),
+            })
+        }
+    }
+
+    fn strict_request(
+        session: Option<&str>,
+        policies: &[pi_core::ToolSchemaStrict],
+    ) -> ProviderRequest {
+        let mut model = ModelSpec::new("anthropic", "claude", "Claude", ANTHROPIC_MESSAGES_API);
+        model.compat = Some(serde_json::json!({"supportsStrictTools":true}));
+        ProviderRequest {
+            model:model.id.clone(),model_spec:Some(model),system_prompt:String::new(),messages:vec![],
+            tools:policies.iter().enumerate().map(|(index, strict)| pi_core::ToolSpec {
+                name:format!("tool_{index}"),label:String::new(),description:String::new(),
+                parameters:serde_json::json!({"type":"object","properties":{"optional":{"type":"string"}}}),
+                output_schema:None,constrained_sampling:Some(pi_core::ConstrainedSampling::JsonSchema {strict:*strict}),
+                execution_mode:pi_core::ToolExecutionMode::Parallel,prompt_snippet:None,prompt_guidelines:vec![],
+            }).collect(),thinking_level:ThinkingLevel::Off,thinking_budgets:None,max_output_tokens:Some(100),headers:BTreeMap::new(),sampling_params:BTreeMap::new(),session_id:session.map(str::to_string),
+        }
+    }
+
+    #[tokio::test]
+    async fn strict_limit_retry_preserves_required_tools_and_session_affinity() {
+        use futures::StreamExt;
+        use pi_core::ToolSchemaStrict::{Prefer, Require};
+        let session = "anthropic-preferred-strict-fallback-test";
+        pi_provider::clear_strict_tool_limits(Some(session));
+        let transport = Arc::new(StrictLimitTransport {
+            requests: Mutex::new(vec![]),
+            error_type: "invalid_request_error",
+        });
+        let provider = AnthropicProvider::with_transport(
+            Some(AnthropicCredential::ApiKey("fixture".into())),
+            transport.clone(),
+        );
+        let request = strict_request(Some(session), &[Prefer, Require]);
+        for first in [true, false] {
+            let (_, signal) = AbortHandle::new();
+            let context = ProviderCallContext::without_plugins(
+                "/",
+                "anthropic".into(),
+                request.model.clone(),
+            );
+            let mut stream = provider
+                .stream(request.clone(), context, signal)
+                .await
+                .unwrap();
+            let event = stream.next().await.unwrap().unwrap();
+            let pi_core::StreamEvent::Start { metadata } = event else {
+                panic!("missing start")
+            };
+            assert_eq!(metadata.diagnostics.is_some(), first);
+        }
+        let bodies = transport.requests.lock().unwrap();
+        assert_eq!(bodies.len(), 3);
+        assert_eq!(bodies[0]["tools"][0]["strict"], true);
+        for body in &bodies[1..] {
+            assert!(body["tools"][0].get("strict").is_none());
+            assert!(
+                body["tools"][0]["input_schema"]["properties"]["optional"]
+                    .get("anyOf")
+                    .is_none()
+            );
+            assert_eq!(body["tools"][1]["strict"], true);
+        }
+        pi_provider::clear_strict_tool_limits(Some(session));
+    }
+
+    #[tokio::test]
+    async fn required_only_or_unrelated_errors_never_downgrade() {
+        use pi_core::ToolSchemaStrict::{Prefer, Require};
+        for (policy, error_type) in [
+            (Require, "invalid_request_error"),
+            (Prefer, "authentication_error"),
+        ] {
+            let transport = Arc::new(StrictLimitTransport {
+                requests: Mutex::new(vec![]),
+                error_type,
+            });
+            let provider = AnthropicProvider::with_transport(
+                Some(AnthropicCredential::ApiKey("fixture".into())),
+                transport.clone(),
+            );
+            let request = strict_request(None, &[policy]);
+            let context = ProviderCallContext::without_plugins(
+                "/",
+                "anthropic".into(),
+                request.model.clone(),
+            );
+            let (_, signal) = AbortHandle::new();
+            assert!(provider.stream(request, context, signal).await.is_err());
+            assert_eq!(transport.requests.lock().unwrap().len(), 1);
         }
     }
 

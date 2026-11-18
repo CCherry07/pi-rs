@@ -13,6 +13,7 @@ pub struct RegistriesBuilder {
     tools: HashMap<String, (PluginId, Arc<dyn Tool>)>,
     tool_discovery: HashMap<String, crate::ToolDiscovery>,
     commands: HashMap<String, (PluginId, Arc<dyn Command>)>,
+    command_order: Vec<String>,
     providers: HashMap<ProviderId, (PluginId, Arc<dyn Provider>)>,
     provider_overrides: HashSet<ProviderId>,
     models: HashMap<(ProviderId, ModelId), (PluginId, ModelSpec)>,
@@ -51,6 +52,7 @@ impl RegistriesBuilder {
         if self.commands.contains_key(&name) {
             return Err(CoreError::DuplicateCommand(name));
         }
+        self.command_order.push(name.clone());
         self.commands.insert(name, (owner, command));
         Ok(())
     }
@@ -213,6 +215,7 @@ impl RegistriesBuilder {
             tools: self.tools,
             tool_discovery: self.tool_discovery,
             commands: self.commands,
+            command_order: self.command_order,
             models: ModelRuntime::new(self.providers, self.models, self.typed_models),
         }
     }
@@ -222,6 +225,7 @@ pub struct FrozenRegistries {
     tools: HashMap<String, (PluginId, Arc<dyn Tool>)>,
     tool_discovery: HashMap<String, crate::ToolDiscovery>,
     commands: HashMap<String, (PluginId, Arc<dyn Command>)>,
+    command_order: Vec<String>,
     models: ModelRuntime,
 }
 
@@ -246,6 +250,7 @@ impl FrozenRegistries {
                 .map(|(name, discovery)| (name.clone(), discovery.clone()))
                 .collect(),
             commands: HashMap::new(),
+            command_order: Vec::new(),
             models: self.models.clone(),
         })
     }
@@ -272,6 +277,7 @@ impl FrozenRegistries {
                 .map(|(name, value)| (name.clone(), value.clone()))
                 .collect(),
             commands: self.commands.clone(),
+            command_order: self.command_order.clone(),
             models: self.models.clone(),
         }
     }
@@ -301,6 +307,7 @@ impl FrozenRegistries {
                 .map(|(name, discovery)| (name.clone(), discovery.clone()))
                 .collect(),
             commands: HashMap::new(),
+            command_order: Vec::new(),
             models: self.models.clone(),
         }
     }
@@ -319,6 +326,29 @@ impl FrozenRegistries {
             .collect::<Vec<_>>();
         specs.sort_by(|left, right| left.name.cmp(&right.name));
         specs
+    }
+
+    pub fn command_catalog(&self) -> Vec<crate::CommandCatalogEntry> {
+        self.command_order
+            .iter()
+            .filter_map(|name| self.commands.get(name))
+            .map(|(owner, command)| crate::CommandCatalogEntry {
+                spec: command.spec(),
+                metadata: command
+                    .metadata()
+                    .unwrap_or_else(|| crate::CommandMetadata {
+                        source: crate::CommandSource::Extension,
+                        source_info: crate::CommandSourceInfo {
+                            path: format!("builtin:{owner}"),
+                            source: "builtin".to_string(),
+                            scope: crate::CommandSourceScope::Temporary,
+                            origin: crate::CommandSourceOrigin::TopLevel,
+                            base_dir: None,
+                            changelog_path: None,
+                        },
+                    }),
+            })
+            .collect()
     }
 
     /// Source metadata without cloning schema bodies.
@@ -452,6 +482,51 @@ impl FrozenRegistries {
                     .ok_or_else(|| CoreError::ToolNotFound(name.clone()))
             })
             .collect()
+    }
+
+    /// Build a request-local declaration set from immutable original tool metadata.
+    pub fn prepare_tool_loadout(&self, active: &[String]) -> Result<crate::PreparedToolLoadout> {
+        let specs = self.tool_specs(active)?;
+        let loadout = crate::ToolLoadout {
+            declared: specs
+                .iter()
+                .map(|spec| crate::ToolInfo {
+                    spec: spec.clone(),
+                    discovery: self.tool_discovery(&spec.name).cloned().unwrap_or_default(),
+                })
+                .collect(),
+            callable: self.nested_tools(active),
+        };
+        let mut descriptions = std::collections::BTreeMap::new();
+        let mut hidden_tools = Vec::new();
+        for name in active {
+            let changes = self
+                .tool(name)
+                .ok_or_else(|| CoreError::ToolNotFound(name.clone()))?
+                .prepare_loadout(&loadout);
+            descriptions.extend(changes.descriptions);
+            for name in changes.hidden_declarations {
+                if active.contains(&name) && !hidden_tools.contains(&name) {
+                    hidden_tools.push(name);
+                }
+            }
+        }
+        let tools = specs
+            .into_iter()
+            .filter_map(|mut spec| {
+                if hidden_tools.contains(&spec.name) {
+                    return None;
+                }
+                if let Some(description) = descriptions.remove(&spec.name) {
+                    spec.description = description;
+                }
+                Some(spec)
+            })
+            .collect();
+        Ok(crate::PreparedToolLoadout {
+            tools,
+            hidden_tools,
+        })
     }
 
     pub fn tool_owner(&self, name: &str) -> Option<&PluginId> {

@@ -22,3 +22,7 @@ rustix = { version = "1", features = ["event"] }
 
 [dev-dependencies]
 tempfile = "3.21.0"
+pi-runtime.workspace = true
+pi-test-support.workspace = true
+pi-plugin-prompts.workspace = true
+pi-plugin-skills.workspace = true

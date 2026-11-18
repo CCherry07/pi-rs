@@ -62,6 +62,8 @@ struct JsonSubmissionTool {
 impl Tool for JsonSubmissionTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
+            output_schema: None,
+            constrained_sampling: None,
             name: self.name.clone(),
             label: self.label.clone(),
             description: self.description.clone(),
@@ -80,6 +82,7 @@ impl Tool for JsonSubmissionTool {
         _updates: ToolUpdateSink,
     ) -> Result<ToolResult, ToolError> {
         Ok(ToolResult {
+            structured_content: None,
             details: Some(input),
             terminate: true,
             ..ToolResult::text("Structured eval result submitted.")

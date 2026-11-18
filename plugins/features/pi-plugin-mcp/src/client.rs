@@ -35,7 +35,7 @@ use crate::client_handler::McpClientHandler;
 use crate::directory::render_servers_section;
 use crate::naming::{identifier_component, qualified_tool_name};
 use crate::policy::{McpExposure, McpServerPolicy};
-use crate::resources::{RESOURCE_TOOL_NAMES, create_resource_tools};
+use crate::resources::create_resource_tools;
 use crate::result::{normalize_input_schema, project_result_with_resources};
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
@@ -312,7 +312,17 @@ impl McpToolSet {
 
     /// Returns a fresh plugin wrapper backed by the connected client pool.
     pub fn plugin(&self) -> Arc<dyn Plugin> {
-        Arc::new(McpToolPlugin { pool: self.clone() })
+        self.plugin_with_tool_search_registration(true)
+    }
+
+    pub(crate) fn plugin_with_tool_search_registration(
+        &self,
+        register_tool_search: bool,
+    ) -> Arc<dyn Plugin> {
+        Arc::new(McpToolPlugin {
+            pool: self.clone(),
+            register_tool_search,
+        })
     }
 
     /// Descriptors of exposed server tools. Shared resource tools are registered by the plugin.
@@ -408,63 +418,34 @@ impl McpToolSet {
     }
 
     pub(crate) fn prompt_patch(&self, event: BeforeAgentStartEvent) -> BeforeAgentStartPatch {
-        let active: HashSet<_> = event.active_tools.iter().map(String::as_str).collect();
         let mut prompt = event.system_prompt;
         let base_length = prompt.len();
-        let mut changed = false;
-        if active.contains("tool_search") || active.contains("codemode") {
-            let section = render_servers_section(
-                self.inner
-                    .servers
-                    .iter()
-                    .filter(|server| {
-                        (active.contains("tool_search") && server.policy.uses_deferred())
-                            || (active.contains("codemode")
-                                && (server.policy.uses_codemode() || server.policy.uses_deferred()))
-                    })
-                    .map(|server| {
-                        (
-                            server.name.as_str(),
-                            server.policy.description.as_deref(),
-                            server.instructions.as_deref(),
-                            if server.policy.uses_codemode() || !active.contains("tool_search") {
-                                "codemode"
-                            } else {
-                                "tool_search"
-                            },
-                        )
-                    }),
-            );
-            if let Some(section) = section {
-                prompt.push_str(&format!("\n\n<mcp_servers>\n{section}\n</mcp_servers>"));
-                changed = true;
-            }
-        }
-        for server in &self.inner.servers {
-            let summary = server
-                .policy
-                .description
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .and_then(|s| s.lines().next());
-            if summary.is_none() {
-                continue;
-            }
-            let has_active_tools = self.inner.tools.iter().any(|tool| {
-                Arc::ptr_eq(&tool.server, server) && active.contains(tool.descriptor.name.as_str())
-            });
-            let has_active_resources = server.resources_visible()
-                && RESOURCE_TOOL_NAMES.iter().any(|name| active.contains(name));
-            if !has_active_tools && !has_active_resources {
-                continue;
-            }
-            if let Some(summary) = summary {
-                prompt.push_str(&format!("\n\nMCP server {}: {summary}", server.name));
-            }
-            changed = true;
+        // Only enabled servers enter the pool. Like Pi, directory reach follows their
+        // configured exposure, independently of the current active entry points.
+        let section = render_servers_section(
+            self.inner
+                .servers
+                .iter()
+                .filter(|server| server.policy.uses_codemode() || server.policy.uses_deferred())
+                .map(|server| {
+                    (
+                        server.name.as_str(),
+                        server.policy.description.as_deref(),
+                        server.instructions.as_deref(),
+                        if server.policy.uses_codemode() {
+                            "codemode"
+                        } else {
+                            "tool_search"
+                        },
+                    )
+                }),
+        );
+        let changed = section.is_some();
+        if let Some(section) = section {
+            prompt.push_str(&format!("\n\n<mcp_servers>\n{section}\n</mcp_servers>"));
         }
         BeforeAgentStartPatch {
+            prompt_state: None,
             prompt_contributions: if changed {
                 vec![pi_core::PromptContribution {
                     category: pi_core::ContextCategory::McpTools,
@@ -690,6 +671,7 @@ fn http_headers(
 
 struct McpToolPlugin {
     pool: McpToolSet,
+    register_tool_search: bool,
 }
 
 #[pi_plugin::plugin]
@@ -723,7 +705,7 @@ impl Plugin for McpToolPlugin {
         for tool in &self.pool.inner.resource_tools {
             context.register_tool_with_discovery(tool.clone(), self.pool.resource_discovery())?;
         }
-        if self.pool.needs_tool_search() {
+        if self.register_tool_search && self.pool.needs_tool_search() {
             context.register_tool(pi_plugin_tool_search::tool_search_tool())?;
         }
         Ok(())
@@ -742,6 +724,7 @@ struct McpTool {
     server: Arc<ConnectedServer>,
     remote_name: String,
     descriptor: McpToolDescriptor,
+    output_schema: Value,
     execution_mode: ToolExecutionMode,
 }
 
@@ -759,7 +742,7 @@ impl McpTool {
             ToolExecutionMode::Sequential
         };
         let remote_name = remote.name.into_owned();
-        let label = remote
+        let title = remote
             .title
             .or_else(|| {
                 remote
@@ -767,11 +750,19 @@ impl McpTool {
                     .as_ref()
                     .and_then(|value| value.title.clone())
             })
-            .unwrap_or_else(|| remote_name.clone());
+            .filter(|title| !title.is_empty());
+        let label = format!("{}/{remote_name}", server.name);
         let description = remote
             .description
-            .map(|description| description.into_owned())
-            .unwrap_or_else(|| format!("MCP tool {}/{}", server.name, remote_name));
+            .map(|description| description.trim().to_string())
+            .filter(|description| !description.is_empty())
+            .or(title)
+            .unwrap_or_else(|| format!("MCP tool {remote_name} from server {}", server.name));
+        let output_schema = crate::output_schema::result_schema(
+            remote
+                .output_schema
+                .map(|schema| Value::Object((*schema).clone())),
+        );
         let parameters = normalize_input_schema(Value::Object((*remote.input_schema).clone()));
         Self {
             descriptor: McpToolDescriptor {
@@ -784,6 +775,7 @@ impl McpTool {
             },
             server,
             remote_name,
+            output_schema,
             execution_mode,
         }
     }
@@ -792,15 +784,14 @@ impl McpTool {
 #[async_trait]
 impl Tool for McpTool {
     fn structured_output(&self, result: &ToolResult) -> Option<Value> {
-        // Scripts receive the complete, untruncated CallToolResult, including
-        // isError. Transport metadata remains private to the Rust result adapter.
-        let mut payload = result.details.as_ref()?.as_object()?.clone();
-        payload.remove("_meta");
-        Some(Value::Object(payload))
+        // Respect hook replacement/invalidation of the typed CallToolResult.
+        result.structured_content.clone()
     }
 
     fn spec(&self) -> ToolSpec {
         ToolSpec {
+            output_schema: Some(self.output_schema.clone()),
+            constrained_sampling: None,
             name: self.descriptor.name.clone(),
             label: self.descriptor.label.clone(),
             description: self.descriptor.description.clone(),
@@ -1065,6 +1056,7 @@ mod tests {
                     std::path::Path::new("/tmp"),
                     &signal,
                     BeforeAgentStartEvent {
+                        prompt_state: None,
                         system_prompt: "base".into(),
                         input_messages: vec![],
                         active_tools: if enabled {
@@ -1078,7 +1070,12 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(patch.system_prompt.as_deref(), Some("base"));
+            assert_eq!(
+                patch.system_prompt.as_deref(),
+                Some(
+                    "base\n\n<mcp_servers>\nMCP servers whose tools are not declared to you. Call the tools of `codemode` servers from codemode scripts.\n- mcp__fixture_server (codemode): Echo server usage guidance.\n</mcp_servers>"
+                )
+            );
         }
         connected
             .service

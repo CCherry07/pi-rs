@@ -1,37 +1,21 @@
 #![forbid(unsafe_code)]
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use pi_core::{PluginId, ToolCallId, ToolResult, ToolSpec};
 use pi_plugin::{Plugin, RegisterContext, Tool, ToolContext, ToolError, ToolUpdateSink};
 use pi_tool_support::with_prompt;
 use pi_tool_support::{
-    MAX_WRITE_BYTES, execution, invalid, require_str, resolve_to_cwd, snapshot_and_atomic_replace,
-    spec,
+    execution, invalid, require_str, resolve_to_cwd, spec, with_file_mutation_queue,
 };
-use serde::Deserialize;
 use serde_json::{Value, json};
 use similar::ChangeTag;
-use tokio::sync::Mutex as AsyncMutex;
-use unicode_normalization::UnicodeNormalization as _;
+mod replacement;
+use replacement::{EditInput, apply_edits, apply_to_original, normalize_lf};
 
 pub struct EditPlugin;
 pub struct EditTool;
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct EditInput {
-    old_text: String,
-    new_text: String,
-}
-
-struct Replacement {
-    index: usize,
-    length: usize,
-    new_text: String,
-}
 
 #[pi_plugin::plugin]
 impl Plugin for EditPlugin {
@@ -46,25 +30,30 @@ impl Plugin for EditPlugin {
 #[async_trait]
 impl Tool for EditTool {
     fn spec(&self) -> ToolSpec {
-        with_prompt(
+        let mut tool = with_prompt(
             spec(
                 "edit",
-                "Edit one file with one or more unique, non-overlapping text replacements matched against the original file.",
+                "Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.",
                 json!({
                     "type":"object","properties":{
                     "path":{"type":"string","description":"Path to the file to edit (relative or absolute)"},
-                        "edits":{"type":"array","items":{"type":"object","properties":{"oldText":{"type":"string"},"newText":{"type":"string"}},"required":["oldText","newText"],"additionalProperties":false}}
-                    },"required":["path"],"additionalProperties":false
+                        "edits":{"type":"array","description":"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.","items":{"type":"object","properties":{
+                            "oldText":{"type":"string","description":"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call."},
+                            "newText":{"type":"string","description":"Replacement text for this targeted edit."}
+                        },"required":["oldText","newText"]}}
+                    },"required":["path","edits"]
                 }),
             ),
             "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
             [
-                "Use edit for precise changes (edits[].oldText must match exactly)",
-                "When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls",
-                "Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit.",
-                "Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.",
+                "Use edit for targeted changes. Batch changes to one file in a single call.",
+                "Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions.",
             ],
-        )
+        );
+        tool.constrained_sampling = Some(pi_core::ConstrainedSampling::JsonSchema {
+            strict: pi_core::ToolSchemaStrict::Prefer,
+        });
+        tool
     }
 
     async fn prepare_arguments(
@@ -72,34 +61,36 @@ impl Tool for EditTool {
         _context: &ToolContext,
         mut input: Value,
     ) -> Result<Value, ToolError> {
-        let object = input
-            .as_object_mut()
-            .ok_or_else(|| invalid("arguments must be an object"))?;
-        if let Some(Value::String(raw)) = object.get("edits").cloned()
-            && let Ok(parsed) = serde_json::from_str::<Value>(&raw)
-        {
-            object.insert(
-                "edits".to_string(),
-                if parsed.is_object() {
-                    Value::Array(vec![parsed])
-                } else {
-                    parsed
-                },
-            );
-        }
-        if object.get("edits").is_some_and(Value::is_object) {
+        let Some(object) = input.as_object_mut() else {
+            return Ok(input);
+        };
+        let single = |value: &Value| {
+            value.get("oldText").is_some_and(Value::is_string)
+                && value.get("newText").is_some_and(Value::is_string)
+        };
+        if let Some(Value::String(raw)) = object.get("edits") {
+            if let Ok(parsed) = serde_json::from_str::<Value>(raw) {
+                if parsed.is_array() {
+                    object.insert("edits".into(), parsed);
+                } else if single(&parsed) {
+                    object.insert("edits".into(), Value::Array(vec![parsed]));
+                }
+            }
+        } else if object.get("edits").is_some_and(single) {
             let edit = object.remove("edits").unwrap();
-            object.insert("edits".to_string(), Value::Array(vec![edit]));
+            object.insert("edits".into(), Value::Array(vec![edit]));
         }
-        let has_explicit_edits = object.contains_key("edits");
-        let legacy = (object.remove("oldText"), object.remove("newText"));
-        if !has_explicit_edits && let (Some(old), Some(new)) = legacy {
-            object
-                .entry("edits".to_string())
-                .or_insert_with(|| Value::Array(Vec::new()))
-                .as_array_mut()
-                .ok_or_else(|| invalid("edits must be an array"))?
-                .push(json!({"oldText":old,"newText":new}));
+        if object.get("oldText").is_some_and(Value::is_string)
+            && object.get("newText").is_some_and(Value::is_string)
+        {
+            let old = object.remove("oldText").unwrap();
+            let new = object.remove("newText").unwrap();
+            let mut edits = match object.remove("edits") {
+                Some(Value::Array(edits)) => edits,
+                _ => Vec::new(),
+            };
+            edits.push(json!({"oldText":old,"newText":new}));
+            object.insert("edits".into(), Value::Array(edits));
         }
         Ok(input)
     }
@@ -111,212 +102,67 @@ impl Tool for EditTool {
         input: Value,
         _updates: ToolUpdateSink,
     ) -> Result<ToolResult, ToolError> {
-        context.signal().check().map_err(|_| ToolError::Aborted)?;
-        let requested = require_str(&input, "path")?;
-        let edits: Vec<EditInput> = if let Some(edits) = input.get("edits") {
-            let edits = if let Some(raw) = edits.as_str() {
-                serde_json::from_str(raw).map_err(|e| invalid(e.to_string()))?
-            } else if edits.is_object() {
-                Value::Array(vec![edits.clone()])
-            } else {
-                edits.clone()
-            };
-            serde_json::from_value(edits).map_err(|e| invalid(e.to_string()))?
-        } else {
-            vec![EditInput {
-                old_text: require_str(&input, "oldText")?.to_string(),
-                new_text: require_str(&input, "newText")?.to_string(),
-            }]
-        };
-        if edits.is_empty() {
-            return Err(invalid("edits must contain at least one replacement"));
-        }
-        if edits.iter().any(|edit| edit.old_text.is_empty()) {
-            return Err(invalid("oldText must not be empty"));
-        }
-        if edits
-            .iter()
-            .any(|edit| edit.new_text.len() > MAX_WRITE_BYTES)
-        {
-            return Err(invalid("newText is too large"));
-        }
-        let path = resolve_to_cwd(context.cwd(), requested)?;
-        let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-        let queue = file_queue(&key);
-        let _guard = tokio::select! {biased;()=context.signal().wait()=>return Err(ToolError::Aborted),guard=queue.lock()=>guard};
-        context.signal().check().map_err(|_| ToolError::Aborted)?;
-        let metadata = tokio::fs::symlink_metadata(&path)
-            .await
-            .map_err(|e| execution(format!("Could not edit file: {requested}. {e}.")))?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(execution("target must be a regular non-symlink file"));
-        }
-        if metadata.len() > MAX_WRITE_BYTES as u64 {
-            return Err(execution(format!("file exceeds {MAX_WRITE_BYTES} bytes")));
-        }
-        let original = tokio::fs::read_to_string(&path)
-            .await
-            .map_err(|e| execution(format!("Could not edit file: {requested}. {e}.")))?;
-        context.signal().check().map_err(|_| ToolError::Aborted)?;
-        let (bom, content) = original
-            .strip_prefix('\u{feff}')
-            .map_or(("", original.as_str()), |text| ("\u{feff}", text));
-        let ending = if content
-            .find("\r\n")
-            .is_some_and(|crlf| content.find('\n').is_some_and(|lf| crlf <= lf))
-        {
-            "\r\n"
-        } else {
-            "\n"
-        };
-        let base = normalize_lf(content);
-        let (diff_base, updated) = apply_edits(&base, &edits, requested)?;
-        context.signal().check().map_err(|_| ToolError::Aborted)?;
-        let restored = format!(
-            "{bom}{}",
-            if ending == "\r\n" {
-                updated.replace('\n', "\r\n")
-            } else {
-                updated.clone()
-            }
-        );
-        if restored.len() > MAX_WRITE_BYTES {
-            return Err(execution(format!(
-                "edited file exceeds {MAX_WRITE_BYTES} bytes"
-            )));
-        }
-        let (diff, first_changed_line) = generate_diff(&diff_base, &updated, 4);
-        let patch = generate_patch(requested, &diff_base, &updated, 4);
-        let expected = original.into_bytes();
-        let bytes = restored.into_bytes();
-        let path_copy = path.clone();
-        tokio::task::spawn_blocking(move || {
-            snapshot_and_atomic_replace(&path_copy, &expected, &bytes)
+        let input = self.prepare_arguments(&context, input).await?;
+        let requested = require_str(&input, "path")?.to_string();
+        let edits: Vec<EditInput> = input
+            .get("edits")
+            .filter(|v| v.is_array() && !v.as_array().unwrap().is_empty())
+            .ok_or_else(|| {
+                execution(
+                    "Edit tool input is invalid. edits must contain at least one replacement.",
+                )
+            })
+            .and_then(|edits| {
+                serde_json::from_value(edits.clone()).map_err(|error| invalid(error.to_string()))
+            })?;
+        let path = resolve_to_cwd(context.cwd(), &requested)?;
+        with_file_mutation_queue(path.clone(), async move {
+            context.signal().check().map_err(|_| ToolError::Aborted)?;
+            let metadata = tokio::fs::metadata(&path).await;
+            context.signal().check().map_err(|_| ToolError::Aborted)?;
+            metadata.map_err(|error| {
+                execution(format!(
+                    "Could not edit file: {requested}. {}.",
+                    file_access_error(&error)
+                ))
+            })?;
+            let bytes = tokio::fs::read(&path).await;
+            context.signal().check().map_err(|_| ToolError::Aborted)?;
+            let bytes = bytes.map_err(|error| execution(error.to_string()))?;
+            let original = String::from_utf8_lossy(&bytes);
+            let (bom, content) = original
+                .strip_prefix('\u{feff}')
+                .map_or(("", original.as_ref()), |text| ("\u{feff}", text));
+            let base = normalize_lf(content);
+            let applied = apply_edits(&base, &edits, &requested)?;
+            let restored = format!("{bom}{}", apply_to_original(content, &applied.replacements));
+            let (diff, first_changed_line) = generate_diff(&base, &applied.new_content, 4);
+            let patch = generate_patch(&requested, &base, &applied.new_content, 4);
+            context.signal().check().map_err(|_| ToolError::Aborted)?;
+            // Direct writes preserve symlink targets and hard links, like Pi.
+            let written = tokio::fs::write(&path, restored.as_bytes()).await;
+            context.signal().check().map_err(|_| ToolError::Aborted)?;
+            written.map_err(|error| execution(error.to_string()))?;
+            let mut result = ToolResult::text(format!(
+                "Successfully replaced {} block(s) in {requested}.",
+                edits.len()
+            ));
+            result.details =
+                Some(json!({"diff":diff,"patch":patch,"firstChangedLine":first_changed_line}));
+            Ok(result)
         })
         .await
-        .map_err(|e| execution(e.to_string()))?
-        .map_err(|e| execution(e.to_string()))?;
-        context.signal().check().map_err(|_| ToolError::Aborted)?;
-        let mut result = ToolResult::text(format!(
-            "Successfully replaced {} block(s) in {requested}.",
-            edits.len()
-        ));
-        result.details =
-            Some(json!({"diff":diff,"patch":patch,"firstChangedLine":first_changed_line}));
-        Ok(result)
     }
 }
 
-fn file_queue(path: &std::path::Path) -> Arc<AsyncMutex<()>> {
-    static QUEUES: OnceLock<Mutex<HashMap<std::path::PathBuf, Weak<AsyncMutex<()>>>>> =
-        OnceLock::new();
-    let mut queues = QUEUES
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(queue) = queues.get(path).and_then(Weak::upgrade) {
-        return queue;
-    }
-    let queue = Arc::new(AsyncMutex::new(()));
-    queues.insert(path.to_path_buf(), Arc::downgrade(&queue));
-    queue
-}
-fn normalize_lf(text: &str) -> String {
-    text.replace("\r\n", "\n").replace('\r', "\n")
-}
-fn fuzzy(text: &str) -> String {
-    text.nfkc()
-        .collect::<String>()
-        .split('\n')
-        .map(str::trim_end)
-        .collect::<Vec<_>>()
-        .join("\n")
-        .replace(['\u{2018}', '\u{2019}', '\u{201a}', '\u{201b}'], "'")
-        .replace(['\u{201c}', '\u{201d}', '\u{201e}', '\u{201f}'], "\"")
-        .replace(
-            [
-                '\u{2010}', '\u{2011}', '\u{2012}', '\u{2013}', '\u{2014}', '\u{2015}', '\u{2212}',
-            ],
-            "-",
-        )
-}
-fn occurrences(haystack: &str, needle: &str) -> usize {
-    if needle.is_empty() {
-        0
-    } else {
-        haystack.match_indices(needle).count()
-    }
-}
-fn apply_edits(
-    content: &str,
-    edits: &[EditInput],
-    path: &str,
-) -> Result<(String, String), ToolError> {
-    let normalized = edits
-        .iter()
-        .map(|e| EditInput {
-            old_text: normalize_lf(&e.old_text),
-            new_text: normalize_lf(&e.new_text),
-        })
-        .collect::<Vec<_>>();
-    let use_fuzzy = normalized.iter().any(|edit| {
-        !content.contains(&edit.old_text) && fuzzy(content).contains(&fuzzy(&edit.old_text))
-    });
-    let base = if use_fuzzy {
-        fuzzy(content)
-    } else {
-        content.to_string()
+fn file_access_error(error: &std::io::Error) -> String {
+    let code = match error.kind() {
+        std::io::ErrorKind::NotFound => "ENOENT",
+        std::io::ErrorKind::NotADirectory => "ENOTDIR",
+        std::io::ErrorKind::PermissionDenied => "EACCES",
+        _ => return error.to_string(),
     };
-    let mut replacements = Vec::new();
-    for (i, edit) in normalized.iter().enumerate() {
-        let needle = if use_fuzzy {
-            fuzzy(&edit.old_text)
-        } else {
-            edit.old_text.clone()
-        };
-        let count = occurrences(&base, &needle);
-        if count == 0 {
-            return Err(execution(if edits.len() == 1 {
-                format!(
-                    "Could not find the exact text in {path}. The old text must match exactly including all whitespace and newlines."
-                )
-            } else {
-                format!("Could not find edits[{i}] in {path}.")
-            }));
-        }
-        if count > 1 {
-            return Err(execution(format!(
-                "Found {count} occurrences of edits[{i}] in {path}. Each oldText must be unique."
-            )));
-        }
-        replacements.push((
-            i,
-            Replacement {
-                index: base.find(&needle).unwrap(),
-                length: needle.len(),
-                new_text: edit.new_text.clone(),
-            },
-        ));
-    }
-    replacements.sort_by_key(|(_, r)| r.index);
-    for pair in replacements.windows(2) {
-        if pair[0].1.index + pair[0].1.length > pair[1].1.index {
-            return Err(execution(format!(
-                "edits[{}] and edits[{}] overlap in {path}. Merge them into one edit or target disjoint regions.",
-                pair[0].0, pair[1].0
-            )));
-        }
-    }
-    let mut output = base.clone();
-    for (_, r) in replacements.into_iter().rev() {
-        output.replace_range(r.index..r.index + r.length, &r.new_text);
-    }
-    if output == content {
-        return Err(execution(format!(
-            "No changes made to {path}. The replacements produced identical content."
-        )));
-    }
-    Ok((content.to_string(), output))
+    format!("Error code: {code}")
 }
 
 fn generate_diff(old: &str, new: &str, context: usize) -> (String, Option<usize>) {
@@ -435,7 +281,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_edits_take_precedence_over_legacy_fields() {
+    async fn legacy_fields_are_appended_to_explicit_edits_like_pi() {
         let (_, signal) = AbortHandle::new();
         let prepared = EditTool
             .prepare_arguments(
@@ -454,7 +300,7 @@ mod tests {
             prepared,
             json!({
                 "path": "a",
-                "edits": [{"oldText": "one", "newText": "ONE"}]
+                "edits": [{"oldText": "one", "newText": "ONE"}, {"oldText":"", "newText":""}]
             })
         );
     }
@@ -482,6 +328,7 @@ mod tests {
     #[test]
     fn schema_exposes_only_the_current_edits_shape() {
         let parameters = EditTool.spec().parameters;
+        assert_eq!(parameters["required"], json!(["path", "edits"]));
         assert!(parameters.pointer("/properties/edits").is_some());
         assert!(parameters.pointer("/properties/oldText").is_none());
         assert!(parameters.pointer("/properties/newText").is_none());

@@ -52,6 +52,7 @@ impl Plugin for HistoryPlugin {
             return Ok(BeforeAgentStartPatch::default());
         }
         Ok(BeforeAgentStartPatch {
+            prompt_state: None,
             prompt_contributions: Vec::new(),
             messages: vec![Message::custom(CustomMessage {
                 custom_type: "history-fixture.context".to_string(),
@@ -80,6 +81,8 @@ impl Tool for HistoryTool {
             "replacement"
         };
         ToolSpec {
+            output_schema: None,
+            constrained_sampling: None,
             name: self.name.to_string(),
             label: self.name.to_string(),
             description: "Writes extension state and returns structured data".to_string(),
@@ -110,6 +113,7 @@ impl Tool for HistoryTool {
             .append_entry("history-fixture.state", Some(details.clone()))
             .map_err(|error| ToolError::Execution(error.to_string()))?;
         Ok(ToolResult {
+            structured_content: None,
             details: Some(details),
             ..ToolResult::text("persisted plugin result")
         })

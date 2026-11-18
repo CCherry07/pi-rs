@@ -73,6 +73,8 @@ impl Plugin for Probe {
 impl Tool for Probe {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
+            output_schema: None,
+            constrained_sampling: None,
             name: "probe".into(),
             label: "probe".into(),
             description: "Observe workspace".into(),

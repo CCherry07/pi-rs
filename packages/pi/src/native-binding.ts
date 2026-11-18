@@ -19,6 +19,7 @@ export interface NativeExtensionContext {
   prepareRequest?(): string;
   cancelRequest?(requestId: string): void;
   update?(result: string): void;
+  bashData?(data: Uint8Array): void;
 }
 
 export interface NativeBinding {
@@ -126,6 +127,7 @@ export function missingNativeBindingMessage(
 }
 
 export function loadNativeBinding(): NativeBinding {
+  process.env.PI_DOCUMENTATION_ROOT ??= packageDirectory;
   const override = process.env.PI_RS_NATIVE_BINDING;
   if (override) {
     if (!existsSync(override)) {
