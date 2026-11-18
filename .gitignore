@@ -32,3 +32,14 @@ docs/
 # Installed model-facing product documentation.
 !/packages/pi/docs/
 !/packages/pi/docs/**
+
+# Versioned prompt/tools delivery evidence; keep other local docs ignored.
+!/docs/
+/docs/*
+!/docs/prompt-conformance.md
+!/docs/tool-prompt-comparison-notes.md
+!/docs/research/
+/docs/research/*
+!/docs/research/prompt-legacy-comparison.md
+!/docs/research/rpc-parity-audit.md
+!/docs/research/rpc-command-parity-audit.md
