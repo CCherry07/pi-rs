@@ -730,6 +730,7 @@ fn hook_error(
     error: impl std::fmt::Display,
 ) -> PluginError {
     PluginError::Hook {
+        source_path: None,
         plugin_id: Plugin::id(plugin),
         hook,
         message: error.to_string(),

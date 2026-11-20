@@ -351,6 +351,18 @@ fn convert_entry(
         "compaction" => {
             let (retained_tail, retained_entry_ids) = retained_tail(raw, converted_by_id)?;
             Ok(SessionEntry::Compaction(CompactionEntry {
+                from_hook: optional_bool(raw, "fromHook")?,
+                system_message: raw
+                    .get("systemMessage")
+                    .map(|value| {
+                        serde_json::from_value(value.clone()).map_err(|_| {
+                            SessionError::InvalidPayload(
+                                "legacy compaction systemMessage must be a valid system message"
+                                    .into(),
+                            )
+                        })
+                    })
+                    .transpose()?,
                 retained_entry_ids,
                 retained_tail,
                 summary: require_string(raw, "summary")?.to_string(),
@@ -364,6 +376,7 @@ fn convert_entry(
             }))
         }
         "branch_summary" => Ok(SessionEntry::BranchSummary(BranchSummaryEntry {
+            from_hook: optional_bool(raw, "fromHook")?,
             from_id: require_string(raw, "fromId")?.to_string(),
             summary: require_string(raw, "summary")?.to_string(),
             details: raw.get("details").cloned(),
@@ -528,6 +541,7 @@ fn parse_cost(value: &Value) -> Result<UsageCost, SessionError> {
         SessionError::InvalidPayload("legacy usage cost is not an object".to_string())
     })?;
     Ok(UsageCost {
+        total_from_provider: optional_bool(value, "totalFromProvider")?,
         input: optional_f64(object, "input")?,
         output: optional_f64(object, "output")?,
         cache_read: optional_f64(object, "cacheRead")?,
@@ -601,6 +615,19 @@ fn require_string<'a>(value: &'a Value, field: &str) -> Result<&'a str, SessionE
     value.get(field).and_then(Value::as_str).ok_or_else(|| {
         SessionError::InvalidPayload(format!("legacy session field {field} is not a string"))
     })
+}
+
+fn optional_bool(value: &Value, field: &str) -> Result<Option<bool>, SessionError> {
+    value
+        .get(field)
+        .map(|value| {
+            value.as_bool().ok_or_else(|| {
+                SessionError::InvalidPayload(format!(
+                    "legacy session field {field} is not a boolean"
+                ))
+            })
+        })
+        .transpose()
 }
 
 fn optional_string<'a>(value: &'a Value, field: &str) -> Result<Option<&'a str>, SessionError> {

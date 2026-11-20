@@ -70,4 +70,7 @@ mod session;
 mod session_dispatch;
 pub use session::*;
 
-pub use diagnostics::{PluginDiagnostic, PluginError, PluginHook, ProviderHook};
+pub use diagnostics::{
+    PluginDiagnostic, PluginDiagnosticObserver, PluginDiagnosticSubscription, PluginError,
+    PluginHook, ProviderHook,
+};

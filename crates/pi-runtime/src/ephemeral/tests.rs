@@ -165,7 +165,24 @@ async fn tool_loop_is_scoped_and_does_not_emit_parent_events_or_hooks() {
         ["allowed", "forbidden"]
     );
     assert_eq!(requests[0].system_prompt, "Only maintain memory");
-    assert_eq!(requests[0].messages.len(), 1);
+    assert_eq!(requests[0].messages.len(), 2);
+    let Message::System(declaration) = &requests[0].messages[0] else {
+        panic!("the child transcript must declare its prepared tools");
+    };
+    assert_eq!(
+        declaration.tools_added,
+        Some(
+            requests[0]
+                .tools
+                .iter()
+                .map(pi_core::ToolDeclaration::from)
+                .collect()
+        )
+    );
+    assert_eq!(
+        requests[0].messages[1],
+        Message::User(UserMessage::text("maintain", 0))
+    );
     assert_eq!(requests[0].session_id, runtime.agent().session_id());
     assert_eq!(requests[0].session_id, requests[1].session_id);
     assert!(outcome.messages.iter().any(|message| matches!(message, Message::ToolResult(result) if result.tool_name == "forbidden" && result.is_error)));

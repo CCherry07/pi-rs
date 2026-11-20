@@ -360,12 +360,13 @@ impl SessionStore {
         let mut state = self.state();
         let parent_id = state.require_lane(lane)?;
         state.validate_unused_id(&provisioned.id)?;
+        let timestamp_ms = now_ms();
         let record = SessionRecord {
             id: provisioned.id,
             seq: state.next_sequence(),
             parent_id,
-            timestamp_ms: now_ms(),
-            entry: provisioned.entry,
+            timestamp_ms,
+            entry: bind_checkpoint_timestamp(provisioned.entry, timestamp_ms)?,
         };
         let mutation = SessionMutation::Entry {
             lane: Some(lane.to_string()),
@@ -441,11 +442,13 @@ impl SessionStore {
         let mut next_sequence = state.next_sequence();
         for entry in entries {
             let id = next_unique_id("entry");
+            let timestamp_ms = now_ms();
+            let entry = bind_checkpoint_timestamp(entry, timestamp_ms)?;
             let record = SessionRecord {
                 id: id.clone(),
                 seq: next_sequence,
                 parent_id,
-                timestamp_ms: now_ms(),
+                timestamp_ms,
                 entry,
             };
             let mutation = SessionMutation::Entry {
@@ -573,10 +576,15 @@ impl SessionStore {
         options: &SessionContextBuildOptions,
     ) -> Result<SessionContext, HistoryError> {
         if options.entry_transforms.is_empty() && options.entry_projectors.is_empty() {
-            return self.state().default_context_for_lane(MAIN_LANE);
+            return self
+                .inner
+                .header
+                .with_initial_tools(self.state().default_context_for_lane(MAIN_LANE)?);
         }
         let entries = self.branch_entries()?;
-        Ok(build_session_context(&entries, options))
+        self.inner
+            .header
+            .with_initial_tools(build_session_context(&entries, options))
     }
 
     pub fn context_at_with_options(
@@ -585,10 +593,34 @@ impl SessionStore {
         options: &SessionContextBuildOptions,
     ) -> Result<SessionContext, HistoryError> {
         if options.entry_transforms.is_empty() && options.entry_projectors.is_empty() {
-            return self.state().default_context_at(leaf_id);
+            return self
+                .inner
+                .header
+                .with_initial_tools(self.state().default_context_at(leaf_id)?);
         }
         let entries = self.branch_entries_at(leaf_id)?;
-        Ok(build_session_context(&entries, options))
+        self.inner
+            .header
+            .with_initial_tools(build_session_context(&entries, options))
+    }
+
+    /// The last branch mutation overrides the session's initial selection.
+    /// Older journals keep deriving their initial selection from tree entries.
+    pub(crate) fn selected_active_tools(&self) -> Result<Option<Vec<String>>, HistoryError> {
+        let latest = self.find_entries_on_branch(&crate::BranchQuery {
+            entries: crate::EntryQuery {
+                entry_type: Some(crate::SessionEntryType::ActiveToolsChange),
+                limit: Some(1),
+                ..Default::default()
+            },
+            ..Default::default()
+        })?;
+        if let Some(record) = latest.into_iter().next()
+            && let SessionEntry::ActiveToolsChange(change) = record.entry
+        {
+            return Ok(Some(change.active_tool_names));
+        }
+        self.inner.header.initial_active_tools()
     }
 
     pub fn find_records(&self, query: &RecordQuery) -> Result<Vec<LaneRecord>, HistoryError> {
@@ -718,13 +750,16 @@ impl SessionStore {
     pub fn fork(
         &self,
         path: impl Into<PathBuf>,
-        header: SessionHeader,
+        mut header: SessionHeader,
         options: &ForkOptions,
     ) -> Result<Self, HistoryError> {
         if self.is_persistent() && !self.is_materialized() {
             return Err(HistoryError::Storage(
                 "session has not been saved yet; wait for the first assistant response".to_string(),
             ));
+        }
+        if let Some(tools) = self.inner.header.initial_active_tools()? {
+            header.set_initial_active_tools(tools);
         }
         validate_header(&header)?;
         let path = path.into();
@@ -1169,6 +1204,7 @@ fn validate_ambiguous_optional_fields(
 
 pub(crate) fn validate_header(header: &SessionHeader) -> Result<(), HistoryError> {
     header.workspace()?;
+    header.initial_active_tools()?;
     if header.version != SESSION_SCHEMA_VERSION {
         return Err(HistoryError::UnsupportedSchema(header.version));
     }
@@ -1329,6 +1365,22 @@ fn file_modified_at(path: &Path) -> Result<f64, HistoryError> {
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0.0, |duration| duration.as_secs_f64() * 1_000.0))
+}
+
+fn bind_checkpoint_timestamp(
+    mut entry: SessionEntry,
+    timestamp_ms: i64,
+) -> Result<SessionEntry, HistoryError> {
+    if let SessionEntry::Compaction(compaction) = &mut entry
+        && let Some(system) = &compaction.system_message
+    {
+        compaction.system_message = Some(
+            system
+                .with_timestamp(timestamp_ms)
+                .map_err(|error| HistoryError::InvalidPayload(error.to_string()))?,
+        );
+    }
+    Ok(entry)
 }
 
 #[cfg(test)]

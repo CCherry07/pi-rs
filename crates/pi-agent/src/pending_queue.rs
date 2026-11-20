@@ -98,6 +98,15 @@ impl PendingMessageQueue {
         }
     }
 
+    pub(crate) fn identities(&self) -> Vec<String> {
+        self.messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter_map(|(id, _)| id.clone())
+            .collect()
+    }
+
     pub fn peek(&self) -> Vec<Message> {
         self.messages
             .lock()

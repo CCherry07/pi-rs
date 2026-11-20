@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use pi_plugin::{NoticeLevel, UiDialogRequest, UiDialogResponse, UiNotification};
-use pi_session::PluginUiBridge;
+use pi_session::{AgentSession, PluginUiBridge};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 use tokio::sync::{mpsc, oneshot};
@@ -32,14 +32,33 @@ struct State {
 pub struct RpcUiBridge {
     state: Arc<Mutex<State>>,
     pub(crate) output: RpcOutput,
+    events: crate::events::RpcEventStream,
 }
 
 impl RpcUiBridge {
     fn new(output: RpcOutput) -> Self {
         Self {
             state: Arc::default(),
+            events: crate::events::RpcEventStream::new(output.clone()),
             output,
         }
+    }
+
+    /// Install the event observer before this generation's startup hooks run.
+    pub fn bind_session(&self, session: &Arc<AgentSession>) {
+        self.events.bind(session);
+    }
+
+    pub(crate) async fn publication_barrier(
+        &self,
+        session: &Arc<AgentSession>,
+    ) -> Result<(), String> {
+        self.bind_session(session);
+        self.events.publication_barrier(session).await
+    }
+
+    pub(crate) fn close_events(&self) {
+        self.events.close();
     }
 
     /// Drains synchronous notices after startup failure or session shutdown.
@@ -164,11 +183,22 @@ impl PluginUiBridge for RpcUiBridge {
             request["timeout"] = json!(timeout_ms);
         }
         let answer = async {
-            if self.output.emit(request).await.is_err() {
-                self.close();
-                return UiDialogResponse::Cancelled;
+            let mut result = result;
+            tokio::select! {
+                biased;
+                // EOF/abort clears the pending sender. Observe that even while
+                // the writer is backpressured; dropping emit does not remove its
+                // already enqueued frame from the connection's output queue.
+                answer = &mut result => answer.unwrap_or(UiDialogResponse::Cancelled),
+                written = self.output.emit(request) => {
+                    if written.is_err() {
+                        self.close();
+                        UiDialogResponse::Cancelled
+                    } else {
+                        result.await.unwrap_or(UiDialogResponse::Cancelled)
+                    }
+                }
             }
-            result.await.unwrap_or(UiDialogResponse::Cancelled)
         };
         Ok(Some(match timeout_ms {
             Some(timeout_ms) => {
@@ -267,6 +297,7 @@ impl RpcConnection {
 
 impl Drop for RpcConnection {
     fn drop(&mut self) {
+        self.bridge.close_events();
         self.bridge.close();
         self.reader.abort();
     }
@@ -300,6 +331,9 @@ async fn read_input(
         }
     }
 }
+
+#[cfg(test)]
+mod connection_tests;
 
 #[cfg(test)]
 mod tests {

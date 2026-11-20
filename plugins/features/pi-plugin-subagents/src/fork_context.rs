@@ -118,6 +118,8 @@ mod tests {
 
     fn assistant_call(id: &str, name: &str) -> Message {
         Message::assistant(AssistantMessage {
+            duration_ms: None,
+            thinking_level: None,
             content: vec![
                 ContentBlock::Text(TextContent::new("keep parent reasoning")),
                 ContentBlock::ToolCall(ToolCall::new(id, name, json!({}))),
@@ -144,6 +146,7 @@ mod tests {
         let parent_call = assistant_call("parent-spawn", "spawn_agent");
         let parent_result = Message::ToolResult(
             ToolResultMessage {
+                duration_ms: None,
                 tool_call_id: "parent-spawn".into(),
                 tool_name: "spawn_agent".into(),
                 content: vec![ContentBlock::Text(TextContent::new("started"))],

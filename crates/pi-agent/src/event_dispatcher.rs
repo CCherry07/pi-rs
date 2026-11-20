@@ -255,6 +255,7 @@ impl AgentEventDispatcher {
                 tool_name,
                 result,
                 is_error,
+                duration_ms,
             } => {
                 self.plugins
                     .tool_execution_end(
@@ -262,6 +263,7 @@ impl AgentEventDispatcher {
                         &self.cwd,
                         signal,
                         ToolExecutionEndEvent {
+                            duration_ms: *duration_ms,
                             tool_call_id: tool_call_id.clone(),
                             tool_name: tool_name.clone(),
                             result: result.clone(),

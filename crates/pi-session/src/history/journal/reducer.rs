@@ -1141,6 +1141,8 @@ mod tests {
         with_deferred_handle: bool,
     ) -> Message {
         Message::assistant(AssistantMessage {
+            duration_ms: None,
+            thinking_level: None,
             content,
             api: "openai-responses".to_string(),
             provider: ProviderId::new("openai"),
@@ -1628,6 +1630,7 @@ mod tests {
             id: "tool-result".to_string(),
             entry: SessionEntry::Message(MessageEntry {
                 message: Message::tool_result(ToolResultMessage {
+                    duration_ms: None,
                     tool_call_id: ToolCallId::new("call-1"),
                     tool_name: "tool-1".to_string(),
                     content: vec![ContentBlock::Text(TextContent::new("done"))],

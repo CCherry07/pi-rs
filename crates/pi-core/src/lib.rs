@@ -29,8 +29,8 @@ pub use message::{
 };
 pub use model::{
     ModelCost, ModelCostTier, ModelImageInputLimits, ModelImageResizeOptions, ModelInput,
-    ModelInputLimits, ModelSelection, ModelSpec, ResponseMetadata, StopReason, ThinkingBudgets,
-    ThinkingLevel,
+    ModelInputLimits, ModelPromptCache, ModelSamplingParamsByThinkingLevel, ModelSelection,
+    ModelSpec, ResponseMetadata, StopReason, ThinkingBudgets, ThinkingLevel,
 };
 pub use model_operations::{
     AnyModelSpec, ClassifierAnswer, ClassifierBoolCriteria, ClassifierContext, ClassifierModelSpec,
@@ -39,8 +39,8 @@ pub use model_operations::{
 };
 pub use stream::{ContentMetadata, ResponseMetadataPatch, StreamEvent};
 pub use tool::{
-    ConstrainedSampling, GrammarFormat, ToolExecutionMode, ToolResult, ToolSchemaStrict, ToolSpec,
-    ToolUpdate,
+    ConstrainedSampling, GrammarFormat, ToolDeclaration, ToolExecutionMode, ToolReference,
+    ToolResult, ToolSchemaStrict, ToolSpec, ToolUpdate,
 };
 pub use usage::{Usage, UsageCost};
 pub use workspace::{

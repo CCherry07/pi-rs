@@ -25,9 +25,13 @@ struct PendingSessionMessage {
     display_text: String,
     message: Message,
     target: ProvisionedEntry,
-    /// Live idle steer/follow-up submissions attach to the next explicit prompt.
-    /// Recovered next-run items keep their explicit admission policy.
+    /// Live steer/follow-up submissions may attach to the next explicit prompt
+    /// when parked. Retiming preserves this intent; replay and explicit NextRun
+    /// items keep their separate admission policy.
     deliver_on_prompt: bool,
+    /// Delivery has started, so hide it from the editable queue. Keep its
+    /// provisioned identity pending until the final hook-patched message commits.
+    started: bool,
 }
 
 #[derive(Debug)]
@@ -215,6 +219,7 @@ impl SessionActivity {
                     entry: SessionEntry::message(wire),
                 },
                 deliver_on_prompt: false,
+                started: false,
             })
             .collect::<Vec<_>>();
         self.store.append_record(NewLaneRecord {
@@ -308,6 +313,7 @@ impl SessionActivity {
         expected: Option<LiveDelivery>,
         input: QueuedInput,
     ) -> Result<PromptOutcome, SessionError> {
+        let _dispatch = self.events.defer_observers();
         let mut state = self.lock();
         let idle_delivery =
             input.kind != QueueKind::NextRun && state.active_run.is_none() && expected.is_none();
@@ -343,7 +349,8 @@ impl SessionActivity {
             display_text: input.display_text,
             message: input.message.clone(),
             target,
-            deliver_on_prompt: idle_delivery,
+            deliver_on_prompt: input.kind != QueueKind::NextRun,
+            started: false,
         });
         // Keep closing/clearing delivery excluded until the Agent has received
         // this already-durable item. Product queue state precedes consumption.
@@ -370,6 +377,7 @@ impl SessionActivity {
 
     /// Binds idle queued input to the newly admitted run before the Agent can consume it.
     pub(super) fn activate_idle_queue(&self, agent: &Agent) -> Result<(), SessionError> {
+        let _dispatch = self.events.defer_observers();
         let mut state = self.lock();
         let run_id = state
             .active_run
@@ -395,7 +403,6 @@ impl SessionActivity {
             let mut item = item.clone();
             item.target.id = next_unique_id("entry");
             item.run_id = Some(run_id.clone());
-            item.deliver_on_prompt = false;
             entries.push(NewLaneRecord {
                 id: next_unique_id("queue"),
                 lane: MAIN_LANE.into(),
@@ -418,7 +425,10 @@ impl SessionActivity {
             .expect("admitted run")
             .pending
             .extend(pending.clone());
-        self.events.publish_queue(state.queue_snapshot());
+        // Only the journal identities/run association changed; the ordered
+        // steering/follow-up lists are still the same pending input.
+        self.events
+            .publish_queue_with_origin(state.queue_snapshot(), crate::QueueUpdateOrigin::Retimed);
         for item in pending {
             let destination = match item.kind {
                 Some(QueueKind::Steer) => pi_agent::QueueDestination::Steering,
@@ -445,10 +455,38 @@ impl SessionActivity {
             .as_ref()?
             .pending
             .iter()
-            .find(|pending| pending_message_matches(pending, message))
+            .find(|pending| pending.started && pending_message_matches(pending, message))
             .and_then(|pending| {
                 pending_message_equivalent(pending, message).then(|| pending.display_text.clone())
             })
+    }
+
+    /// Publish live consumption before the user start event, without committing
+    /// the provisional message or changing its durable recovery identity.
+    pub(super) fn message_started(
+        &self,
+        message: &Message,
+        agent: &pi_agent::WeakAgent,
+    ) -> Option<QueueSnapshot> {
+        if !matches!(message, Message::User(_)) {
+            return None;
+        }
+        let mut state = self.lock();
+        // Enqueue/edit also locks activity before Agent queues. While this
+        // listener runs, the drained batch cannot advance to another message.
+        let queued = agent.queued_message_ids()?;
+        let pending = state
+            .active_run
+            .as_mut()?
+            .pending
+            .iter_mut()
+            .find(|pending| {
+                !pending.started
+                    && !queued.contains(&pending.target.id)
+                    && pending_message_matches(pending, message)
+            })?;
+        pending.started = true;
+        pending.kind.is_some().then(|| state.queue_snapshot())
     }
 
     /// A pending item is acknowledged only after its final hook-patched message
@@ -461,18 +499,7 @@ impl SessionActivity {
         let mut state = self.lock();
         let selection = active_tools
             .map(|tools| {
-                let previous = self.store.find_entries_on_branch(&crate::BranchQuery {
-                    entries: crate::EntryQuery {
-                        entry_type: Some(crate::SessionEntryType::ActiveToolsChange),
-                        limit: Some(1),
-                        ..crate::EntryQuery::default()
-                    },
-                    ..crate::BranchQuery::default()
-                })?;
-                let unchanged = previous.first().is_some_and(|record| {
-                    matches!(&record.entry, SessionEntry::ActiveToolsChange(change)
-                        if change.active_tool_names == tools)
-                });
+                let unchanged = self.store.selected_active_tools()?.as_deref() == Some(tools);
                 Ok::<_, SessionError>((!unchanged).then(|| {
                     SessionEntry::ActiveToolsChange(crate::ActiveToolsEntry {
                         active_tool_names: tools.to_vec(),
@@ -485,7 +512,12 @@ impl SessionActivity {
         let matched = state.active_run.as_ref().and_then(|run| {
             run.pending
                 .iter()
-                .position(|pending| pending_message_matches(pending, message))
+                .position(|pending| pending.started && pending_message_matches(pending, message))
+                .or_else(|| {
+                    run.pending
+                        .iter()
+                        .position(|pending| pending_message_matches(pending, message))
+                })
         });
         let (entry, queue) = if let Some(index) = matched {
             let run = state
@@ -514,7 +546,7 @@ impl SessionActivity {
             let pending = run.pending.remove(index);
             (
                 record,
-                pending.kind.is_some().then(|| state.queue_snapshot()),
+                (pending.kind.is_some() && !pending.started).then(|| state.queue_snapshot()),
             )
         } else {
             let entry = match message {
@@ -544,11 +576,12 @@ impl SessionActivity {
     /// Clears queued messages and returns their editor-ready text. The
     /// cancellation records make the same result survive process recovery.
     pub(super) fn clear_queue(&self, agent: &Agent) -> Result<QueueSnapshot, SessionError> {
+        let _dispatch = self.events.defer_observers();
         let mut activity = self.lock();
         if activity.active_run.as_ref().is_some_and(|run| {
             run.pending
                 .iter()
-                .any(|item| item.kind == Some(QueueKind::NextRun))
+                .any(|item| !item.started && item.kind == Some(QueueKind::NextRun))
         }) {
             return Err(SessionError::Busy);
         }
@@ -562,7 +595,7 @@ impl SessionActivity {
                     .iter()
                     .flat_map(|run| run.pending.iter()),
             )
-            .filter(|item| item.kind.is_some())
+            .filter(|item| !item.started && item.kind.is_some())
             .map(|item| NewLaneRecord {
                 id: next_unique_id("queue-cancel"),
                 lane: MAIN_LANE.to_string(),
@@ -576,7 +609,7 @@ impl SessionActivity {
                 .active_run
                 .iter()
                 .flat_map(|run| &run.pending)
-                .filter(|item| item.kind == Some(kind))
+                .filter(|item| !item.started && item.kind == Some(kind))
                 .map(|item| item.target.id.clone())
                 .collect::<Vec<_>>()
         };
@@ -610,7 +643,8 @@ impl SessionActivity {
         }
         activity.recovered_queue.clear();
         if let Some(run) = &mut activity.active_run {
-            run.pending.retain(|item| item.kind.is_none());
+            run.pending
+                .retain(|item| item.started || item.kind.is_none());
         }
         let snapshot = activity.queue_snapshot();
         self.events.publish_queue(snapshot);
@@ -626,6 +660,7 @@ impl SessionActivity {
         self.phase.send_replace(ActivityPhase::Settling);
         let snapshot = {
             let mut activity = self.lock();
+            let before = activity.queue_snapshot();
             let Some(run) = activity.active_run.take() else {
                 return Err(SessionError::Runtime(
                     "active session operation disappeared before completion".to_string(),
@@ -637,14 +672,28 @@ impl SessionActivity {
                     "active session operation id changed before completion".to_string(),
                 ));
             }
+            let mut restored_uncommitted_delivery = false;
             for mut item in run.pending.into_iter().filter(|item| item.kind.is_some()) {
+                restored_uncommitted_delivery |= item.started;
                 requeue_for_next_run(&self.store, &mut item)?;
+                item.started = false;
                 activity.recovered_queue.push(item);
             }
             agent.clear_all_queues();
-            activity.queue_snapshot()
+            let after = activity.queue_snapshot();
+            let origin = if restored_uncommitted_delivery {
+                // A failed delivery becomes visible again; this is not only an
+                // identity rebind of an already visible pending suffix.
+                crate::QueueUpdateOrigin::Mutation
+            } else {
+                crate::QueueUpdateOrigin::Retimed
+            };
+            (after != before).then_some((after, origin))
         };
-        self.events.publish_queue(snapshot);
+        if let Some((snapshot, origin)) = snapshot {
+            // Classify the operation, never equality of user payloads.
+            self.events.publish_queue_with_origin(snapshot, origin);
+        }
 
         let (outcome, error) = match result {
             Ok(outcome) => match outcome.stop {
@@ -967,6 +1016,13 @@ fn message_display_text(message: &Message) -> String {
 fn pending_message_matches(pending: &PendingSessionMessage, message: &Message) -> bool {
     match (&pending.message, message) {
         (Message::User(_), Message::User(_)) => true,
+        // Tool fields on a caller-supplied pending system message are normalized
+        // by the Agent. Retain its identity while committing the normalized value.
+        (Message::System(expected), Message::System(actual)) => {
+            expected.content == actual.content
+                && expected.sections == actual.sections
+                && expected.timestamp_ms == actual.timestamp_ms
+        }
         _ => pending.message == *message,
     }
 }
@@ -1046,6 +1102,7 @@ fn pending_session_message(
         message,
         target,
         deliver_on_prompt: false,
+        started: false,
     })
 }
 
@@ -1086,7 +1143,7 @@ fn recover_pending_queue(
 
 fn queue_snapshot<'a>(items: impl IntoIterator<Item = &'a PendingSessionMessage>) -> QueueSnapshot {
     let mut snapshot = QueueSnapshot::default();
-    for item in items {
+    for item in items.into_iter().filter(|item| !item.started) {
         if let Some(kind) = item.kind {
             snapshot.items.push(crate::QueuedMessageSnapshot {
                 entry_id: item.target.id.clone(),

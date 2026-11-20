@@ -131,6 +131,7 @@ impl AgentSession {
         );
         header.metadata = options.header_metadata.clone();
         header.set_workspace(runtime.workspace().spec())?;
+        header.set_initial_active_tools(state.active_tools);
         header.parent_session_id = options.parent_session_id.clone();
         runtime.agent().set_session_id(Some(header.id.clone()));
         let store = if options.in_memory {
@@ -146,9 +147,6 @@ impl AgentSession {
             }),
             SessionEntry::ThinkingLevelChange(ThinkingLevelEntry {
                 thinking_level: state.thinking_level.as_str().to_string(),
-            }),
-            SessionEntry::ActiveToolsChange(ActiveToolsEntry {
-                active_tool_names: state.active_tools,
             }),
         ];
         store.append_batch(initial_entries)?;
@@ -265,6 +263,13 @@ impl AgentSession {
             store.name(),
             recovered_queue.snapshot(),
         );
+        let diagnostic_events = Arc::downgrade(&events);
+        let diagnostic_subscriptions =
+            runtime.observe_plugin_diagnostics(Arc::new(move |diagnostic| {
+                if let Some(events) = diagnostic_events.upgrade() {
+                    events.publish_plugin_error(diagnostic.clone());
+                }
+            }));
         let activity = Arc::new(SessionActivity::new(
             store.clone(),
             Arc::clone(&events),
@@ -292,6 +297,7 @@ impl AgentSession {
             model_switch: options.model_switch,
             settings_writer: options.settings_writer,
             plugin_driver,
+            diagnostic_subscriptions,
             executor: tokio::runtime::Handle::current(),
             session_dispatch_context,
             compaction_settings: Arc::new(RwLock::new(options.compaction)),
@@ -352,6 +358,10 @@ impl Drop for AgentSessionShutdownGuard<'_> {
         self.0
             .lifecycle_state
             .store(SESSION_CLOSED, Ordering::Release);
+        for subscription in &self.0.diagnostic_subscriptions {
+            subscription.close();
+        }
+        self.0.events.close_observers();
         self.0.runtime.retire_plugin_context();
     }
 }
@@ -389,6 +399,13 @@ impl AgentSession {
         self.plugin_driver()
             .session_shutdown(self.session_dispatch_context(), &event)
             .await;
+        // Hooks have finished their authorized checkpoint writes. Retire their
+        // capabilities, freeze further observer publications, and project the
+        // accepted tail before the Drop guard closes leases. This is not an I/O
+        // flush and holds no activity-state, journal or observer registry lock.
+        // Cancellation still takes the nonblocking Drop cleanup path.
+        self.runtime.retire_plugin_context();
+        let _ = self.events.retire_observers().await;
     }
 
     pub fn is_closed(&self) -> bool {

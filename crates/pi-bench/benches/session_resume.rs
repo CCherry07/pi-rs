@@ -95,6 +95,8 @@ impl SessionFixture {
             ))));
             entries.push(SessionEntry::message(Message::assistant(
                 AssistantMessage {
+                    duration_ms: None,
+                    thinking_level: None,
                     provider_thinking_level: None,
                     content: vec![ContentBlock::ToolCall(ToolCall {
                         id: call_id.clone(),
@@ -120,6 +122,7 @@ impl SessionFixture {
             )));
             entries.push(SessionEntry::message(Message::tool_result(
                 ToolResultMessage {
+                    duration_ms: None,
                     tool_call_id: call_id,
                     tool_name: "read".to_string(),
                     content: vec![ContentBlock::Text(TextContent::new(format!(
@@ -179,6 +182,8 @@ impl SessionFixture {
                     timestamp,
                 ))),
                 SessionEntry::message(Message::assistant(AssistantMessage {
+                    duration_ms: None,
+                    thinking_level: None,
                     provider_thinking_level: None,
                     content: vec![ContentBlock::ToolCall(ToolCall {
                         id: call_id.clone(),
@@ -202,6 +207,7 @@ impl SessionFixture {
                     timestamp_ms: timestamp,
                 })),
                 SessionEntry::message(Message::tool_result(ToolResultMessage {
+                    duration_ms: None,
                     tool_call_id: call_id,
                     tool_name: "read".to_string(),
                     content: vec![ContentBlock::Text(TextContent::new(format!(

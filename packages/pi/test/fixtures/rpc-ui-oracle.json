@@ -1,0 +1,136 @@
+{
+  "commit": "05fd3fbda0bbb9a1c7a76e4bf92ab58ed77c8d94",
+  "source": "packages/coding-agent/src/modes/rpc/rpc-mode.ts",
+  "cases": [
+    {
+      "method": "getAllThemes",
+      "parameters": [],
+      "resultType": "object",
+      "result": []
+    },
+    {
+      "method": "getTheme",
+      "parameters": [
+        "unknown"
+      ],
+      "resultType": "undefined"
+    },
+    {
+      "method": "setTheme",
+      "parameters": [
+        "dark"
+      ],
+      "resultType": "object",
+      "result": {
+        "success": false,
+        "error": "Theme switching not supported in RPC mode"
+      }
+    },
+    {
+      "method": "setTheme",
+      "parameters": [
+        "unknown"
+      ],
+      "resultType": "object",
+      "result": {
+        "success": false,
+        "error": "Theme switching not supported in RPC mode"
+      }
+    },
+    {
+      "method": "setTheme",
+      "parameters": [
+        {
+          "name": "custom"
+        }
+      ],
+      "resultType": "object",
+      "result": {
+        "success": false,
+        "error": "Theme switching not supported in RPC mode"
+      }
+    },
+    {
+      "method": "onTerminalInput",
+      "parameters": [],
+      "resultType": "function"
+    },
+    {
+      "method": "getEditorText",
+      "parameters": [],
+      "resultType": "string",
+      "result": ""
+    },
+    {
+      "method": "getToolsExpanded",
+      "parameters": [],
+      "resultType": "boolean",
+      "result": false
+    },
+    {
+      "method": "setToolsExpanded",
+      "parameters": [
+        true
+      ],
+      "resultType": "undefined"
+    },
+    {
+      "method": "setWorkingMessage",
+      "parameters": [
+        "busy"
+      ],
+      "resultType": "undefined"
+    },
+    {
+      "method": "setWorkingVisible",
+      "parameters": [
+        true
+      ],
+      "resultType": "undefined"
+    },
+    {
+      "method": "setWorkingIndicator",
+      "parameters": [
+        {}
+      ],
+      "resultType": "undefined"
+    },
+    {
+      "method": "setHiddenThinkingLabel",
+      "parameters": [
+        "thinking"
+      ],
+      "resultType": "undefined"
+    },
+    {
+      "method": "setHeader",
+      "parameters": [],
+      "resultType": "undefined"
+    },
+    {
+      "method": "setFooter",
+      "parameters": [],
+      "resultType": "undefined"
+    },
+    {
+      "method": "addAutocompleteProvider",
+      "parameters": [],
+      "resultType": "undefined"
+    },
+    {
+      "method": "setEditorComponent",
+      "parameters": [],
+      "resultType": "undefined"
+    },
+    {
+      "method": "getEditorComponent",
+      "parameters": [],
+      "resultType": "undefined"
+    },
+    {
+      "method": "custom",
+      "parameters": [],
+      "resultType": "undefined"
+    }
+  ]
+}

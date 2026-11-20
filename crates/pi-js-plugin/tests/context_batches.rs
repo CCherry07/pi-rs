@@ -72,6 +72,14 @@ impl JsCallbackDispatcher for Dispatcher {
 
 #[tokio::test]
 async fn context_transforms_preserve_current_system_sections_without_exposing_them() {
+    let old: pi_core::ToolDeclaration = serde_json::from_value(json!({
+        "name":"echo", "description":"old", "parameters":{}, "constrainedSampling":false
+    }))
+    .unwrap();
+    let new = pi_core::ToolDeclaration {
+        description: "new".into(),
+        ..old.clone()
+    };
     let original = vec![
         Message::System(pi_core::SystemMessage {
             content: Vec::new(),
@@ -79,6 +87,8 @@ async fn context_transforms_preserve_current_system_sections_without_exposing_th
                 ("preamble".into(), Some("base".into())),
                 ("old".into(), Some("removed".into())),
             ],
+            tools_added: Some(vec![old]),
+            tools_removed: None,
             timestamp_ms: 1,
         }),
         Message::User(UserMessage::text("original", 2)),
@@ -88,6 +98,10 @@ async fn context_transforms_preserve_current_system_sections_without_exposing_th
                 ("preamble".into(), Some("updated".into())),
                 ("old".into(), None),
             ],
+            tools_added: Some(vec![new.clone()]),
+            tools_removed: Some(vec![pi_core::ToolReference {
+                name: "echo".into(),
+            }]),
             timestamp_ms: 3,
         }),
     ];
@@ -120,6 +134,8 @@ async fn context_transforms_preserve_current_system_sections_without_exposing_th
             };
             assert_eq!(head.sections, [("preamble".into(), Some("updated".into()))]);
             assert_eq!(head.timestamp_ms, 1);
+            assert_eq!(head.tools_added, Some(vec![new.clone()]));
+            assert_eq!(head.tools_removed, None);
             assert_eq!(pi_core::SystemMessage::fold("", &output), "updated");
             assert_eq!(
                 output[1],

@@ -663,6 +663,8 @@ mod tests {
         )))
         .unwrap();
         log.append_message(Message::assistant(AssistantMessage {
+            duration_ms: None,
+            thinking_level: None,
             content: vec![ContentBlock::Text(pi_core::TextContent::new("**Done**"))],
             api: "test".to_string(),
             provider: "test".into(),

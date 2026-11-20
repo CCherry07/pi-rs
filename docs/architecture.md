@@ -98,6 +98,10 @@ when an edge violates either rule.
 
 `pi-session` owns operation admission, cancellation, event ordering and persistence/compaction
 cut points; its internal `history` module owns durable mutations and storage.
+`EntryAppendOrigin` is transient event provenance: automatic agent persistence and configuration
+updates remain visible to native observers/history while the Pi RPC projector omits their redundant
+`entry_appended` frames. Explicit custom/context appends keep that notification. Provenance is not
+stored in v4 records and is not inferred from command names or entry payload types.
 `AgentSessionOptions` selects a shell executor and compaction policy. Defaults have no
 shell executor and use `GenericCompactionPolicy`; `domains/coding/src/session` supplies
 `CodingShellExecutor` and `CodingCompactionPolicy`, including shell defaults, Coding summary text,
@@ -172,8 +176,20 @@ channel without a forwarding task or another transcript reducer. Closing the man
 observers, drains final events and ends the stream even while callers retain a `PiSession`.
 
 Lag recovery restores current state; it cannot replay missed transient notices/errors. TUI and
-Desktop rehydrate their presentation, and RPC reports a subscription gap through its existing
-`extension_error` wire event so clients can query state/messages. Desktop's own message refresh
+Desktop rehydrate their presentation. RPC instead installs a generation-bound synchronous
+`SessionEventObserver` through the existing pre-start binding seam. It projects into one ordered
+writer at publication time and does not forward the lossy broadcast or maintain a replay cache.
+Agent execution awaits actual observer/writer acknowledgement; command responses fence prior
+synchronous publications, while prompt receipts enqueue at the runtime's preflight callback.
+Arbitrary synchronous extension/startup bursts retain legacy-style queuing, not a hard memory
+bound. Current-thread runtimes remain supported; no blocking I/O or terminal policy enters Session.
+Observer callbacks run outside hub and owning mutation locks. Queue mutations defer observer
+dispatch across their state/Agent queue locks while retaining the original snapshot, revision,
+persistence and enqueue cut points. Reentrant/concurrent publications retain revision order.
+Normal retirement freezes further observer publications and fences accepted synchronous callbacks
+before closing leases; it does not await external stdout flush. Forced runtime cancellation/drop
+releases leases without pretending dropped publications were delivered. The existing manager's
+complete-on-drop replacement transaction remains distinct from cancelling a direct runtime shutdown. Desktop's own message refresh
 keeps the observation cursor unchanged: covered message deltas can be skipped while pending
 lifecycle, error and notice events are still projected. Run-scoped ACP/print subscriptions remain
 pinned to their original generation. Low-level `subscribe()` remains available for those callers.
@@ -830,7 +846,9 @@ header, delta-only assistant updates, exact tool metadata/results, committed v4 
 optional-field omission without exposing Rust revision envelopes or `Debug` strings. The RPC
 adapter owns strict LF-delimited input, command correlation, synchronized stdout, session
 replacement subscription, queue/model/thinking/compaction/retry/shell/session commands, and a
-narrow injected HTML-export callback.
+narrow injected HTML-export callback. A `toolcall_end` update serializes the tagged tool-call
+content block, including `type: "toolCall"` and its optional metadata, rather than erasing the tag
+by serializing only the inner `ToolCall` value.
 
 The RPC adapter reports the intended persistent `sessionFile` before lazy materialization so a
 client can retain one stable resume path. In-memory sessions omit it. Session Runtime's
@@ -843,8 +861,10 @@ RPC input carries `InputSource::Rpc` through commands, input hooks and queue pre
 Extension commands and input hooks run before active-run admission rejects a prompt without a
 streaming behavior. Explicit `steer` and `follow_up` requests reject extension commands and can
 queue while idle. Idle queue entries retain their live delivery mode and use v4 `nextRun` storage
-until the next explicit prompt binds them to its run; reopening history preserves the existing
-explicit recovery boundary. `abort` waits for session idleness before its successful response.
+until the next explicit prompt binds them to its run. Unconsumed live steer/follow-up input keeps
+that admission intent across abort/error; settlement itself never restarts the Agent. Reopening
+history and explicit `NextRun` input preserve their separate explicit recovery boundary.
+`abort` waits for session idleness before its successful response.
 
 Stdio RPC installs its semantic dialog bridge before session startup and keeps reading correlated
 UI responses while startup or command hooks await them. `confirm`, `select`, `input`, `editor`
@@ -859,6 +879,14 @@ IDs are ignored. Cancellation, timeout, generation retirement and disconnect rel
 questions; only a live affirmative response grants confirmation. The JS/NAPI capability reserves
 cancellable request IDs before async dispatch. Dialog retirement is generation-local, so dropping
 the old generation cannot cancel new-generation requests on the shared connection.
+
+Disconnect settlement is an explicit Rust lifecycle guarantee. In the pinned Pi RPC implementation,
+a background dialog created without a signal or timeout has no settlement path in process disposal;
+process exit alone does not prove its awaiting extension callback resumed. Rust resolves that dialog
+as cancelled on connection closure. Extension code after the await can therefore run before exit
+in Rust, so callback side-effect equivalence at this boundary is not claimed. The controlled
+EOF/HUP/TERM comparisons and their missing legacy observations are recorded in
+[RPC conformance](rpc-conformance.md#termination-and-dialog-observation-limits).
 
 Each incoming command starts with one poll in the input loop, matching Pi's eager async dispatch.
 Synchronous queries and parse errors enqueue their responses before the loop can reach stdin EOF;
@@ -883,7 +911,9 @@ RPC notifications go directly through the injected bridge, including during star
 A bridge that accepts a notification owns its delivery; the session adapter publishes the ordinary
 transient notice event only when the bridge does not handle it. One FIFO stdout writer preserves
 synchronous notification order relative to subsequent dialogs and command responses. The app drains
-it after startup failure and session shutdown as well as at normal RPC loop exit. On Unix the writer
+it after startup failure, session shutdown and normal RPC loop exit. SIGTERM follows Pi's disposal
+policy and skips the final drain; a partially written record may end mid-UTF-8, and its residual
+byte prefix has no cross-runtime guarantee. EOF and SIGHUP retain the drain. On Unix the writer
 retains partial-write offsets and waits for descriptor writability on the blocking pool. Node's
 nonblocking stdout therefore preserves large catalog responses and subsequent events under pipe
 backpressure without changing the host's descriptor flags. Notices remain
@@ -1743,8 +1773,20 @@ rather than being dropped as unknown roles or converted to user messages. Sessio
 holds system updates until the pending tool-result group finishes, including synthesized missing
 results; it does not execute any historical tool. TUI/ACP/Desktop do not render system instructions
 as user chat. Existing whole-prompt replacement through `before_agent_start.system_prompt` remains
-run-local: this change does not automatically record such replacements as system deltas or port
-Pi's transcript-based tool declaration/removal lifecycle.
+run-local; they are not automatically recorded as instruction deltas.
+
+`SystemMessage` additionally carries typed `toolsAdded`/`toolsRemoved` declarations. The Agent
+replays committed declarations and reconciles the complete prepared executable loadout before
+publishing each turn's pending messages. Changed definitions remove then add; unchanged definitions
+emit no checkpoint. A pending system message contributes instruction/section intent but its tool
+fields are replaced by the actual delta. These are ordinary transcript messages and ordered
+message events, persisted without RPC-specific fabrication. Declaration values omit executable
+and display metadata. Loadout-hidden declarations remain in history; a request-only projection
+filters them with the current hidden set, including earlier transcript updates. JS context
+replacement folds the surviving declarations alongside instruction sections. These additive typed
+fields/loadout contracts change the exact-build native SDK fingerprint; all native fixtures and
+plugins must be rebuilt together. Provider-adapter tool-delta parity beyond this transcript
+lifecycle remains a separate boundary.
 
 Responses honors `supportsMidConvoSystemMessages`: explicit updates are rendered in place (after
 complete tool groups), or instruction text and section replacements/removals are folded into the
@@ -2178,6 +2220,12 @@ These limits are documented by the feature; generic runtimes contain no codemode
   `ModelSpec.input_limits` preserves typed optional input/resize metadata through catalog generation,
   models.json overrides and plugin serialization. Image resize policy consumes its resize profile;
   request byte/count metadata alone does not imply provider-side enforcement.
+  `ModelSpec.prompt_cache` and `sampling_params_by_thinking_level` retain optional typed cache
+  lifetimes and per-level JSON parameter maps for RPC/catalog consumers, including explicitly empty
+  metadata objects. The models.json owner validates positive cache lifetimes and merges overrides
+  per retention tier / per thinking-level parameter. This metadata does not create a cache-warming
+  service or change v4 persistence. The native exact-build fingerprint requires rebuilding plugins
+  for the extended ModelSpec layout.
 - `TelemetryContext`: starts schema-typed spans through an injected sink; the no-op and in-memory
   sinks are adapters, not alternate event systems.
 - `AbortHandle` / `AbortSignal`: provide cooperative cancellation without exposing Tokio types in public signatures.
@@ -2361,7 +2409,22 @@ Each assistant stream owns one mutable assembler state behind a read-only `Assis
 `message_update` carries that constant-size shared handle and exactly one `StreamEvent`; the Agent
 reducer, ordered native hooks, and listeners therefore do not clone cumulative content. Consumers
 that require a full message call `snapshot()` explicitly, while `message_end` and `turn_end` share
-the completed immutable assistant message. These hook fields were introduced in native ABI 7;
+the completed immutable assistant message.
+
+The Agent loop cooperatively polls the provider while delivering a start/update event, keeping at
+most 32 parsed deltas pending in FIFO order, in addition to the event being delivered. This is a
+delta-count bound, not a byte bound. Response metadata becomes visible when parsed, so a queued
+update can expose usage already received while delivery awaited a hook or frontend. Content is
+merged by the single assembler at delivery, preserving the first snapshot plus incremental-delta
+contract used by the JS bridge. Queued Done/error events do not finalize that content early.
+An update does not wait for unavailable future usage. The start message is
+captured before this progress begins. A stalled sink bounds further source polling; cancellation
+stops reading, drains accepted updates before closing partial blocks, and preserves one terminal
+lifecycle. The stream stays owned by the run future, so dropping or finishing the run retires it
+without an independent task. This matches Pi's live partial-response observation while retaining a
+bounded Rust delivery queue.
+
+These hook fields were introduced in native ABI 7;
 ABI 21 adds bounded recent-turn inheritance to isolated-session forks. ABI 20 adds persistent
 isolated-session turns, messages and follow-ups. ABI 19 adds typed fork
 points for deferred isolated-session forks. ABI 18 adds aggregate managed-isolated-session usage
@@ -2384,12 +2447,17 @@ compaction refresh the public context snapshot as well as the underlying Agent. 
 `pi-bench/session_stream` workload measures this bridge at 64/1,024/4,096 history messages and
 16/256 deltas; pointer-sharing regressions establish the absence of per-chunk history copying.
 
-Cancellation and exceptional termination close the same observable lifecycle as Pi. A cancellation
-that races with turn entry first commits the prompt and already-drained steering, then emits an
-aborted assistant `message_start`/`message_end`, `turn_end`, and `agent_end`. Errors escaping the
-loop trigger the equivalent error assistant sequence on a best-effort basis while the Rust API
-still returns the originating `Err`; recovery emission continues past listener failures so state
-reducers can observe as much of the terminal sequence as possible.
+Cancellation and exceptional termination close the same terminal lifecycle shape as Pi. A
+cancellation that races with turn entry first commits the prompt and already-drained steering,
+then emits an aborted assistant `message_start`/`message_end`, `turn_end`, and `agent_end`.
+Before a provider request has begun, this local response uses the current turn's model catalog
+API, provider/model identity, requested thinking level and real response-settlement timing; it
+must not copy a previous assistant's metadata or start a provider solely to obtain it. An unknown
+catalog API stays unknown. This early-abort path is distinct from cancellation while waiting for
+response headers and from interruption of a partially observed stream. Errors escaping the loop
+trigger the error assistant sequence on a best-effort basis while the Rust API still returns the
+originating `Err`; recovery emission continues past listener failures so state reducers can observe
+as much of the terminal sequence as possible.
 
 Provider streaming starts a typed `pi.ai.request` span and records normalized response metadata,
 usage, chunk count, first-chunk latency, error status, and terminal reason. The shared Session
@@ -2418,6 +2486,20 @@ declared sequential. Its two observable schedules are:
 
 Unknown, invalid, blocked, and truncated tool calls produce error tool-result messages rather than disappearing from provider history. Final result messages preserve non-empty `added_tool_names`; tool-call and tool-result hooks share one immutable `AgentContext` batch snapshot.
 
+Scheduler-owned missing-tool, argument, blocked, thrown and cancellation errors carry an explicit
+empty `details` object, matching Pi's error-result constructor. This is not a default on the
+reusable `ToolResult` type: results returned by tools retain their absent, explicit null or empty
+object details, including tool-returned errors whose text happens to say `Operation aborted`.
+The same result reaches the tool-end event and the committed tool-result message.
+
+`ToolScheduler` measures rounded execution-only `duration_ms` after preparation and before result
+hooks / post-settlement update draining. Actual success and execution failure carry the same
+optional value in tool-end events, plugin callbacks and tool-result messages. Immediate preparation,
+unknown-tool, blocked and pre-aborted results omit it rather than inventing zero. Replay accepts
+older messages without the optional field; synthesized repair results remain untimed. This is
+additive message metadata, not a v4 mutation/schema change. Native plugins must rebuild against the
+extended value layout under the existing exact-build fingerprint.
+
 ## Session persistence and restore
 
 Session History preserves the existing Rust v4 storage contract. The current local behavior
@@ -2426,6 +2508,15 @@ it is a reference for product behavior and legacy import, not evidence of a curr
 implementation. A Rust v4 JSONL file starts with its versioned header and is followed by four
 mutation kinds: tree entries, lane records, lane pointers, and global facts. Every
 mutation consumes one shared, consecutive `seq`. Entry and record IDs share one namespace.
+New sessions preserve their initial tool selection in the optional header metadata
+`pi-rs.initialToolSelection` (`schemaVersion: 1`, `activeToolNames: string[]`). An explicit empty
+array grants/selects no tools; an absent field keeps the existing v4 interpretation. Initialization
+appends only model and thinking selections, matching Pi's visible initial tree. Later actual
+`ActiveToolsChange` entries remain durable and override this baseline on their branch. Context,
+transcript and recovery projections apply the same fallback. Branch and tree forks carry the
+baseline with the copied history, including when supplied a fresh destination header. Malformed
+metadata fails validation; reading older logs does not rewrite them. This uses v4's existing header
+metadata extension and leaves mutation sequencing and lazy materialization unchanged.
 Top-level entry and lane-record timestamps serialize as Pi-compatible ISO 8601 strings. The decoder
 also accepts the millisecond-number representation emitted by earlier pi-rs v4 builds; nested agent
 message timestamps keep their millisecond wire shape.
@@ -2439,6 +2530,19 @@ preparation. An unreadable or invalid parent fails the replacement. `AgentSessio
 only `parent_session_id`. Pi v3 JSON/JS header projections omit the path-based `parentSession`
 property. This is a deliberate Rust storage/API divergence from the upstream v3 path representation;
 ordinary forks continue to record their source session ID.
+
+Compaction and branch-summary entries retain optional `fromHook` provenance. A compaction may
+also hold a validated, lossless `SystemMessageSnapshot`: its complete system message, including
+section and tool-declaration extensions, projects before the summary and retained tail. Old v4
+entries without either field keep their prior interpretation. New append operations bind the
+snapshot's timestamp to the authoritative checkpoint entry timestamp; replay never rewrites old
+records. Retained-message provenance accounts for both leading snapshot and summary, so later
+context edits still target the original retained entries.
+Session Runtime captures `estimatedTokensAfter` from the committed context before completion hooks.
+`compact_with_result` returns that estimate together with its exact committed record; JSON/RPC does
+not search for a later "latest compaction" or recompute from subsequent mutable context. Estimates
+use the Pi UTF-16 character heuristic, including system sections and serialized tool declarations.
+These additions keep the v4 mutation sequence/schema version and lazy persistence unchanged.
 
 Entries form an immutable parent-linked tree. Named lanes are durable pointers into that tree and
 remain available after moving away from their prior leaves. Lane records hold operation starts and
@@ -2523,6 +2627,16 @@ when two items have identical text and timestamps. `cancel_queued` and `move_que
 Session activity. Live Agent queues retain these IDs and exclude consumption while the owner
 commits a queue edit; a stale/consumed identity rejects the edit before persistence. Clear uses
 the same exclusion for both live queues. No frontend clears and reconstructs queues itself.
+Internal park/bind operations publish full native snapshots with transient
+`QueueUpdateOrigin::Retimed`, preserving new editable identities. RPC omits a wire frame for this
+scheduling-only operation while still acknowledging the observer/writer fence. Explicit enqueue,
+edit, consumption and even empty clear use `Mutation`; classification follows the owning operation,
+never equality or deduplication of user text. Neither origin is persisted in v4 records.
+Consumption removes the item from the live queue before publishing its user `message_start`.
+The provisional identity remains pending until the hook-patched `message_end` is durably committed;
+there is no second consumption event then. If delivery fails before commit, parking restores the
+item visibly with `Mutation`, not `Retimed`. Recovery still uses the existing durable records and
+conservatively restores uncommitted delivery as `NextRun`.
 
 Ordering edits use one validated batch of existing v4 `QueueCancelled`/`QueueEnqueued` records,
 with new provisioned IDs for the reordered group. They retain the ordinary record-prefix recovery
@@ -2733,7 +2847,13 @@ methods. Session identity and generation are immutable data supplied through `Se
 the driver builds callback contexts from that metadata and its generation-bound capability epoch.
 Agent and Session failures share one ordered `PluginDiagnostic` sink, exposed through
 `diagnostics` and `take_diagnostics`. `PiRuntime::plugin_diagnostics` includes that sink together
-with the independent Provider driver's diagnostics. There is no separate Session driver or dispatch wrapper.
+with the independent Provider driver's diagnostics. Generation-local subscriptions observe the same
+records outside the diagnostic mutex; sessions bind before startup and release subscriptions on shutdown.
+Typed callback failures retain their actual adapter source path and raw error message separately from
+the contextual diagnostic display string. RPC projects the raw message, not nested `Display` wrappers.
+This does not change hook classification: Pi's `tool_call` propagates without an extra diagnostic,
+whereas `user_bash` reports once and fails closed; ordinary observer failures allow later hooks to run.
+There is no separate Session driver or dispatch wrapper.
 `AgentSessionOptions` configures session policy, not plugin sources.
 The complete replacement generation is prepared before the old generation receives
 `session_shutdown(reload)`. Preparation failure leaves the old generation running; successful
@@ -3086,8 +3206,8 @@ handle with `wait` and `abort`. Optional initial active tools, model, and thinki
 from the caller when omitted. `MultiSessionManager` resolves those values into one complete
 `AgentSessionInitialState`, rejects any tool selection outside the caller's active-tool ceiling,
 and passes it through the generation request for product-policy validation. `SessionSlot`
-applies that state before session construction, so the first provider request and the initial Pi v4
-model/thinking/tool records agree. The generation
+applies that state before session construction, so the first provider request, initial model/thinking
+records and header tool selection agree. The generation
 overlay also marks the child as `SessionExecutionOrigin::Subagent` before any hook runs. That
 transient origin survives live generation replacement and nested children. The overlay also carries
 an independent tool allowlist into `PiRuntimeBuilder::allowed_tools`: generation construction filters
@@ -3096,9 +3216,10 @@ Ordinary selection changes cannot widen that catalog. The child grant contains i
 plus the parent's currently visible deferred tools for a nonempty selection; an empty selection grants
 none. This lets codemode/tool_search reach deferred tools without enabling ungranted entry points.
 Live reload retains the grant even when the entry point is deselected. Isolated restore validates
-parent provenance before activation, reconstructs selected permissions from the initial v4
-`ActiveToolsChange`, and admits deferred tools from the current parent's visible catalog. No new
-session wire fields are introduced. Plugin activation, including MCP auto-enabling, then follows the
+parent provenance before activation, reconstructs selected permissions from the initial header tool
+selection (or the first `ActiveToolsChange` in older v4 logs), and admits deferred tools from the
+current parent's visible catalog. Later selection changes do not replace that original grant.
+Plugin activation, including MCP auto-enabling, then follows the
 same policy for user and child sessions within these catalogs. The caller's
 `PiSession` is never replaced. The manager registers
 the isolated handle like every other active session so path ownership, plugin-context binding, and

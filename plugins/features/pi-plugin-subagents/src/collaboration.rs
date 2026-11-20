@@ -206,6 +206,7 @@ mod tests {
             timestamp_ms: 1,
         });
         let wait_result = Message::ToolResult(Arc::new(ToolResultMessage {
+            duration_ms: None,
             tool_call_id: ToolCallId::new("wait-1"),
             tool_name: "wait_agent".into(),
             content: Vec::new(),

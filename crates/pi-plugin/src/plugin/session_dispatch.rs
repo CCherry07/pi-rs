@@ -42,13 +42,14 @@ impl PluginDriver {
                 Ok(Some(result)) => return Ok(Some(result)),
                 Ok(None) => {}
                 Err(error) => {
-                    let message = error.to_string();
-                    self.record_session_error(slot, context, SessionHook::UserBash, error);
-                    return Err(PluginError::Hook {
-                        plugin_id: slot.id.clone(),
-                        hook: "user_bash",
-                        message,
-                    });
+                    let error = error.with_hook(slot.id.clone(), "user_bash");
+                    self.diagnostics.record_failure(
+                        slot.id.clone(),
+                        SessionHook::UserBash,
+                        Some(context.generation),
+                        &error,
+                    );
+                    return Err(error);
                 }
             }
         }
@@ -188,12 +189,8 @@ impl PluginDriver {
         hook: SessionHook,
         error: PluginError,
     ) {
-        self.diagnostics.record(
-            slot.id.clone(),
-            hook,
-            Some(context.generation),
-            error.to_string(),
-        );
+        self.diagnostics
+            .record_failure(slot.id.clone(), hook, Some(context.generation), &error);
     }
 }
 #[cfg(test)]

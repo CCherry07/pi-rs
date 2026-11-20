@@ -245,6 +245,8 @@ impl Plugin for SessionControls {
         Ok(Some(pi_plugin::SessionBeforeCompactResult {
             cancel: self.cancel,
             compaction: (!self.cancel).then(|| pi_session::CompactionEntry {
+                from_hook: None,
+                system_message: None,
                 retained_entry_ids: Vec::new(),
                 retained_tail: event.preparation.retained_tail.clone(),
                 summary: event
@@ -298,11 +300,32 @@ async fn session_cancellation_and_manual_compaction_match_rpc_responses() {
             .await
             .unwrap();
         let before = session.current().history().header().id;
+        let mut events = session.current().subscribe();
         let compact = request(
             &session,
             json!({"type":"compact", "customInstructions":"requested summary"}),
         )
         .await;
+        let mut wire_events = Vec::new();
+        let mut native_compaction_entry = false;
+        while let Ok(event) = events.events.try_recv() {
+            if let pi_session::AgentSessionEvent::EntryAppended { entry, origin } = &event.event
+                && matches!(entry.entry, SessionEntry::Compaction(_))
+            {
+                native_compaction_entry = true;
+                assert_eq!(*origin, pi_session::EntryAppendOrigin::Compaction);
+            }
+            if let Some(event) =
+                pi_rpc::json_wire::session_event_json(event.event, &session.current()).unwrap()
+            {
+                wire_events.push(event);
+            }
+        }
+        assert!(
+            wire_events
+                .iter()
+                .all(|event| event["type"] != "entry_appended")
+        );
         if cancel {
             assert_eq!(compact["error"], "Compaction cancelled");
             for command in [
@@ -316,8 +339,20 @@ async fn session_cancellation_and_manual_compaction_match_rpc_responses() {
             }
         } else {
             assert_eq!(compact["success"], true, "{compact}");
+            assert!(native_compaction_entry);
+            let ended = wire_events
+                .iter()
+                .find(|event| event["type"] == "compaction_end")
+                .unwrap();
+            assert_eq!(ended["result"], compact["data"]);
             assert_eq!(compact["data"]["summary"], "requested summary");
             assert_eq!(compact["data"]["details"], json!({"from":"plugin"}));
+            assert!(
+                compact["data"]["estimatedTokensAfter"]
+                    .as_u64()
+                    .is_some_and(|tokens| tokens > 0),
+                "{compact}"
+            );
             assert!(compact["data"]["firstKeptEntryId"].is_string());
             assert_eq!(
                 request(&session, json!({"type":"compact"})).await["error"],
@@ -513,7 +548,7 @@ async fn session_metadata_has_stable_entry_identity_and_label_timestamp() {
     assert_eq!(name_entry["name"], "checkpoint");
     assert_eq!(entries["leafId"], name_id);
     let event = events.try_recv().unwrap();
-    let pi_session::AgentSessionEvent::EntryAppended { entry } = event.event else {
+    let pi_session::AgentSessionEvent::EntryAppended { entry, .. } = event.event else {
         panic!("metadata must publish an entry")
     };
     assert_eq!(entry.id, name_id);
@@ -761,4 +796,347 @@ async fn session_controls_clone_non_message_entries_and_fork_only_user_messages(
         "parent.jsonl"
     );
     manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn configuration_stays_in_history_and_native_updates_without_extra_rpc_entry_events() {
+    let directory = tempfile::tempdir().unwrap();
+    let manager = make_manager(models(&["a"]), ModelSwitchPolicy::default(), Arc::default());
+    let session = create(&manager, directory.path()).await;
+    let current = session.current();
+    let mut native = current.subscribe();
+    let before = success(&session, json!({"type":"get_entries"})).await;
+    success(
+        &session,
+        json!({"type":"set_model","provider":"scripted","modelId":"a"}),
+    )
+    .await;
+    let event = native.events.recv().await.unwrap();
+    let pi_session::AgentSessionEvent::EntryAppended { entry, origin } = &event.event else {
+        panic!("native update missing: {:?}", event.event);
+    };
+    assert_eq!(*origin, pi_session::EntryAppendOrigin::Configuration);
+    assert!(matches!(entry.entry, SessionEntry::ModelChange(_)));
+    let model_record = entry.clone();
+    let after = success(&session, json!({"type":"get_entries"})).await;
+    assert_eq!(
+        after["entries"].as_array().unwrap().len(),
+        before["entries"].as_array().unwrap().len() + 1
+    );
+    assert_eq!(
+        after["entries"].as_array().unwrap().last().unwrap()["id"],
+        entry.id
+    );
+    assert_eq!(
+        pi_rpc::json_wire::session_event_json(event.event, &current).unwrap(),
+        None
+    );
+    // The adapter must use provenance, not a blanket model_change payload filter.
+    let explicit = pi_session::AgentSessionEvent::EntryAppended {
+        entry: model_record,
+        origin: pi_session::EntryAppendOrigin::Explicit,
+    };
+    assert_eq!(
+        pi_rpc::json_wire::session_event_json(explicit, &current)
+            .unwrap()
+            .unwrap()["entry"]["type"],
+        "model_change"
+    );
+
+    let id = current
+        .append_custom_entry("explicit", Some(json!({"keep":false})))
+        .unwrap();
+    let event = native.events.recv().await.unwrap();
+    let wire = pi_rpc::json_wire::session_event_json(event.event, &current)
+        .unwrap()
+        .unwrap();
+    assert_eq!(wire["type"], "entry_appended");
+    assert_eq!(wire["entry"]["id"], id);
+    assert_eq!(wire["entry"]["data"], json!({"keep":false}));
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn custom_message_provenance_keeps_history_and_emits_only_message_lifecycle() {
+    let directory = tempfile::tempdir().unwrap();
+    let manager = make_manager(models(&["a"]), ModelSwitchPolicy::default(), Arc::default());
+    let session = create(&manager, directory.path()).await;
+    let current = session.current();
+    let mut native = current.subscribe();
+    let message = pi_core::CustomMessageInput {
+        custom_type: "fixture".into(),
+        content: pi_core::CustomMessageContent::Text("hello".into()),
+        display: false,
+        details: Some(json!({"kept":false})),
+    }
+    .into_message(42);
+    let id = current.append_custom_message(message).unwrap();
+    let mut wires = Vec::new();
+    let mut entries = Vec::new();
+    while let Ok(event) = native.events.try_recv() {
+        if let pi_session::AgentSessionEvent::EntryAppended { entry, .. } = &event.event {
+            entries.push(entry.id.clone());
+        }
+        if let Some(wire) = pi_rpc::json_wire::session_event_json(event.event, &current).unwrap() {
+            wires.push(wire);
+        }
+    }
+    assert_eq!(
+        entries,
+        std::slice::from_ref(&id),
+        "native history update remains visible"
+    );
+    assert_eq!(
+        wires
+            .iter()
+            .map(|v| v["type"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["message_start", "message_end"]
+    );
+    assert_eq!(wires[0]["message"], wires[1]["message"]);
+    assert_eq!(wires[1]["message"]["details"], json!({"kept":false}));
+    let history = success(&session, json!({"type":"get_entries"})).await;
+    assert!(
+        history["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["id"] == id && entry["type"] == "custom_message")
+    );
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn shell_message_provenance_keeps_history_without_an_extra_entry_notification() {
+    struct Shell;
+    #[pi_plugin::plugin]
+    impl Plugin for Shell {
+        fn id(&self) -> PluginId {
+            PluginId::new("shell-fixture")
+        }
+        async fn user_bash(
+            &self,
+            _: &pi_plugin::SessionPluginContext,
+            _: &pi_plugin::UserBashEvent,
+        ) -> Result<Option<pi_plugin::UserBashOverride>, pi_plugin::PluginError> {
+            Ok(Some(pi_plugin::UserBashOverride::Result(
+                pi_plugin::UserBashResult {
+                    output: "fixture output".into(),
+                    exit_code: Some(0),
+                    cancelled: false,
+                    truncated: false,
+                    full_output_path: None,
+                },
+            )))
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let manager = manager_with_plugin(
+        models(&["a"]),
+        ModelSwitchPolicy::default(),
+        Arc::default(),
+        Some(Arc::new(Shell)),
+    );
+    let session = create(&manager, directory.path()).await;
+    let current = session.current();
+    let mut native = current.subscribe();
+    assert_eq!(
+        success(&session, json!({"type":"bash", "command":"fixture"})).await["output"],
+        "fixture output"
+    );
+    let mut entries = Vec::new();
+    while let Ok(event) = native.events.try_recv() {
+        if let pi_session::AgentSessionEvent::EntryAppended { entry, .. } = &event.event {
+            entries.push(entry.id.clone());
+        }
+        assert_ne!(
+            pi_rpc::json_wire::session_event_json(event.event, &current)
+                .unwrap()
+                .map(|value| value["type"].clone()),
+            Some(json!("entry_appended"))
+        );
+    }
+    assert_eq!(entries.len(), 1);
+    let history = success(&session, json!({"type":"get_entries"})).await;
+    assert!(
+        history["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["id"] == entries[0] && entry["message"]["role"] == "bashExecution")
+    );
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn bash_hook_error_response_uses_the_raw_typed_message() {
+    struct FailingShell;
+    #[pi_plugin::plugin]
+    impl Plugin for FailingShell {
+        fn id(&self) -> PluginId {
+            PluginId::new("js-adapter")
+        }
+        async fn user_bash(
+            &self,
+            _: &pi_plugin::SessionPluginContext,
+            _: &pi_plugin::UserBashEvent,
+        ) -> Result<Option<pi_plugin::UserBashOverride>, pi_plugin::PluginError> {
+            Err(pi_plugin::PluginError::Hook {
+                plugin_id: PluginId::new("fixture"),
+                hook: "user_bash",
+                source_path: Some("fixture.mjs".into()),
+                message: "bash boom".into(),
+            })
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let manager = manager_with_plugin(
+        models(&["a"]),
+        ModelSwitchPolicy::default(),
+        Arc::default(),
+        Some(Arc::new(FailingShell)),
+    );
+    let session = create(&manager, directory.path()).await;
+    let result = request(&session, json!({"type":"bash","command":"must not run"})).await;
+    assert_eq!(result["error"], "bash boom");
+    let diagnostics = session.current().catalog().plugin_diagnostics();
+    assert_eq!(diagnostics.len(), 1);
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("fixture failed in user_bash")
+    );
+    manager.shutdown().await.unwrap();
+}
+
+struct HeldRun {
+    entered: Arc<tokio::sync::Notify>,
+}
+
+#[pi_plugin::plugin]
+impl Plugin for HeldRun {
+    fn id(&self) -> PluginId {
+        PluginId::new("rpc-held-run")
+    }
+
+    async fn agent_start(
+        &self,
+        context: pi_plugin::AgentPluginContext,
+        _: pi_plugin::AgentStartEvent,
+    ) -> Result<(), pi_plugin::PluginError> {
+        self.entered.notify_one();
+        context.signal().wait().await;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn busy_prompt_returns_the_raw_error_without_changing_contextual_display() {
+    let directory = tempfile::tempdir().unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let manager = manager_with_plugin(
+        models(&["a"]),
+        ModelSwitchPolicy::default(),
+        Arc::default(),
+        Some(Arc::new(HeldRun {
+            entered: entered.clone(),
+        })),
+    );
+    let session = create(&manager, directory.path()).await;
+    assert_eq!(
+        success(&session, json!({"type":"prompt", "message":"held"})).await,
+        json!({"disposition":"started"})
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        .await
+        .unwrap();
+    let response = request(&session, json!({"type":"prompt", "message":"not queued"})).await;
+    let contextual = session
+        .current()
+        .prompt_with_streaming_behavior_and_receipt("not queued either", None, |_| {})
+        .await
+        .unwrap_err();
+    success(&session, json!({"type":"abort"})).await;
+    manager.shutdown().await.unwrap();
+
+    let expected = "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.";
+    assert_eq!(response["success"], false);
+    assert_eq!(response["error"], expected);
+    assert_eq!(
+        contextual.to_string(),
+        format!("runtime operation failed: {expected}")
+    );
+}
+
+#[tokio::test]
+async fn all_model_response_surfaces_preserve_optional_catalog_metadata() {
+    let directory = tempfile::tempdir().unwrap();
+    let catalog = models(&["a", "b"])
+        .into_iter()
+        .map(|model| {
+            let mut value = serde_json::to_value(model).unwrap();
+            value["promptCache"] = json!({"short":30.0,"long":300.0});
+            value["samplingParamsByThinkingLevel"] =
+                json!({"off":{"temperature":0,"custom":null},"high":{}});
+            serde_json::from_value(value).unwrap()
+        })
+        .collect();
+    let manager = make_manager(catalog, ModelSwitchPolicy::default(), Arc::default());
+    let session = create(&manager, directory.path()).await;
+    let assert_metadata = |model: &Value| {
+        assert_eq!(model["promptCache"], json!({"short":30.0,"long":300.0}));
+        assert_eq!(
+            model["samplingParamsByThinkingLevel"],
+            json!({"off":{"temperature":0,"custom":null},"high":{}})
+        );
+    };
+    assert_metadata(&success(&session, json!({"type":"get_state"})).await["model"]);
+    for model in success(&session, json!({"type":"get_available_models"})).await["models"]
+        .as_array()
+        .unwrap()
+    {
+        assert_metadata(model);
+    }
+    assert_metadata(
+        &success(
+            &session,
+            json!({"type":"set_model","provider":"scripted","modelId":"b"}),
+        )
+        .await,
+    );
+    assert_metadata(&success(&session, json!({"type":"cycle_model"})).await["model"]);
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn last_assistant_text_matches_executed_legacy_oracle() {
+    let corpus: Value = serde_json::from_str(include_str!("fixtures/rpc-last-text.json")).unwrap();
+    for case in corpus["cases"].as_array().unwrap() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::create(
+            directory.path().join("history.jsonl"),
+            SessionHeader::new("last-text", directory.path()),
+        )
+        .unwrap();
+        for input in case["messages"].as_array().unwrap() {
+            let mut message = assistant("", input["stopReason"].as_str().unwrap());
+            message["content"] = input["content"].clone();
+            append(&store, message);
+        }
+        let manager = make_manager(models(&["a"]), ModelSwitchPolicy::default(), Arc::default());
+        let session = manager
+            .open_session(
+                pi_session::SessionSource::Store(store),
+                OpenSessionOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            success(&session, json!({"type":"get_last_assistant_text"})).await,
+            case["expected"],
+            "legacy case: {}",
+            case["name"],
+        );
+        manager.shutdown().await.unwrap();
+    }
 }

@@ -24,6 +24,7 @@ impl Plugin for ContextProbe {
         self.events.lock().unwrap().push(event);
         match self.index {
             1 => Err(PluginError::Hook {
+                source_path: None,
                 plugin_id: self.id(),
                 hook: "context",
                 message: "failed transform".into(),

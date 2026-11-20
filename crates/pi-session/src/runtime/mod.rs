@@ -12,12 +12,14 @@ mod control;
 pub(crate) mod events;
 mod lifecycle;
 mod navigation;
+mod observers;
 mod options;
 mod recovery;
 mod run;
 mod shell;
 mod shell_executor;
 mod views;
+pub use observers::{SessionEventObserver, SessionEventObserverGuard};
 pub use options::*;
 pub use shell_executor::SessionShellExecutor;
 pub use views::{SessionCatalog, SessionHistory};
@@ -37,10 +39,7 @@ use pi_runtime::{PiRuntime, PreparedRuntimeMessages, PreparedRuntimePrompt};
 use pi_shell::DEFAULT_TIMEOUT;
 
 use crate::runtime::events::AgentSessionEventHub;
-use crate::{
-    CompactionEntry, CompactionSettings, QueueKind, SessionCompactionPolicy, SessionContext,
-    SessionStore,
-};
+use crate::{CompactionSettings, QueueKind, SessionCompactionPolicy, SessionContext, SessionStore};
 
 const SESSION_OPEN: u8 = 0;
 const SESSION_TRANSITIONING: u8 = 1;
@@ -155,6 +154,7 @@ pub struct AgentSession {
     settings_writer: Option<Arc<dyn SessionSettingsWriter>>,
     context_updates: ContextUpdates,
     plugin_driver: Arc<PluginDriver>,
+    diagnostic_subscriptions: Vec<pi_plugin::PluginDiagnosticSubscription>,
     executor: tokio::runtime::Handle,
     session_dispatch_context: SessionDispatchContext,
     compaction_settings: Arc<RwLock<CompactionSettings>>,
@@ -190,9 +190,27 @@ enum PreparedSessionPrompt {
     Messages(PreparedRuntimeMessages),
 }
 
+/// A committed manual compaction and its estimate at the context cut point.
+/// Later hook/context changes cannot replace this result with another checkpoint.
+#[derive(Debug, Clone)]
+pub struct SessionCompactionResult {
+    record: crate::SessionRecord,
+    estimated_tokens_after: u64,
+}
+
+impl SessionCompactionResult {
+    pub fn record(&self) -> &crate::SessionRecord {
+        &self.record
+    }
+    pub fn estimated_tokens_after(&self) -> u64 {
+        self.estimated_tokens_after
+    }
+}
+
 struct CompletedCompaction {
-    entry: CompactionEntry,
     context: SessionContext,
+    record: crate::SessionRecord,
+    estimated_tokens_after: u64,
 }
 
 impl AgentSession {
@@ -296,6 +314,34 @@ impl AgentSession {
     /// revision and refresh via [`Self::snapshot`] after receiver lag.
     pub fn subscribe(&self) -> crate::AgentSessionSubscription {
         let subscription = self.events.subscribe();
+        self.publish_initial_fallback_notice();
+        subscription
+    }
+
+    /// Observe publications synchronously without the broadcast capacity/lag contract.
+    /// Retain the returned guard; callbacks run in revision order outside session locks.
+    pub fn observe_events(
+        &self,
+        observer: Arc<dyn SessionEventObserver>,
+    ) -> SessionEventObserverGuard {
+        let guard = self.events.observe(observer);
+        self.publish_initial_fallback_notice();
+        guard
+    }
+
+    /// Acknowledge observer delivery through the publications preceding this call.
+    /// Abort releases the producer but does not discard data already accepted by an observer.
+    pub async fn flush_events(
+        &self,
+        signal: pi_core::AbortSignal,
+    ) -> Result<(), crate::SessionError> {
+        self.events
+            .flush_observers(signal)
+            .await
+            .map_err(crate::SessionError::Runtime)
+    }
+
+    fn publish_initial_fallback_notice(&self) {
         let message = self
             .initial_model_fallback_message
             .lock()
@@ -305,7 +351,6 @@ impl AgentSession {
             self.events
                 .publish_extension_notice(message, crate::NoticeLevel::Warning);
         }
-        subscription
     }
 
     /// Publishes a transient, presentation-neutral notice from an extension.

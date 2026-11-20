@@ -4,7 +4,8 @@ use std::path::Path;
 use garde::Validate;
 use pi_core::{
     AnyModelSpec, ClassifierModelSpec, ImageModelSpec, ModelCost, ModelCostTier, ModelId,
-    ModelInput, ModelInputLimits, ModelSpec, ModelType, ProviderId,
+    ModelInput, ModelInputLimits, ModelPromptCache, ModelSamplingParamsByThinkingLevel, ModelSpec,
+    ModelType, ProviderId,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -53,6 +54,8 @@ pub(crate) struct PreparedOverride {
     pub thinking_level_map: BTreeMap<String, Option<String>>,
     pub input: Option<Vec<ModelInput>>,
     pub input_limits: Option<ModelInputLimits>,
+    pub prompt_cache: Option<ModelPromptCache>,
+    pub sampling_params_by_thinking_level: Option<ModelSamplingParamsByThinkingLevel>,
     pub cost: Option<PreparedCostOverride>,
     pub context_window: Option<u64>,
     pub max_tokens: Option<u64>,
@@ -128,6 +131,10 @@ struct ModelDefinition {
     #[schemars(with = "Option<ModelInputLimitsSchema>")]
     #[garde(custom(validate_input_limits))]
     input_limits: Option<ModelInputLimits>,
+    #[schemars(with = "Option<ModelPromptCacheSchema>")]
+    #[garde(custom(validate_prompt_cache))]
+    prompt_cache: Option<ModelPromptCache>,
+    sampling_params_by_thinking_level: Option<ModelSamplingParamsByThinkingLevel>,
     cost: Option<ModelCostConfig>,
     #[garde(range(min = 1))]
     context_window: Option<u64>,
@@ -182,6 +189,10 @@ struct ModelOverride {
     #[schemars(with = "Option<ModelInputLimitsSchema>")]
     #[garde(custom(validate_input_limits))]
     input_limits: Option<ModelInputLimits>,
+    #[schemars(with = "Option<ModelPromptCacheSchema>")]
+    #[garde(custom(validate_prompt_cache))]
+    prompt_cache: Option<ModelPromptCache>,
+    sampling_params_by_thinking_level: Option<ModelSamplingParamsByThinkingLevel>,
     cost: Option<ModelCostOverride>,
     #[garde(range(min = 1))]
     context_window: Option<u64>,
@@ -195,6 +206,26 @@ struct ModelOverride {
     #[schemars(with = "Option<ProviderCompatSchema>")]
     #[garde(custom(optional_object_value))]
     compat: Option<Value>,
+}
+
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+struct ModelPromptCacheSchema {
+    short: Option<f64>,
+    long: Option<f64>,
+}
+
+fn validate_prompt_cache(value: &Option<ModelPromptCache>, _: &()) -> garde::Result {
+    if let Some(cache) = value {
+        for lifetime in [cache.short, cache.long].into_iter().flatten() {
+            if !lifetime.is_finite() || lifetime <= 0.0 {
+                return Err(garde::Error::new(
+                    "cache lifetime must be a positive number",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 // Match Pi's open nested input-limit schemas; the core value retains the typed
@@ -687,6 +718,8 @@ impl From<ModelOverride> for PreparedOverride {
                 .input
                 .map(|input| input.into_iter().map(Into::into).collect()),
             input_limits: value.input_limits,
+            prompt_cache: value.prompt_cache,
+            sampling_params_by_thinking_level: value.sampling_params_by_thinking_level,
             cost: value.cost.map(Into::into),
             context_window: value.context_window,
             max_tokens: value.max_tokens,
@@ -1076,6 +1109,8 @@ impl ModelDefinition {
             |input| input.into_iter().map(Into::into).collect(),
         );
         spec.input_limits = definition.input_limits;
+        spec.prompt_cache = definition.prompt_cache.map(Box::new);
+        spec.sampling_params_by_thinking_level = definition.sampling_params_by_thinking_level;
         spec.cost = definition.cost.map(Into::into).unwrap_or_default();
         spec.context_window = context_window;
         spec.max_tokens = max_tokens;
@@ -1109,6 +1144,24 @@ pub(crate) fn apply_override(spec: &mut ModelSpec, value: &PreparedOverride) {
         spec.input.clone_from(input);
     }
     spec.input_limits = merge_input_limits(spec.input_limits, value.input_limits);
+    if let Some(cache) = value.prompt_cache {
+        let base = spec.prompt_cache.get_or_insert_with(Box::default);
+        base.short = cache.short.or(base.short);
+        base.long = cache.long.or(base.long);
+    }
+    if let Some(levels) = &value.sampling_params_by_thinking_level {
+        let base = spec
+            .sampling_params_by_thinking_level
+            .get_or_insert_with(BTreeMap::new);
+        // Pi merges each known thinking level's fields, not the whole level object.
+        for level in pi_core::ThinkingLevel::ALL {
+            if let Some(params) = levels.get(level.as_str()) {
+                base.entry(level.as_str().to_string())
+                    .or_default()
+                    .extend(params.clone());
+            }
+        }
+    }
     if let Some(cost) = &value.cost {
         if let Some(input) = cost.input {
             spec.cost.input = input;

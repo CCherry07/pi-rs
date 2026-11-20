@@ -248,6 +248,16 @@ impl WeakAgent {
     pub fn state(&self) -> Option<AgentStateSnapshot> {
         self.inner.upgrade().map(|inner| Agent { inner }.state())
     }
+
+    /// Identified inputs still awaiting a drain. Session listeners use these
+    /// identities to distinguish equal-text inputs from different queues; an
+    /// already-drained delivery is absent even before its message is committed.
+    pub fn queued_message_ids(&self) -> Option<Vec<String>> {
+        let inner = self.inner.upgrade()?;
+        let mut ids = inner.steering.identities();
+        ids.extend(inner.follow_up.identities());
+        Some(ids)
+    }
 }
 
 /// Immutable plugin/runtime dependencies captured once by each agent run.

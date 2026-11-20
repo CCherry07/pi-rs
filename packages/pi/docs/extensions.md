@@ -134,8 +134,12 @@ installed and sends `confirm`, `select`, `input`, `editor` and `notify` requests
 including startup hooks. AbortSignal, timeout, generation retirement and disconnect release pending
 dialogs. Startup, reload and ordinary notifications use one ordered output channel and are emitted
 once. RPC leaves arbitrary custom terminal components, component widgets, headers and footers
-inactive, matching legacy Pi's RPC behavior. Status/text widgets/title/editor-text wire methods
-remain outside this bridge's supported subset.
+inactive, matching legacy Pi's RPC behavior. The RPC context also exposes terminal-inactive
+compatibility methods: `getAllThemes()` returns `[]`, `getTheme()` and `getEditorComponent()` return
+`undefined`, and `onTerminalInput()` returns an idempotent no-op unsubscribe function. `setTheme()`
+returns `{ success: false, error: "Theme switching not supported in RPC mode" }` for either a name
+or theme object. Working-indicator, autocomplete and editor-component registration are no-ops.
+These RPC-only defaults do not add theme discovery or global input interception to the TUI.
 
 This adapter is a compatibility subset. Custom editor subclasses,
 complete theme configuration and arbitrary terminal operations are not supported. Use the existing

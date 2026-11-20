@@ -7,6 +7,8 @@ use pi_core::{Usage, UsageCost};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use super::projection::SessionContext;
+
 pub use pi_core::session::*;
 
 pub const SESSION_SCHEMA_VERSION: u32 = 4;
@@ -76,7 +78,57 @@ pub struct SessionHeader {
     pub metadata: Option<Map<String, Value>>,
 }
 
+const INITIAL_TOOL_SELECTION: &str = "pi-rs.initialToolSelection";
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InitialToolSelection {
+    schema_version: u32,
+    active_tool_names: Vec<String>,
+}
+
 impl SessionHeader {
+    pub(crate) fn initial_active_tools(&self) -> Result<Option<Vec<String>>, HistoryError> {
+        let Some(value) = self
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get(INITIAL_TOOL_SELECTION))
+        else {
+            return Ok(None);
+        };
+        let selection: InitialToolSelection =
+            serde_json::from_value(value.clone()).map_err(|error| {
+                HistoryError::InvalidPayload(format!("invalid initial tool selection: {error}"))
+            })?;
+        if selection.schema_version != 1 {
+            return Err(HistoryError::InvalidPayload(
+                "unsupported initial tool selection schemaVersion".into(),
+            ));
+        }
+        Ok(Some(selection.active_tool_names))
+    }
+
+    pub(crate) fn set_initial_active_tools(&mut self, tools: Vec<String>) {
+        self.metadata.get_or_insert_with(Map::new).insert(
+            INITIAL_TOOL_SELECTION.into(),
+            serde_json::to_value(InitialToolSelection {
+                schema_version: 1,
+                active_tool_names: tools,
+            })
+            .expect("initial tool selection contains only strings"),
+        );
+    }
+
+    pub(crate) fn with_initial_tools(
+        &self,
+        mut context: SessionContext,
+    ) -> Result<SessionContext, HistoryError> {
+        if context.active_tool_names.is_none() {
+            context.active_tool_names = self.initial_active_tools()?;
+        }
+        Ok(context)
+    }
+
     /// Reads a full saved workspace, falling back only when metadata is absent.
     pub fn workspace(&self) -> Result<pi_core::WorkspaceSpec, crate::history::HistoryError> {
         let Some(value) = self

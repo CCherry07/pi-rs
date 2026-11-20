@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
   assertCompatibleGlibcReferences,
   assertNpmPublishResultMatches,
   assertPublishedPackageMatches,
+  cargoTargetDirectory,
   glibcVersionsFromReadelf,
   isNpmAlreadyPublishedError,
   maximumLinuxGlibcVersion,
@@ -16,11 +18,29 @@ import {
   publishPackageDirectories,
   releaseMatrix,
   synchronizeCargoLockWorkspaceVersions,
+  targetOutputDirectory,
   validateReleaseConfiguration,
   workspaceVersionPackageNames,
 } from "../scripts/release.js";
 import { VERSION } from "../src/compat-api.js";
 import { supportedNativeTargets } from "../src/native-target.js";
+
+test("native artifacts follow absolute and workspace-relative Cargo target directories", () => {
+  const workspace = fileURLToPath(new URL("../../../", import.meta.url));
+  const absolute = resolve(workspace, "custom-build");
+  for (const [environment, expected] of [
+    [{}, join(workspace, "target")],
+    [{ CARGO_TARGET_DIR: ".build/rpc-validation/cargo" }, resolve(workspace, ".build/rpc-validation/cargo")],
+    [{ CARGO_TARGET_DIR: absolute }, absolute],
+  ] as const) {
+    assert.equal(cargoTargetDirectory(environment), expected);
+    for (const target of supportedNativeTargets) {
+      for (const profile of ["debug", "release"] as const) {
+        assert.equal(targetOutputDirectory(target, profile, environment), join(expected, target.rustTarget, profile));
+      }
+    }
+  }
+});
 
 test("release configuration keeps Cargo and npm product versions together", () => {
   const configuration = validateReleaseConfiguration();

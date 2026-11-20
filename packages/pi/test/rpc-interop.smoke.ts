@@ -29,7 +29,7 @@ function stream(response: ServerResponse, tool: FixtureTool) {
   })}\n\ndata: [DONE]\n\n`);
 }
 
-async function fixture(t: TestContext, tool: FixtureTool = false) {
+async function fixture(t: TestContext, tool: FixtureTool = false, respond = stream) {
   const root = await mkdtemp(join(tmpdir(), "pi-rpc-interop-"));
   const agent = join(root, "agent");
   await mkdir(agent);
@@ -41,7 +41,7 @@ async function fixture(t: TestContext, tool: FixtureTool = false) {
     request.on("data", chunk => { body += chunk; });
     request.on("end", () => {
       requests.push(JSON.parse(body));
-      stream(response, requests.length === 1 ? tool : false);
+      respond(response, requests.length === 1 ? tool : false);
     });
   });
   await new Promise<void>((done, reject) => {
@@ -56,9 +56,10 @@ async function fixture(t: TestContext, tool: FixtureTool = false) {
   });
   const address = server.address();
   assert.ok(address && typeof address !== "string");
+  const baseUrl = `http://127.0.0.1:${address.port}/v1`;
   const env: NodeJS.ProcessEnv = {
     HOME: root, USERPROFILE: root, XDG_CONFIG_HOME: join(root, "config"), PI_OFFLINE: "1",
-    OPENAI_API_KEY: "fixture-only", OPENAI_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
+    OPENAI_API_KEY: "fixture-only", OPENAI_BASE_URL: baseUrl,
   };
   for (const key of ["PATH", "SystemRoot", "WINDIR", "ComSpec", "PATHEXT", "TMP", "TEMP", "TMPDIR"]) {
     if (process.env[key] !== undefined) env[key] = process.env[key];
@@ -134,7 +135,7 @@ async function fixture(t: TestContext, tool: FixtureTool = false) {
       await waitForExit();
     } };
   }
-  return { root, agent, requests, start };
+  return { root, agent, baseUrl, requests, start };
 }
 
 test("RPC model discovery flushes batched query responses before stdin EOF", { timeout: 10_000 }, async t => {
@@ -770,9 +771,65 @@ test("RPC rejects startup file arguments", { timeout: 30_000 }, async t => {
   assert.equal(f.requests.length, 0);
 });
 
+test("RPC JS stream hooks seed once and replay text and tool deltas exactly once", { timeout: 40_000 }, async t => {
+  const f = await fixture(t, true, (response, tool) => {
+    if (!tool) { stream(response, false); return; }
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    const deltas = [
+      { content: "first " }, { content: "second" },
+      { tool_calls: [{ index: 0, id: "write-fixture", type: "function",
+        function: { name: "write", arguments: '{"path":"approved.txt",' } }] },
+      { tool_calls: [{ index: 0, function: { arguments: '"content":"allowed"}' } }] },
+    ];
+    const chunks = deltas.map(delta => ({ choices: [{ index: 0, delta, finish_reason: null }] }));
+    response.end([...chunks, { choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+      usage: { prompt_tokens: 8, completion_tokens: 4, total_tokens: 12 } }]
+      .map(chunk => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n");
+  });
+  const report = join(f.root, "stream-hooks.json");
+  const extension = join(f.root, "stream-hooks.ts");
+  await writeFile(extension, `import { writeFileSync } from "node:fs";
+    export default function (pi) {
+      const events = [];
+      pi.on("message_update", event => { events.push(JSON.parse(JSON.stringify(event))); });
+      pi.on("agent_end", () => { writeFileSync(${JSON.stringify(report)}, JSON.stringify(events)); });
+    }`);
+  const rpc = f.start(["--no-session", "--extension", extension]);
+  await rpc.request("prompt", { message: "exercise incremental stream hooks" });
+  await rpc.wait(record => record.type === "agent_settled");
+  const events: RecordValue[] = JSON.parse(await readFile(report, "utf8"));
+  const first = events.find(event => event.assistantMessageEvent?.type === "text_start");
+  assert.ok(first, "real pi-js-plugin bridge delivered the initial seed");
+  assert.equal(first.message.content[0].text, "");
+  assert.deepEqual(events.filter(event => event.assistantMessageEvent?.type === "text_delta")
+    .map(event => event.message.content[0].text), ["first ", "first second", "fixture finished"]);
+  const call = events.find(event => event.assistantMessageEvent?.type === "toolcall_end");
+  assert.ok(call, "real pi-js-plugin bridge delivered the assembled tool call");
+  assert.deepEqual(call.assistantMessageEvent.toolCall.arguments, { path: "approved.txt", content: "allowed" });
+  assert.deepEqual(call.message.content, [
+    { type: "text", text: "first second" },
+    { type: "toolCall", id: "write-fixture", name: "write", arguments: { path: "approved.txt", content: "allowed" } },
+  ]);
+  assert.equal(await readFile(join(f.root, "approved.txt"), "utf8"), "allowed");
+  assert.equal(f.requests.length, 2);
+  await rpc.close();
+});
+
 for (const decision of ["allow", "deny", "abort", "disconnect"] as const) {
   test(`RPC tool confirmation ${decision} crosses the JS/NAPI bridge`, { timeout: 40_000 }, async t => {
     const f = await fixture(t, true);
+    if (decision === "abort") {
+      // The model must be registered to test current catalog metadata, rather
+      // than the intentionally unknown metadata of an unregistered fallback.
+      await writeFile(join(f.agent, "models.json"), JSON.stringify({ providers: {
+        "openai-compatible": {
+          api: "openai-completions", baseUrl: f.baseUrl, apiKey: "fixture-only",
+          models: [{ id: "gpt-4o-mini", name: "Fixture", reasoning: false, input: ["text"],
+            contextWindow: 32000, maxTokens: 1024,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+        },
+      } }));
+    }
     const extension = join(f.root, "permission.ts");
     await writeFile(extension, `export default function (pi) {
       pi.on("tool_call", async (event, ctx) => {
@@ -793,7 +850,8 @@ for (const decision of ["allow", "deny", "abort", "disconnect"] as const) {
     assert.equal(JSON.parse(question.message).toolName, "write");
     assert.equal(await exists(join(f.root, "approved.txt")), false);
     rpc.send({ type: "extension_ui_response", id: "unrelated", confirmed: true });
-    assert.equal((await rpc.request("get_state")).isStreaming, true, "RPC must remain responsive during confirmation");
+    const activeState = await rpc.request("get_state");
+    assert.equal(activeState.isStreaming, true, "RPC must remain responsive during confirmation");
     assert.equal(await exists(join(f.root, "approved.txt")), false, "unknown IDs cannot approve a tool");
     if (decision === "disconnect") {
       await rpc.close();
@@ -805,6 +863,55 @@ for (const decision of ["allow", "deny", "abort", "disconnect"] as const) {
         rpc.send({ type: "extension_ui_response", id: question.id, confirmed: decision === "allow" });
       }
       await rpc.wait(record => record.type === "agent_settled");
+      if (decision === "abort") {
+        const toolcallEnd = await rpc.wait(record => record.type === "message_update"
+          && record.assistantMessageEvent?.type === "toolcall_end");
+        const toolEnd = await rpc.wait(record => record.type === "tool_execution_end");
+        const ended = await rpc.wait(record => record.type === "agent_end");
+        const history = await rpc.request("get_messages");
+        const journal = await rpc.request("get_entries");
+        assert.deepEqual(toolcallEnd.assistantMessageEvent.toolCall, {
+          type: "toolCall", id: "write-fixture", name: "write",
+          arguments: { path: "approved.txt", content: "allowed" },
+        }, "the real host serializes the tagged tool-call block");
+        assert.equal(toolEnd.isError, true);
+        assert.deepEqual(toolEnd.result.details, {}, "scheduler cancellation has explicit error details");
+        assert.equal(activeState.model.api, "openai-completions");
+        assert.equal(activeState.thinkingLevel, "off");
+        const surfaces: Array<[string, RecordValue[]]> = [
+          ["message_end", rpc.records.filter(record => record.type === "message_end").map(record => record.message)],
+          ["agent_end", ended.messages],
+          ["get_messages", history.messages],
+          ["get_entries", journal.entries.filter((entry: RecordValue) => entry.type === "message")
+            .map((entry: RecordValue) => entry.message)],
+        ];
+        for (const [surface, messages] of surfaces) {
+          const results = messages.filter(message => message.role === "toolResult" && message.isError);
+          assert.equal(results.length, 1, `${surface}: one cancelled tool result`);
+          const result = results[0];
+          assert.ok(result, `${surface}: cancelled tool result is present`);
+          assert.deepEqual(result.details, {}, `${surface}: explicit scheduler error details`);
+          assert.equal("durationMs" in result, false, `${surface}: unexecuted tools have no duration`);
+          const aborted = messages.filter(message => message.role === "assistant" && message.stopReason === "aborted");
+          assert.equal(aborted.length, 1, `${surface}: one terminal aborted assistant`);
+          const message = aborted[0];
+          assert.ok(message, `${surface}: terminal aborted assistant is present`);
+          assert.deepEqual({
+            api: message.api, provider: message.provider, model: message.model,
+            thinkingLevel: message.thinkingLevel, errorMessage: message.errorMessage, content: message.content,
+          }, {
+            api: "openai-completions", provider: activeState.model.provider, model: activeState.model.id,
+            thinkingLevel: "off", errorMessage: "This operation was aborted", content: [],
+          }, `${surface}: current pre-request cancellation metadata`);
+          assert.deepEqual(message.usage, {
+            input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+          }, `${surface}: pre-request cancellation has no provider usage`);
+          assert.equal(typeof message.durationMs, "number", `${surface}: response duration is present`);
+          assert.ok(message.durationMs >= 0, `${surface}: response duration is nonnegative`);
+        }
+        assert.equal(f.requests.length, 1, "pre-request cancellation does not start another provider request");
+      }
       await rpc.close();
     }
     assert.equal(await exists(join(f.root, "approved.txt")), decision === "allow");

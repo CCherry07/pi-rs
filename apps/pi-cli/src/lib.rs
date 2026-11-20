@@ -353,6 +353,15 @@ async fn run(
     let mut factory = ProductSessionFactory::new(config, trust.service.clone(), settings)
         .with_plugin_context(cli_mode.presentation_mode(), plugin_context_binding.clone())
         .with_plugin_ui_bridge(plugin_ui);
+    if let Some(bridge) = rpc_ui.clone() {
+        factory = factory.with_session_binding(move |session| {
+            // Managed child generations have their own observers; only the RPC
+            // frontend's user session publishes directly on this connection.
+            if session.catalog().execution_origin() == pi_plugin::SessionExecutionOrigin::User {
+                bridge.bind_session(session);
+            }
+        });
+    }
     if let Some(js_host) = js_host {
         factory = factory.with_js_plugin_host(js_host);
     }

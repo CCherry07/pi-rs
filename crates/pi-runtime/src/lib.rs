@@ -893,6 +893,24 @@ impl PiRuntime {
         Arc::clone(self.current_generation().agent.plugins())
     }
 
+    /// Observe failures from both executable hook families in this generation.
+    pub fn observe_plugin_diagnostics(
+        &self,
+        observer: pi_plugin::PluginDiagnosticObserver,
+    ) -> Vec<pi_plugin::PluginDiagnosticSubscription> {
+        let generation = self.current_generation();
+        vec![
+            generation
+                .agent
+                .plugins()
+                .observe_diagnostics(observer.clone()),
+            generation
+                .agent
+                .provider_plugins()
+                .observe_diagnostics(observer),
+        ]
+    }
+
     pub fn plugin_order(&self) -> Vec<PluginId> {
         self.current_generation().agent.plugins().plugin_order()
     }

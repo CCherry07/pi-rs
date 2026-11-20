@@ -112,6 +112,7 @@ impl Plugin for FailingAgentSettledPlugin {
         _event: AgentSettledEvent,
     ) -> Result<(), PluginError> {
         Err(PluginError::Hook {
+            source_path: None,
             plugin_id: self.id(),
             hook: "agent_settled",
             message: "intentional settled failure".to_string(),
@@ -1382,6 +1383,8 @@ impl Plugin for LifecyclePlugin {
             return Ok(None);
         }
         let compaction = CompactionEntry {
+            from_hook: None,
+            system_message: None,
             retained_entry_ids: Vec::new(),
             summary: "extension summary".to_string(),
             retained_tail: event.preparation.retained_tail.clone(),
@@ -1585,7 +1588,15 @@ async fn create_records_only_v4_configuration_and_messages() {
     assert_eq!(values[0]["version"], 4);
     assert_eq!(values[1]["type"], "model_change");
     assert_eq!(values[2]["type"], "thinking_level_change");
-    assert_eq!(values[3]["type"], "active_tools_change");
+    assert_eq!(
+        values[0]["metadata"]["pi-rs.initialToolSelection"],
+        serde_json::json!({"schemaVersion": 1, "activeToolNames": []})
+    );
+    assert!(
+        values
+            .iter()
+            .all(|value| value["type"] != "active_tools_change")
+    );
 }
 
 #[tokio::test]
@@ -2001,7 +2012,17 @@ async fn open_and_checkout_restore_the_selected_v4_branch() {
         .id;
     session.prompt("abandoned").await.unwrap();
     let context = session.checkout(Some(&first_assistant)).await.unwrap();
-    assert_eq!(context.messages.len(), 2);
+    assert_eq!(context.messages.len(), 3);
+    assert_eq!(
+        pi_core::SystemMessage::current_tools(
+            context
+                .messages
+                .iter()
+                .filter_map(AgentMessage::as_standard)
+        )[0]
+        .name,
+        "echo"
+    );
 
     drop(session);
     let runtime = PiRuntime::builder()
@@ -2018,7 +2039,7 @@ async fn open_and_checkout_restore_the_selected_v4_branch() {
     let reopened = AgentSession::open(runtime, &path, Default::default())
         .await
         .unwrap();
-    assert_eq!(reopened.runtime().agent().state().messages.len(), 2);
+    assert_eq!(reopened.runtime().agent().state().messages.len(), 3);
     assert_eq!(
         reopened.store().leaf_id().as_deref(),
         Some(first_assistant.as_str())
@@ -2045,6 +2066,8 @@ async fn compaction_uses_persisted_retained_tail() {
         .unwrap();
     session
         .append_compaction(CompactionEntry {
+            from_hook: None,
+            system_message: None,
             retained_entry_ids: Vec::new(),
             summary: "short".to_string(),
             retained_tail: vec![Message::User(UserMessage::text("retained", 2)).into()],
@@ -2091,6 +2114,8 @@ async fn lifecycle_hooks_can_replace_compaction_and_cancel_tree_navigation() {
 
     session
         .append_compaction(CompactionEntry {
+            from_hook: None,
+            system_message: None,
             retained_entry_ids: Vec::new(),
             summary: "default summary".to_string(),
             retained_tail: Vec::new(),
@@ -2832,6 +2857,8 @@ async fn context_budget_uses_session_limits_and_clears_after_compaction_and_rest
     );
     session
         .append_compaction(CompactionEntry {
+            from_hook: None,
+            system_message: None,
             retained_entry_ids: Vec::new(),
             summary: "short summary".into(),
             retained_tail: Vec::new(),

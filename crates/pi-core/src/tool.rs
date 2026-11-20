@@ -87,6 +87,34 @@ pub struct ToolSpec {
     pub prompt_guidelines: Vec<String>,
 }
 
+/// A model-visible tool definition carried by the transcript. Executable and
+/// presentation-only metadata intentionally stays on `ToolSpec`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolDeclaration {
+    pub name: String,
+    pub description: String,
+    pub parameters: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constrained_sampling: Option<ConstrainedSampling>,
+}
+
+impl From<&ToolSpec> for ToolDeclaration {
+    fn from(spec: &ToolSpec) -> Self {
+        Self {
+            name: spec.name.clone(),
+            description: spec.description.clone(),
+            parameters: spec.parameters.clone(),
+            constrained_sampling: spec.constrained_sampling.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolReference {
+    pub name: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolResult {
     pub content: Vec<ContentBlock>,

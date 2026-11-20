@@ -659,6 +659,8 @@ mod tests {
 
     fn assistant(content: Vec<ContentBlock>, timestamp_ms: i64) -> Message {
         Message::assistant(pi_core::AssistantMessage {
+            duration_ms: None,
+            thinking_level: None,
             content,
             api: "scripted".into(),
             provider: pi_core::ProviderId::new("scripted"),

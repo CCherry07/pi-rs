@@ -1,7 +1,8 @@
 use pi_core::{CustomMessageContent, Message, Usage, UserMessage};
 use pi_session::{
-    AgentMessage, CompactionEntry, CustomMessageEntry, ISOLATED_CONTEXT_TYPE, MAIN_LANE,
-    SessionEntry, SessionHeader, SessionStore, aggregate_document_usage,
+    ActiveToolsEntry, AgentMessage, CompactionEntry, CustomMessageEntry, ForkOptions, ForkPosition,
+    ISOLATED_CONTEXT_TYPE, MAIN_LANE, SessionContextBuildOptions, SessionEntry, SessionHeader,
+    SessionStore, aggregate_document_usage,
 };
 use serde_json::json;
 
@@ -24,6 +25,131 @@ fn assert_projection_matches(path: &std::path::Path) {
             .map(|entry| &entry.id)
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn initial_tools_preserve_absence_empty_and_selection_across_projection_and_fork() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, initial) in [
+        ("old-v4", None),
+        ("empty", Some(vec![])),
+        ("restricted", Some(vec!["read".to_string()])),
+    ] {
+        let path = dir.path().join(format!("{name}.jsonl"));
+        let mut header = SessionHeader::new(name, dir.path());
+        if let Some(tools) = &initial {
+            header.metadata = Some(
+                serde_json::from_value(json!({
+                    "pi-rs.initialToolSelection": {"schemaVersion": 1, "activeToolNames": tools}
+                }))
+                .unwrap(),
+            );
+        }
+        let store = SessionStore::create(&path, header).unwrap();
+        let root = store
+            .append_message(Message::User(UserMessage::text("hello", 1)))
+            .unwrap();
+        let original = std::fs::read(&path).unwrap();
+        assert_eq!(store.context().unwrap().active_tool_names, initial);
+        assert_eq!(
+            SessionStore::read_transcript(&path)
+                .unwrap()
+                .context
+                .active_tool_names,
+            initial
+        );
+        assert_eq!(
+            SessionStore::read(&path)
+                .unwrap()
+                .context()
+                .unwrap()
+                .active_tool_names,
+            initial
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            original,
+            "read never upgrades old journals"
+        );
+
+        for tools in [vec!["write".to_string()], vec![]] {
+            store
+                .append(SessionEntry::ActiveToolsChange(ActiveToolsEntry {
+                    active_tool_names: tools.clone(),
+                }))
+                .unwrap();
+            assert_eq!(store.context().unwrap().active_tool_names, Some(tools));
+            assert_projection_matches(&path);
+        }
+        assert_eq!(
+            store
+                .context_at_with_options(Some(&root), &SessionContextBuildOptions::default())
+                .unwrap()
+                .active_tool_names,
+            initial
+        );
+        let document = store.load().unwrap();
+        assert_eq!(
+            document
+                .context_at_with_options(Some(&root), &SessionContextBuildOptions::default())
+                .unwrap()
+                .active_tool_names,
+            initial
+        );
+        for (kind, options, expected) in [
+            (
+                "branch",
+                ForkOptions::Branch {
+                    entry_id: Some(root.clone()),
+                    position: Some(ForkPosition::At),
+                },
+                initial.clone(),
+            ),
+            ("tree", ForkOptions::Tree, Some(vec![])),
+        ] {
+            let fork_path = dir.path().join(format!("{name}-{kind}.jsonl"));
+            let fork = store
+                .fork(
+                    &fork_path,
+                    SessionHeader::new(format!("{name}-{kind}"), dir.path()),
+                    &options,
+                )
+                .unwrap();
+            assert_eq!(fork.context().unwrap().active_tool_names, expected);
+            assert_eq!(
+                fork.context_at_with_options(Some(&root), &SessionContextBuildOptions::default())
+                    .unwrap()
+                    .active_tool_names,
+                initial
+            );
+            assert_projection_matches(&fork_path);
+        }
+    }
+}
+
+#[test]
+fn malformed_initial_tool_metadata_is_rejected_without_rewriting_the_journal() {
+    let dir = tempfile::tempdir().unwrap();
+    for (index, value) in [
+        json!(null),
+        json!({"schemaVersion": 2, "activeToolNames": []}),
+        json!({"schemaVersion": 1}),
+        json!({"schemaVersion": 1, "activeToolNames": null}),
+        json!({"schemaVersion": 1, "activeToolNames": [1]}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = dir.path().join(format!("invalid-{index}.jsonl"));
+        let mut header = SessionHeader::new(format!("invalid-{index}"), dir.path());
+        header.metadata =
+            Some(serde_json::from_value(json!({"pi-rs.initialToolSelection": value})).unwrap());
+        let bytes = format!("{}\n", serde_json::to_string(&header).unwrap());
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(SessionStore::open_handle(&path).is_err());
+        assert!(SessionStore::read_transcript(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes);
+    }
 }
 
 #[test]
@@ -97,6 +223,8 @@ fn transcript_preserves_branch_compaction_and_native_inherited_context() {
     );
     store
         .append(SessionEntry::Compaction(CompactionEntry {
+            from_hook: None,
+            system_message: None,
             summary: "summary".into(),
             retained_tail: vec![Message::User(UserMessage::text("retained", 3)).into()],
             retained_entry_ids: vec![],

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde_json::Value;
 #[cfg(test)]
 use tokio::io::{AsyncWrite, AsyncWriteExt};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 type Completion = oneshot::Sender<Result<(), String>>;
 
@@ -18,6 +18,7 @@ struct Write {
 struct Output {
     sender: mpsc::UnboundedSender<Write>,
     worker: tokio::task::JoinHandle<()>,
+    closed: watch::Receiver<bool>,
 }
 
 impl Drop for Output {
@@ -134,6 +135,7 @@ impl RpcOutput {
 
     fn with_destination(mut destination: Destination) -> Self {
         let (sender, mut receiver) = mpsc::unbounded_channel::<Write>();
+        let (closing, closed) = watch::channel(false);
         let worker = tokio::spawn(async move {
             while let Some(write) = receiver.recv().await {
                 let result = destination.write(write.bytes).await;
@@ -145,8 +147,13 @@ impl RpcOutput {
                     break;
                 }
             }
+            let _ = closing.send(true);
         });
-        Self(Arc::new(Output { sender, worker }))
+        Self(Arc::new(Output {
+            sender,
+            worker,
+            closed,
+        }))
     }
 
     fn send(&self, value: Option<Value>, completion: Option<Completion>) -> Result<(), String> {
@@ -162,6 +169,15 @@ impl RpcOutput {
             .sender
             .send(Write { bytes, completion })
             .map_err(|_| "RPC output closed".to_string())
+    }
+
+    pub(crate) async fn closed(&self) {
+        let mut closed = self.0.closed.clone();
+        while !*closed.borrow_and_update() {
+            if closed.changed().await.is_err() {
+                break;
+            }
+        }
     }
 
     /// Enqueues at the call site, before a following dialog or command response.

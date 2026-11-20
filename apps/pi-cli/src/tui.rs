@@ -1002,6 +1002,7 @@ impl App {
                 steering,
                 follow_up,
                 items,
+                ..
             } => {
                 self.queue = QueueSnapshot {
                     steering,
@@ -1026,7 +1027,7 @@ impl App {
                 }
                 self.status = error_message.unwrap_or_else(|| "Compaction complete".to_string());
             }
-            AgentSessionEvent::EntryAppended { entry } => {
+            AgentSessionEvent::EntryAppended { entry, .. } => {
                 if matches!(
                     entry.entry,
                     SessionEntry::Custom(_) | SessionEntry::CustomMessage(_)
@@ -1248,6 +1249,7 @@ impl App {
                 tool_name,
                 result,
                 is_error,
+                ..
             } => {
                 let duration_ms = self
                     .tool_started_at
@@ -3555,6 +3557,8 @@ mod tests {
         let mut app = demo_app();
         app.transcript.clear();
         let failure = pi_core::AssistantMessage {
+            duration_ms: None,
+            thinking_level: None,
             provider_thinking_level: None,
             content: Vec::new(),
             api: "openai-completions".to_string(),
@@ -4994,12 +4998,14 @@ mod tests {
         let mut tool_usage = billed_usage(20, 5, 6, 7);
         tool_usage.total_tokens = 0;
         app.apply_session_event(AgentSessionEvent::EntryAppended {
+            origin: pi_session::EntryAppendOrigin::Agent,
             entry: SessionRecord {
                 id: "tool-entry".to_string(),
                 seq: 1,
                 parent_id: None,
                 timestamp_ms: 2,
                 entry: SessionEntry::message(Message::tool_result(pi_core::ToolResultMessage {
+                    duration_ms: None,
                     tool_call_id: ToolCallId::new("metered-call"),
                     tool_name: "metered".to_string(),
                     content: vec![ContentBlock::Text(pi_core::TextContent::new("result"))],
@@ -5012,6 +5018,8 @@ mod tests {
             },
         });
         let compaction = CompactionEntry {
+            from_hook: None,
+            system_message: None,
             retained_entry_ids: Vec::new(),
             summary: "summary".to_string(),
             retained_tail: Vec::new(),
@@ -5020,6 +5028,7 @@ mod tests {
             usage: Some(billed_usage(30, 8, 9, 10)),
         };
         app.apply_session_event(AgentSessionEvent::EntryAppended {
+            origin: pi_session::EntryAppendOrigin::Explicit,
             entry: SessionRecord {
                 id: "compaction-entry".to_string(),
                 seq: 2,
@@ -5029,6 +5038,7 @@ mod tests {
             },
         });
         app.apply_session_event(AgentSessionEvent::CompactionEnd {
+            estimated_tokens_after: None,
             reason: pi_session::CompactionReason::Manual,
             result: Some(SessionRecord {
                 id: "compaction-entry".to_string(),
@@ -5057,6 +5067,8 @@ mod tests {
         let log = SessionStore::create(&path, SessionHeader::new("usage-resume", directory.path()))
             .unwrap();
         let assistant = Message::assistant(pi_core::AssistantMessage {
+            duration_ms: None,
+            thinking_level: None,
             provider_thinking_level: None,
             content: vec![ContentBlock::Text(pi_core::TextContent::new("answer"))],
             api: "openai-completions".to_string(),
@@ -5077,6 +5089,7 @@ mod tests {
             .unwrap();
         log.append_message(assistant.clone()).unwrap();
         log.append_message(Message::tool_result(pi_core::ToolResultMessage {
+            duration_ms: None,
             tool_call_id: ToolCallId::new("metered-call"),
             tool_name: "metered".to_string(),
             content: vec![ContentBlock::Text(pi_core::TextContent::new("result"))],
@@ -5088,6 +5101,8 @@ mod tests {
         }))
         .unwrap();
         log.append(SessionEntry::Compaction(CompactionEntry {
+            from_hook: None,
+            system_message: None,
             retained_entry_ids: Vec::new(),
             summary: "summary".to_string(),
             retained_tail: vec![assistant.clone().into()],

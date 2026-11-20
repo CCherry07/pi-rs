@@ -19,6 +19,8 @@ pub struct Usage {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageCost {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_from_provider: Option<bool>,
     pub input: f64,
     pub output: f64,
     pub cache_read: f64,

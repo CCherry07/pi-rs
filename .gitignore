@@ -37,6 +37,7 @@ docs/
 !/docs/
 /docs/*
 !/docs/prompt-conformance.md
+!/docs/rpc-conformance.md
 !/docs/tool-prompt-comparison-notes.md
 !/docs/research/
 /docs/research/*

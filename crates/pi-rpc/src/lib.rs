@@ -6,6 +6,7 @@
 
 #![warn(unreachable_pub)]
 
+mod events;
 pub mod json_wire;
 mod output;
 pub mod rpc;

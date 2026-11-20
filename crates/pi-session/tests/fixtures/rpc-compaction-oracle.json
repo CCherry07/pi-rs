@@ -1,0 +1,1011 @@
+{
+  "commit": "05fd3fbda0bbb9a1c7a76e4bf92ab58ed77c8d94",
+  "evidenceLevel": "Executed legacy in-memory SessionManager and pure projection/token functions; no provider request",
+  "sources": [
+    "packages/coding-agent/src/core/session-manager.ts",
+    "packages/coding-agent/src/core/compaction/compaction.ts",
+    "packages/ai/src/utils/transcript.ts"
+  ],
+  "systemFold": {
+    "messages": [
+      {
+        "role": "system",
+        "content": "base 😀",
+        "sections": {
+          "old": "remove",
+          "keep": "段落"
+        },
+        "toolsAdded": [
+          {
+            "name": "before",
+            "description": "old",
+            "parameters": {
+              "type": "object"
+            }
+          }
+        ],
+        "timestamp": 1
+      },
+      {
+        "role": "system",
+        "content": "",
+        "sections": {
+          "old": null,
+          "empty": ""
+        },
+        "toolsRemoved": [
+          {
+            "name": "before"
+          }
+        ],
+        "toolsAdded": [
+          {
+            "name": "after",
+            "description": "工具",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "x": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        ],
+        "timestamp": 2
+      }
+    ],
+    "expected": {
+      "role": "system",
+      "content": "base 😀",
+      "sections": {
+        "keep": "段落",
+        "empty": ""
+      },
+      "toolsAdded": [
+        {
+          "name": "after",
+          "description": "工具",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "timestamp": 1
+    }
+  },
+  "cases": [
+    {
+      "name": "default-keep-tail",
+      "summary": "summary",
+      "firstKeptEntryId": "user",
+      "fromHook": false,
+      "details": {},
+      "entries": [
+        {
+          "type": "message",
+          "id": "system-a",
+          "parentId": null,
+          "timestamp": "2025-02-01T00:00:00.123Z",
+          "message": {
+            "role": "system",
+            "content": "base 😀",
+            "sections": {
+              "old": "remove",
+              "keep": "段落"
+            },
+            "toolsAdded": [
+              {
+                "name": "before",
+                "description": "old",
+                "parameters": {
+                  "type": "object"
+                }
+              }
+            ],
+            "timestamp": 1
+          }
+        },
+        {
+          "type": "message",
+          "id": "system-b",
+          "parentId": "system-a",
+          "timestamp": "2025-02-01T00:00:00.123Z",
+          "message": {
+            "role": "system",
+            "content": "",
+            "sections": {
+              "old": null,
+              "empty": ""
+            },
+            "toolsRemoved": [
+              {
+                "name": "before"
+              }
+            ],
+            "toolsAdded": [
+              {
+                "name": "after",
+                "description": "工具",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "x": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            ],
+            "timestamp": 2
+          }
+        },
+        {
+          "type": "message",
+          "id": "user",
+          "parentId": "system-b",
+          "timestamp": "2025-02-01T00:00:00.123Z",
+          "message": {
+            "role": "user",
+            "content": "你好😀",
+            "timestamp": 3
+          }
+        },
+        {
+          "type": "message",
+          "id": "assistant",
+          "parentId": "user",
+          "timestamp": "2025-02-01T00:00:00.123Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "answer"
+              }
+            ],
+            "api": "openai-completions",
+            "provider": "fixture",
+            "model": "model",
+            "usage": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 0,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop",
+            "timestamp": 4
+          }
+        }
+      ],
+      "record": {
+        "type": "compaction",
+        "id": "compaction",
+        "parentId": "assistant",
+        "timestamp": "2025-02-01T00:00:00.123Z",
+        "summary": "summary",
+        "firstKeptEntryId": "user",
+        "tokensBefore": 100,
+        "details": {},
+        "fromHook": false,
+        "systemMessage": {
+          "role": "system",
+          "content": "base 😀",
+          "sections": {
+            "keep": "段落",
+            "empty": ""
+          },
+          "toolsAdded": [
+            {
+              "name": "after",
+              "description": "工具",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          ],
+          "timestamp": 1738368000123
+        }
+      },
+      "context": [
+        {
+          "role": "system",
+          "content": "base 😀",
+          "sections": {
+            "keep": "段落",
+            "empty": ""
+          },
+          "toolsAdded": [
+            {
+              "name": "after",
+              "description": "工具",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          ],
+          "timestamp": 1738368000123
+        },
+        {
+          "role": "compactionSummary",
+          "summary": "summary",
+          "tokensBefore": 100,
+          "timestamp": 1738368000123
+        },
+        {
+          "role": "user",
+          "content": "你好😀",
+          "timestamp": 3
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ],
+          "api": "openai-completions",
+          "provider": "fixture",
+          "model": "model",
+          "usage": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 0,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop",
+          "timestamp": 4
+        }
+      ],
+      "estimatedTokensAfter": 34
+    },
+    {
+      "name": "hook-retain-none-empty-summary",
+      "summary": "",
+      "firstKeptEntryId": null,
+      "fromHook": true,
+      "details": {
+        "custom": false
+      },
+      "entries": [
+        {
+          "type": "message",
+          "id": "system-a",
+          "parentId": null,
+          "timestamp": "2025-02-01T00:00:00.123Z",
+          "message": {
+            "role": "system",
+            "content": "base 😀",
+            "sections": {
+              "old": "remove",
+              "keep": "段落"
+            },
+            "toolsAdded": [
+              {
+                "name": "before",
+                "description": "old",
+                "parameters": {
+                  "type": "object"
+                }
+              }
+            ],
+            "timestamp": 1
+          }
+        },
+        {
+          "type": "message",
+          "id": "system-b",
+          "parentId": "system-a",
+          "timestamp": "2025-02-01T00:00:00.123Z",
+          "message": {
+            "role": "system",
+            "content": "",
+            "sections": {
+              "old": null,
+              "empty": ""
+            },
+            "toolsRemoved": [
+              {
+                "name": "before"
+              }
+            ],
+            "toolsAdded": [
+              {
+                "name": "after",
+                "description": "工具",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "x": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            ],
+            "timestamp": 2
+          }
+        },
+        {
+          "type": "message",
+          "id": "user",
+          "parentId": "system-b",
+          "timestamp": "2025-02-01T00:00:00.123Z",
+          "message": {
+            "role": "user",
+            "content": "你好😀",
+            "timestamp": 3
+          }
+        },
+        {
+          "type": "message",
+          "id": "assistant",
+          "parentId": "user",
+          "timestamp": "2025-02-01T00:00:00.123Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "answer"
+              }
+            ],
+            "api": "openai-completions",
+            "provider": "fixture",
+            "model": "model",
+            "usage": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 0,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop",
+            "timestamp": 4
+          }
+        }
+      ],
+      "record": {
+        "type": "compaction",
+        "id": "compaction",
+        "parentId": "assistant",
+        "timestamp": "2025-02-01T00:00:00.123Z",
+        "summary": "",
+        "firstKeptEntryId": "compaction",
+        "tokensBefore": 100,
+        "details": {
+          "custom": false
+        },
+        "fromHook": true,
+        "systemMessage": {
+          "role": "system",
+          "content": "base 😀",
+          "sections": {
+            "keep": "段落",
+            "empty": ""
+          },
+          "toolsAdded": [
+            {
+              "name": "after",
+              "description": "工具",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          ],
+          "timestamp": 1738368000123
+        }
+      },
+      "context": [
+        {
+          "role": "system",
+          "content": "base 😀",
+          "sections": {
+            "keep": "段落",
+            "empty": ""
+          },
+          "toolsAdded": [
+            {
+              "name": "after",
+              "description": "工具",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          ],
+          "timestamp": 1738368000123
+        },
+        {
+          "role": "compactionSummary",
+          "summary": "",
+          "tokensBefore": 100,
+          "timestamp": 1738368000123
+        }
+      ],
+      "estimatedTokensAfter": 29
+    },
+    {
+      "name": "missing-hook-flag",
+      "summary": "summary",
+      "firstKeptEntryId": "user",
+      "entries": [
+        {
+          "type": "message",
+          "id": "system-a",
+          "parentId": null,
+          "timestamp": "2025-02-01T00:00:00.123Z",
+          "message": {
+            "role": "system",
+            "content": "base 😀",
+            "sections": {
+              "old": "remove",
+              "keep": "段落"
+            },
+            "toolsAdded": [
+              {
+                "name": "before",
+                "description": "old",
+                "parameters": {
+                  "type": "object"
+                }
+              }
+            ],
+            "timestamp": 1
+          }
+        },
+        {
+          "type": "message",
+          "id": "system-b",
+          "parentId": "system-a",
+          "timestamp": "2025-02-01T00:00:00.123Z",
+          "message": {
+            "role": "system",
+            "content": "",
+            "sections": {
+              "old": null,
+              "empty": ""
+            },
+            "toolsRemoved": [
+              {
+                "name": "before"
+              }
+            ],
+            "toolsAdded": [
+              {
+                "name": "after",
+                "description": "工具",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "x": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            ],
+            "timestamp": 2
+          }
+        },
+        {
+          "type": "message",
+          "id": "user",
+          "parentId": "system-b",
+          "timestamp": "2025-02-01T00:00:00.123Z",
+          "message": {
+            "role": "user",
+            "content": "你好😀",
+            "timestamp": 3
+          }
+        },
+        {
+          "type": "message",
+          "id": "assistant",
+          "parentId": "user",
+          "timestamp": "2025-02-01T00:00:00.123Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "answer"
+              }
+            ],
+            "api": "openai-completions",
+            "provider": "fixture",
+            "model": "model",
+            "usage": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 0,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop",
+            "timestamp": 4
+          }
+        }
+      ],
+      "record": {
+        "type": "compaction",
+        "id": "compaction",
+        "parentId": "assistant",
+        "timestamp": "2025-02-01T00:00:00.123Z",
+        "summary": "summary",
+        "firstKeptEntryId": "user",
+        "tokensBefore": 100,
+        "systemMessage": {
+          "role": "system",
+          "content": "base 😀",
+          "sections": {
+            "keep": "段落",
+            "empty": ""
+          },
+          "toolsAdded": [
+            {
+              "name": "after",
+              "description": "工具",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          ],
+          "timestamp": 1738368000123
+        }
+      },
+      "context": [
+        {
+          "role": "system",
+          "content": "base 😀",
+          "sections": {
+            "keep": "段落",
+            "empty": ""
+          },
+          "toolsAdded": [
+            {
+              "name": "after",
+              "description": "工具",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          ],
+          "timestamp": 1738368000123
+        },
+        {
+          "role": "compactionSummary",
+          "summary": "summary",
+          "tokensBefore": 100,
+          "timestamp": 1738368000123
+        },
+        {
+          "role": "user",
+          "content": "你好😀",
+          "timestamp": 3
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ],
+          "api": "openai-completions",
+          "provider": "fixture",
+          "model": "model",
+          "usage": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 0,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop",
+          "timestamp": 4
+        }
+      ],
+      "estimatedTokensAfter": 34
+    }
+  ],
+  "imported": {
+    "entry": {
+      "type": "compaction",
+      "id": "imported",
+      "parentId": null,
+      "timestamp": "2025-02-01T00:00:00.123Z",
+      "summary": "",
+      "firstKeptEntryId": "imported",
+      "tokensBefore": 1,
+      "fromHook": false,
+      "systemMessage": {
+        "role": "system",
+        "content": "",
+        "sections": {
+          "empty": "",
+          "keep": "instruction"
+        },
+        "toolsAdded": [
+          {
+            "name": "kept",
+            "description": "kept",
+            "parameters": {
+              "type": "object"
+            },
+            "futureTool": {
+              "keep": true
+            }
+          }
+        ],
+        "toolsRemoved": [
+          {
+            "name": "removed"
+          }
+        ],
+        "timestamp": 1738368000123,
+        "futureMessage": {
+          "keep": false
+        }
+      }
+    },
+    "context": [
+      {
+        "role": "system",
+        "content": "",
+        "sections": {
+          "empty": "",
+          "keep": "instruction"
+        },
+        "toolsAdded": [
+          {
+            "name": "kept",
+            "description": "kept",
+            "parameters": {
+              "type": "object"
+            },
+            "futureTool": {
+              "keep": true
+            }
+          }
+        ],
+        "toolsRemoved": [
+          {
+            "name": "removed"
+          }
+        ],
+        "timestamp": 1738368000123,
+        "futureMessage": {
+          "keep": false
+        }
+      },
+      {
+        "role": "compactionSummary",
+        "summary": "",
+        "tokensBefore": 1,
+        "timestamp": 1738368000123
+      }
+    ]
+  },
+  "branchCases": [
+    {
+      "entry": {
+        "type": "branch_summary",
+        "id": "branch",
+        "parentId": null,
+        "timestamp": "2025-02-01T00:00:00.123Z",
+        "fromId": "from",
+        "summary": ""
+      },
+      "context": []
+    },
+    {
+      "entry": {
+        "type": "branch_summary",
+        "id": "branch",
+        "parentId": null,
+        "timestamp": "2025-02-01T00:00:00.123Z",
+        "fromId": "from",
+        "summary": "",
+        "fromHook": false
+      },
+      "context": []
+    },
+    {
+      "entry": {
+        "type": "branch_summary",
+        "id": "branch",
+        "parentId": null,
+        "timestamp": "2025-02-01T00:00:00.123Z",
+        "fromId": "from",
+        "summary": "",
+        "fromHook": true
+      },
+      "context": []
+    },
+    {
+      "entry": {
+        "type": "branch_summary",
+        "id": "branch",
+        "parentId": null,
+        "timestamp": "2025-02-01T00:00:00.123Z",
+        "fromId": "from",
+        "summary": "branch 段落😀"
+      },
+      "context": [
+        {
+          "role": "branchSummary",
+          "summary": "branch 段落😀",
+          "fromId": "from",
+          "timestamp": 1738368000123
+        }
+      ]
+    },
+    {
+      "entry": {
+        "type": "branch_summary",
+        "id": "branch",
+        "parentId": null,
+        "timestamp": "2025-02-01T00:00:00.123Z",
+        "fromId": "from",
+        "summary": "branch 段落😀",
+        "fromHook": false
+      },
+      "context": [
+        {
+          "role": "branchSummary",
+          "summary": "branch 段落😀",
+          "fromId": "from",
+          "timestamp": 1738368000123
+        }
+      ]
+    },
+    {
+      "entry": {
+        "type": "branch_summary",
+        "id": "branch",
+        "parentId": null,
+        "timestamp": "2025-02-01T00:00:00.123Z",
+        "fromId": "from",
+        "summary": "branch 段落😀",
+        "fromHook": true
+      },
+      "context": [
+        {
+          "role": "branchSummary",
+          "summary": "branch 段落😀",
+          "fromId": "from",
+          "timestamp": 1738368000123
+        }
+      ]
+    }
+  ],
+  "tokens": [
+    {
+      "message": {
+        "role": "system",
+        "content": "",
+        "sections": {
+          "empty": "",
+          "keep": "instruction"
+        },
+        "toolsAdded": [
+          {
+            "name": "kept",
+            "description": "kept",
+            "parameters": {
+              "type": "object"
+            },
+            "futureTool": {
+              "keep": true
+            }
+          }
+        ],
+        "toolsRemoved": [
+          {
+            "name": "removed"
+          }
+        ],
+        "timestamp": 1738368000123,
+        "futureMessage": {
+          "keep": false
+        }
+      },
+      "expected": 27
+    },
+    {
+      "message": {
+        "role": "user",
+        "content": "你好😀",
+        "timestamp": 3
+      },
+      "expected": 1
+    },
+    {
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "abc😀"
+          },
+          {
+            "type": "thinking",
+            "thinking": "思考"
+          },
+          {
+            "type": "toolCall",
+            "id": "call",
+            "name": "工具",
+            "arguments": {
+              "n": 1,
+              "flag": false,
+              "text": "🧪"
+            }
+          }
+        ],
+        "api": "openai-completions",
+        "provider": "fixture",
+        "model": "model",
+        "usage": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 0,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "stopReason": "stop",
+        "timestamp": 4
+      },
+      "expected": 11
+    },
+    {
+      "message": {
+        "role": "toolResult",
+        "toolCallId": "call",
+        "toolName": "fixture",
+        "content": [
+          {
+            "type": "text",
+            "text": "你好"
+          },
+          {
+            "type": "image",
+            "data": "AA==",
+            "mimeType": "image/png"
+          }
+        ],
+        "isError": false,
+        "timestamp": 1
+      },
+      "expected": 1201
+    },
+    {
+      "message": {
+        "role": "custom",
+        "customType": "fixture",
+        "content": "custom 😀",
+        "display": false,
+        "timestamp": 1
+      },
+      "expected": 3
+    },
+    {
+      "message": {
+        "role": "bashExecution",
+        "command": "echo 你好",
+        "output": "😀",
+        "exitCode": 0,
+        "cancelled": false,
+        "truncated": false,
+        "timestamp": 1
+      },
+      "expected": 3
+    },
+    {
+      "message": {
+        "role": "compactionSummary",
+        "summary": "",
+        "tokensBefore": 100,
+        "timestamp": 1
+      },
+      "expected": 0
+    },
+    {
+      "message": {
+        "role": "branchSummary",
+        "summary": "段落😀",
+        "fromId": "from",
+        "timestamp": 1
+      },
+      "expected": 1
+    },
+    {
+      "message": {
+        "role": "future",
+        "content": "ignored",
+        "timestamp": 1
+      },
+      "expected": 0
+    }
+  ]
+}

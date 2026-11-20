@@ -155,6 +155,8 @@ impl RunSystemPrompt {
         (!sections.is_empty()).then_some(SystemMessage {
             content: Vec::new(),
             sections,
+            tools_added: None,
+            tools_removed: None,
             timestamp_ms,
         })
     }

@@ -330,20 +330,24 @@ async fn dynamic_hook_snapshots_replace_the_frozen_manifest_callbacks() {
         snapshots: Mutex::new(vec![
             vec![
                 JsHookSnapshot {
+                    source_path: None,
                     plugin_id: "extension".to_string(),
                     callback_id: "a".to_string(),
                 },
                 JsHookSnapshot {
+                    source_path: None,
                     plugin_id: "extension".to_string(),
                     callback_id: "b".to_string(),
                 },
             ],
             vec![
                 JsHookSnapshot {
+                    source_path: None,
                     plugin_id: "extension".to_string(),
                     callback_id: "b".to_string(),
                 },
                 JsHookSnapshot {
+                    source_path: None,
                     plugin_id: "extension".to_string(),
                     callback_id: "c".to_string(),
                 },
@@ -441,6 +445,7 @@ async fn dynamic_provider_and_session_hooks_need_no_frozen_callback_manifest() {
             (
                 "before_provider_request",
                 vec![JsHookSnapshot {
+                    source_path: None,
                     plugin_id: owner.to_string(),
                     callback_id: "dynamic-provider".to_string(),
                 }],
@@ -449,10 +454,12 @@ async fn dynamic_provider_and_session_hooks_need_no_frozen_callback_manifest() {
                 "session_before_switch",
                 vec![
                     JsHookSnapshot {
+                        source_path: None,
                         plugin_id: "first".to_string(),
                         callback_id: "failing-session".to_string(),
                     },
                     JsHookSnapshot {
+                        source_path: None,
                         plugin_id: owner.to_string(),
                         callback_id: "dynamic-session".to_string(),
                     },
@@ -551,6 +558,8 @@ async fn dynamic_provider_and_session_hooks_need_no_frozen_callback_manifest() {
 
 fn assistant(text: &str) -> AssistantMessage {
     AssistantMessage {
+        duration_ms: None,
+        thinking_level: None,
         content: vec![ContentBlock::Text(TextContent::new(text))],
         api: "test".to_string(),
         provider: ProviderId::new("provider"),
@@ -1039,14 +1048,17 @@ impl JsCallbackDispatcher for BoundaryDispatcher {
         assert_eq!(hook, "agent_before_settle");
         Ok(Some(vec![
             JsHookSnapshot {
+                source_path: None,
                 plugin_id: "one".into(),
                 callback_id: "boundary:first".into(),
             },
             JsHookSnapshot {
+                source_path: None,
                 plugin_id: "one".into(),
                 callback_id: "boundary:repair".into(),
             },
             JsHookSnapshot {
+                source_path: None,
                 plugin_id: "two".into(),
                 callback_id: "boundary:last".into(),
             },

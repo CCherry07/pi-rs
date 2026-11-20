@@ -4,14 +4,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::StreamExt;
 use pi_core::{
     AbortSignal, AgentContext, AgentEvent, AssistantMessage, ContentBlock, Message, ModelId,
-    ProviderId, RunId, StopReason, StreamEvent, TextContent, ThinkingBudgets, ThinkingLevel,
-    ToolExecutionMode, ToolResult, ToolResultMessage, Usage,
+    ProviderId, RunId, StopReason, TextContent, ThinkingBudgets, ThinkingLevel, ToolExecutionMode,
+    ToolResult, ToolResultMessage, Usage,
 };
 use pi_plugin::{
-    FrozenRegistries, PluginDriver, ProviderCallContext, ProviderPluginDriver, ProviderRequest,
+    FrozenRegistries, PluginDriver, PreparedToolLoadout, ProviderCallContext, ProviderPluginDriver,
+    ProviderRequest,
 };
 use pi_telemetry::{
     ActiveSpan, AiOperation, AiRequestEnd, AiRequestSpan, AiRequestStart, AiStopReason, SpanStatus,
@@ -21,9 +21,13 @@ use pi_utils::time::unix_timestamp_ms as now_ms;
 
 use crate::llm_callbacks::StreamFnError;
 use crate::{
-    AgentEventSink, AssistantResponse, ConvertToLlm, StreamAssembler, StreamFn, ToolScheduler,
-    TransformContext,
+    AgentEventSink, AssistantResponse, ConvertToLlm, StreamFn, ToolScheduler, TransformContext,
 };
+
+mod response_stream;
+
+#[cfg(test)]
+use pi_core::StreamEvent;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AgentLoopError {
@@ -295,6 +299,16 @@ pub async fn run_agent_loop(
     {
         prompts.insert(0, Message::System(update));
     }
+    let tools = services
+        .registries
+        .prepare_tool_loadout(&context.active_tools)
+        .map_err(|error| AgentLoopError::ProviderNotFound(error.to_string()))?;
+    crate::tool_declarations::declare_tool_changes(
+        &context.messages,
+        &mut prompts,
+        &tools.declarations,
+        now_ms(),
+    );
     let mut new_messages = Vec::with_capacity(prompts.len());
     emit(&events, AgentEvent::AgentStart, &signal).await?;
     emit(&events, AgentEvent::TurnStart, &signal).await?;
@@ -311,7 +325,16 @@ pub async fn run_agent_loop(
         context.messages.push(prompt.clone());
         new_messages.push(prompt);
     }
-    run_loop(run_id, context, new_messages, config, services, signal).await
+    run_loop(
+        run_id,
+        context,
+        new_messages,
+        config,
+        services,
+        signal,
+        Some(tools),
+    )
+    .await
 }
 
 pub async fn run_agent_loop_continue(
@@ -330,7 +353,7 @@ pub async fn run_agent_loop_continue(
     }
     emit(&events, AgentEvent::AgentStart, &signal).await?;
     emit(&events, AgentEvent::TurnStart, &signal).await?;
-    run_loop(run_id, context, Vec::new(), config, services, signal).await
+    run_loop(run_id, context, Vec::new(), config, services, signal, None).await
 }
 
 async fn run_loop(
@@ -340,6 +363,7 @@ async fn run_loop(
     mut config: AgentLoopConfig,
     services: AgentLoopServices,
     signal: AbortSignal,
+    mut initial_tools: Option<PreparedToolLoadout>,
 ) -> Result<AgentLoopOutcome, AgentLoopError> {
     let AgentLoopServices {
         default_stream_fn,
@@ -417,6 +441,28 @@ async fn run_loop(
                 emit(&events, AgentEvent::TurnStart, &signal).await?;
             }
 
+            let tools = match initial_tools.take() {
+                Some(tools) => tools,
+                None => registries
+                    .prepare_tool_loadout(&context.active_tools)
+                    .map_err(|error| AgentLoopError::ProviderNotFound(error.to_string()))?,
+            };
+            if let Some(prompt) = &config.prompt_state {
+                let prompt = prompt
+                    .with_active_tools(&context.active_tools)
+                    .map_err(AgentLoopError::Event)?;
+                Arc::make_mut(&mut context).system_prompt = prompt.text().to_string();
+                if let Some(update) = prompt.section_update(&context.messages, now_ms()) {
+                    pending.insert(0, Message::System(update));
+                }
+                config.prompt_state = Some(prompt);
+            }
+            crate::tool_declarations::declare_tool_changes(
+                &context.messages,
+                &mut pending,
+                &tools.declarations,
+                now_ms(),
+            );
             for message in std::mem::take(&mut pending) {
                 emit(
                     &events,
@@ -436,12 +482,20 @@ async fn run_loop(
             // aborted assistant closes the turn. Avoid returning early here,
             // otherwise those messages disappear from the observable run.
             if signal.is_aborted() {
-                let assistant = provider_failure_message(
+                // No provider request has begun. Settle this local response with
+                // the current turn's catalog identity and requested thinking level,
+                // not the previous assistant's model or an RPC-only decoration.
+                let stamp = AssistantResponseStamp::new(config.thinking_level);
+                let mut assistant = provider_failure_message(
                     &config,
-                    "operation aborted".to_string(),
+                    "This operation was aborted".to_string(),
                     StopReason::Aborted,
                 );
-                let assistant = emit_message_pair(&events, &signal, &assistant).await?;
+                if let Some(model) = registries.model(&config.provider_id, &config.model_id) {
+                    assistant.api.clone_from(&model.api);
+                }
+                let assistant =
+                    emit_message_pair(&events, &signal, &assistant, Some(&stamp)).await?;
                 Arc::make_mut(&mut context)
                     .messages
                     .push(Message::assistant(assistant.clone()));
@@ -459,34 +513,13 @@ async fn run_loop(
                 break 'run;
             }
 
-            if let Some(prompt) = &config.prompt_state {
-                let prompt = prompt
-                    .with_active_tools(&context.active_tools)
-                    .map_err(AgentLoopError::Event)?;
-                Arc::make_mut(&mut context).system_prompt = prompt.text().to_string();
-                if let Some(update) = prompt.section_update(&context.messages, now_ms()) {
-                    let message = Message::System(update);
-                    emit(
-                        &events,
-                        AgentEvent::MessageStart {
-                            message: message.clone(),
-                        },
-                        &signal,
-                    )
-                    .await?;
-                    let message = emit_message_end(&events, &signal, message).await?;
-                    Arc::make_mut(&mut context).messages.push(message.clone());
-                    Arc::make_mut(&mut new_messages).push(message);
-                }
-                config.prompt_state = Some(prompt);
-            }
-
             let assistant = stream_assistant_response(
                 &run_id,
                 Arc::make_mut(&mut context),
                 &config,
                 &response_services,
                 signal.clone(),
+                tools,
             )
             .await?;
             Arc::make_mut(&mut new_messages).push(Message::assistant(assistant.clone()));
@@ -648,12 +681,39 @@ async fn run_loop(
     })
 }
 
+struct AssistantResponseStamp {
+    started: std::time::Instant,
+    started_at: i64,
+    thinking_level: ThinkingLevel,
+}
+
+impl AssistantResponseStamp {
+    fn new(thinking_level: ThinkingLevel) -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            started_at: now_ms(),
+            thinking_level,
+        }
+    }
+    fn finish(&self, mut message: AssistantMessage) -> AssistantMessage {
+        // Forwarded/cached responses and explicitly timed provider responses keep
+        // their provenance. Pi only times a response that started in this request.
+        if message.duration_ms.is_none() && message.timestamp_ms >= self.started_at {
+            message.duration_ms =
+                Some((self.started.elapsed().as_secs_f64() * 1000.0).round() as u64);
+        }
+        message.thinking_level = Some(self.thinking_level);
+        message
+    }
+}
+
 async fn stream_assistant_response(
     run_id: &RunId,
     context: &mut AgentContext,
     config: &AgentLoopConfig,
     services: &AssistantResponseServices,
     signal: AbortSignal,
+    loadout: PreparedToolLoadout,
 ) -> Result<AssistantMessage, AgentLoopError> {
     let generation = services.generation;
     let registries = Arc::clone(&services.registries);
@@ -661,10 +721,6 @@ async fn stream_assistant_response(
     let provider_plugins = Arc::clone(&services.provider_plugins);
     let events = Arc::clone(&services.events);
 
-    let tools = registries
-        .prepare_tool_loadout(&context.active_tools)
-        .map_err(|error| AgentLoopError::ProviderNotFound(error.to_string()))?;
-    let tools = tools.tools;
     let mut request_messages = plugins
         .context(run_id, &config.cwd, &signal, context.messages.clone())
         .await
@@ -672,6 +728,10 @@ async fn stream_assistant_response(
     if let Some(transform) = &config.transform_context {
         request_messages = transform.call(request_messages, signal.clone()).await;
     }
+    crate::tool_declarations::hide_request_declarations(
+        &mut request_messages,
+        &loadout.hidden_tools,
+    );
     let mut request_messages: Vec<Message> = config
         .convert_to_llm
         .call(request_messages)
@@ -703,7 +763,7 @@ async fn stream_assistant_response(
             &context.active_tools,
         ),
         messages: request_messages,
-        tools,
+        tools: loadout.tools,
         thinking_level: config.thinking_level,
         thinking_budgets: config.thinking_budgets,
         max_output_tokens: None,
@@ -726,31 +786,35 @@ async fn stream_assistant_response(
             operation: AiOperation::Stream,
             provider: config.provider_id.to_string(),
             model: config.model_id.to_string(),
-            api,
+            api: api.clone(),
             streaming: true,
             deferred: None,
         });
-    let request_started = std::time::Instant::now();
-    let mut chunk_count = 0_u64;
-    let mut time_to_first_chunk_ms = None;
+    let stamp = AssistantResponseStamp::new(config.thinking_level);
+    let request_started = stamp.started;
+    let chunk_count = 0_u64;
+    let time_to_first_chunk_ms = None;
     let stream_result = tokio::select! {
         biased;
         () = signal.wait() => {
-            let message = provider_failure_message(config, "operation aborted".to_string(), StopReason::Aborted);
-            let message = emit_message_pair(&events, &signal, &message).await?;
+            let mut message = provider_failure_message(config, "Request aborted".to_string(), StopReason::Aborted);
+            message.api = api.clone();
+            let message = emit_message_pair(&events, &signal, &message, Some(&stamp)).await?;
             context.messages.push(Message::assistant(message.clone()));
             finish_ai_request(&telemetry_span, &message, 0, None);
             return Ok(message);
         }
         result = services.stream_fn.call(request, call_context, signal.child()) => result,
     };
-    let mut stream = match stream_result {
+    let stream = match stream_result {
         Ok(AssistantResponse::Stream(stream)) => stream,
         Ok(AssistantResponse::Complete(mut message)) => {
-            if let Some(cost) = &model_cost {
+            if let Some(cost) = &model_cost
+                && message.usage.cost.total_from_provider != Some(true)
+            {
                 message.usage.cost = cost.calculate(&message.usage);
             }
-            let message = emit_message_pair(&events, &signal, &message).await?;
+            let message = emit_message_pair(&events, &signal, &message, Some(&stamp)).await?;
             context.messages.push(Message::assistant(message.clone()));
             let elapsed_ms =
                 u64::try_from(request_started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -761,8 +825,10 @@ async fn stream_assistant_response(
             return Err(AgentLoopError::ProviderNotFound(provider_id.to_string()));
         }
         Err(StreamFnError::Provider(error)) => {
-            let message = provider_failure_message(config, error.to_string(), StopReason::Error);
-            let message = emit_message_pair(&events, &signal, &message).await?;
+            let mut message =
+                provider_failure_message(config, error.to_string(), StopReason::Error);
+            message.api = api.clone();
+            let message = emit_message_pair(&events, &signal, &message, Some(&stamp)).await?;
             context.messages.push(Message::assistant(message.clone()));
             finish_ai_request(
                 &telemetry_span,
@@ -773,19 +839,30 @@ async fn stream_assistant_response(
             return Ok(message);
         }
     };
-    let mut assembler = StreamAssembler::new();
+    let mut response = response_stream::ResponseStream::new(stream, model_cost, request_started);
     let mut started = false;
 
     loop {
         let item = tokio::select! {
             biased;
             () = signal.wait() => {
-                let message = assembler.failure_message(StopReason::Aborted, "operation aborted");
+                // Deliver parsed deltas in order before closing their blocks.
+                // Cancellation stops source polling, not already accepted events.
+                while let Some(pending) = response.pop_pending() {
+                    let Ok(pending) = pending else { break };
+                    if let Some(update) = pending.update {
+                        emit(&events, AgentEvent::MessageUpdate { stream: response.assembler.stream(), update }, &signal).await?;
+                    }
+                }
+                for update in response.assembler.close_interrupted_content().map_err(|error| AgentLoopError::Assembly(error.to_string()))? {
+                    emit(&events, AgentEvent::MessageUpdate { stream: response.assembler.stream(), update }, &signal).await?;
+                }
+                let message = response.assembler.failure_message(StopReason::Aborted, "Request was aborted");
                 if !started {
                     emit(&events, AgentEvent::MessageStart { message: Message::assistant(message.clone()) }, &signal).await?;
                 }
                 let message = message_as_assistant(
-                    emit_message_end(&events, &signal, Message::assistant(message)).await?
+                    emit_message_end(&events, &signal, Message::assistant(stamp.finish(message))).await?
                 )?;
                 if started {
                     replace_last_assistant(context, message.clone());
@@ -795,111 +872,80 @@ async fn stream_assistant_response(
                 finish_ai_request(
                     &telemetry_span,
                     &message,
-                    chunk_count,
-                    time_to_first_chunk_ms,
+                    response.chunk_count,
+                    response.time_to_first_chunk_ms,
                 );
                 return Ok(message);
             }
-            item = stream.next() => item,
+            item = response.next() => item,
         };
         let Some(item) = item else {
             break;
         };
-        chunk_count = chunk_count.saturating_add(1);
-        time_to_first_chunk_ms.get_or_insert_with(|| {
-            u64::try_from(request_started.elapsed().as_millis()).unwrap_or(u64::MAX)
-        });
-        let mut stream_event = match item {
-            Ok(event) => event,
-            Err(error) => {
-                let message = assembler.failure_message(StopReason::Error, error.to_string());
-                if !started {
-                    emit(
-                        &events,
-                        AgentEvent::MessageStart {
-                            message: Message::assistant(message.clone()),
-                        },
-                        &signal,
-                    )
-                    .await?;
-                }
-                let message = message_as_assistant(
-                    emit_message_end(&events, &signal, Message::assistant(message)).await?,
-                )?;
-                if started {
-                    replace_last_assistant(context, message.clone());
-                } else {
-                    context.messages.push(Message::assistant(message.clone()));
-                }
-                finish_ai_request(
-                    &telemetry_span,
-                    &message,
-                    chunk_count,
-                    time_to_first_chunk_ms,
-                );
-                return Ok(message);
-            }
-        };
-        if let (Some(cost), StreamEvent::Done { usage, .. }) = (&model_cost, &mut stream_event) {
-            usage.cost = cost.calculate(usage);
-        }
-        let update = match assembler.push(stream_event) {
+        let update = match item {
             Ok(update) => update,
             Err(error) => {
-                let message = assembler.failure_message(StopReason::Error, error.to_string());
+                let message = response.assembler.failure_message(StopReason::Error, error);
                 let message =
-                    commit_failed_assistant(context, &events, &signal, message, started).await?;
+                    commit_failed_assistant(context, &events, &signal, message, started, &stamp)
+                        .await?;
                 finish_ai_request(
                     &telemetry_span,
                     &message,
-                    chunk_count,
-                    time_to_first_chunk_ms,
+                    response.chunk_count,
+                    response.time_to_first_chunk_ms,
                 );
                 return Ok(message);
             }
         };
         if update.started && !started {
             let partial = Arc::new(
-                assembler
+                response
+                    .assembler
                     .snapshot()
                     .map_err(|error| AgentLoopError::Assembly(error.to_string()))?,
             );
             context
                 .messages
                 .push(Message::Assistant(Arc::clone(&partial)));
-            emit(
-                &events,
-                AgentEvent::MessageStart {
-                    message: Message::Assistant(partial),
-                },
-                &signal,
-            )
-            .await?;
+            response
+                .emit(
+                    &events,
+                    AgentEvent::MessageStart {
+                        message: Message::Assistant(partial),
+                    },
+                    &signal,
+                )
+                .await?;
             started = true;
         } else if let Some(stream_update) = update.update {
-            emit(
-                &events,
-                AgentEvent::MessageUpdate {
-                    stream: assembler.stream(),
-                    update: stream_update,
-                },
-                &signal,
-            )
-            .await?;
+            response
+                .emit(
+                    &events,
+                    AgentEvent::MessageUpdate {
+                        stream: response.assembler.stream(),
+                        update: stream_update,
+                    },
+                    &signal,
+                )
+                .await?;
         }
     }
 
-    let final_message = match assembler.finish() {
+    let final_message = match response.assembler.finish() {
         Ok(message) => message,
         Err(error) => {
-            let message = assembler.failure_message(StopReason::Error, error.to_string());
+            let message = response
+                .assembler
+                .failure_message(StopReason::Error, error.to_string());
             let message =
-                commit_failed_assistant(context, &events, &signal, message, started).await?;
+                commit_failed_assistant(context, &events, &signal, message, started, &stamp)
+                    .await?;
             finish_ai_request(
                 &telemetry_span,
                 &message,
-                chunk_count,
-                time_to_first_chunk_ms,
+                response.chunk_count,
+                response.time_to_first_chunk_ms,
             );
             return Ok(message);
         }
@@ -920,14 +966,19 @@ async fn stream_assistant_response(
         .await?;
     }
     let final_message = message_as_assistant(
-        emit_message_end(&events, &signal, Message::assistant(final_message)).await?,
+        emit_message_end(
+            &events,
+            &signal,
+            Message::assistant(stamp.finish(final_message)),
+        )
+        .await?,
     )?;
     replace_last_assistant(context, final_message.clone());
     finish_ai_request(
         &telemetry_span,
         &final_message,
-        chunk_count,
-        time_to_first_chunk_ms,
+        response.chunk_count,
+        response.time_to_first_chunk_ms,
     );
     Ok(final_message)
 }
@@ -1016,6 +1067,7 @@ async fn commit_failed_assistant(
     signal: &AbortSignal,
     message: AssistantMessage,
     started: bool,
+    stamp: &AssistantResponseStamp,
 ) -> Result<AssistantMessage, AgentLoopError> {
     if !started {
         emit(
@@ -1027,8 +1079,9 @@ async fn commit_failed_assistant(
         )
         .await?;
     }
-    let message =
-        message_as_assistant(emit_message_end(events, signal, Message::assistant(message)).await?)?;
+    let message = message_as_assistant(
+        emit_message_end(events, signal, Message::assistant(stamp.finish(message))).await?,
+    )?;
     if started {
         replace_last_assistant(context, message.clone());
     } else {
@@ -1055,7 +1108,9 @@ fn provider_failure_message(
     reason: StopReason,
 ) -> AssistantMessage {
     AssistantMessage {
-        content: vec![ContentBlock::Text(TextContent::new(""))],
+        duration_ms: None,
+        thinking_level: None,
+        content: Vec::new(),
         api: "unknown".to_string(),
         provider: config.provider_id.clone(),
         model: config.model_id.clone(),
@@ -1134,7 +1189,9 @@ async fn emit_message_pair(
     events: &Arc<dyn AgentEventSink>,
     signal: &AbortSignal,
     message: &AssistantMessage,
+    stamp: Option<&AssistantResponseStamp>,
 ) -> Result<AssistantMessage, AgentLoopError> {
+    let message = stamp.map_or_else(|| message.clone(), |stamp| stamp.finish(message.clone()));
     emit(
         events,
         AgentEvent::MessageStart {
@@ -1143,9 +1200,7 @@ async fn emit_message_pair(
         signal,
     )
     .await?;
-    message_as_assistant(
-        emit_message_end(events, signal, Message::assistant(message.clone())).await?,
-    )
+    message_as_assistant(emit_message_end(events, signal, Message::assistant(message)).await?)
 }
 
 async fn fail_truncated_tool_calls(
@@ -1193,11 +1248,13 @@ where
                 tool_name: call.name.clone(),
                 result: result.clone(),
                 is_error: true,
+                duration_ms: None,
             },
             signal,
         )
         .await?;
         let message = ToolResultMessage {
+            duration_ms: None,
             tool_call_id: call.id,
             tool_name: call.name,
             content: result.content,
@@ -1285,6 +1342,7 @@ mod tests {
     #[test]
     fn blocked_images_are_replaced_only_in_the_provider_projection() {
         let original = Message::tool_result(ToolResultMessage {
+            duration_ms: None,
             tool_call_id: ToolCallId::new("call"),
             tool_name: "read".to_string(),
             content: vec![

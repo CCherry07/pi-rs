@@ -60,6 +60,9 @@ pub struct ToolLoadoutChanges {
 
 #[derive(Debug, Clone, Default)]
 pub struct PreparedToolLoadout {
+    /// Complete executable definitions after description preparation. Transcript
+    /// declarations retain these even when a request projection hides a tool.
+    pub declarations: Vec<ToolSpec>,
     pub tools: Vec<ToolSpec>,
     pub hidden_tools: Vec<String>,
 }

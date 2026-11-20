@@ -135,6 +135,64 @@ impl StreamAssembler {
             .build_message(true)
     }
 
+    /// Close only observed content on cancellation. Never complete malformed
+    /// tool arguments or invent provider metadata while ending the local stream.
+    pub(crate) fn close_interrupted_content(
+        &mut self,
+    ) -> Result<Vec<Arc<StreamEvent>>, AssemblerError> {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.finished {
+            return Ok(Vec::new());
+        }
+        let events: Vec<_> = state
+            .blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(content_index, block)| match block.as_ref()? {
+                PartialBlock::Text {
+                    signature,
+                    ended: false,
+                    ..
+                } => Some(StreamEvent::TextEnd {
+                    content_index,
+                    text_signature: signature.clone(),
+                }),
+                PartialBlock::Thinking {
+                    signature,
+                    ended: false,
+                    ..
+                } => Some(StreamEvent::ThinkingEnd {
+                    content_index,
+                    thinking_signature: signature.clone(),
+                }),
+                PartialBlock::ToolCall {
+                    raw_arguments,
+                    signature,
+                    ended: false,
+                    ..
+                } if raw_arguments.is_empty()
+                    || serde_json::from_str::<serde_json::Value>(raw_arguments).is_ok() =>
+                {
+                    Some(StreamEvent::ToolCallEnd {
+                        content_index,
+                        thought_signature: signature.clone(),
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        let mut updates = Vec::new();
+        for event in events {
+            if let Some(update) = state.push(event)?.update {
+                updates.push(update);
+            }
+        }
+        Ok(updates)
+    }
+
     pub fn failure_message(
         &self,
         reason: StopReason,
@@ -176,6 +234,9 @@ impl StreamAssemblerState {
             }
             StreamEvent::Metadata { patch } => {
                 let metadata = self.metadata.as_mut().ok_or(AssemblerError::MissingStart)?;
+                if let Some(usage) = &patch.usage {
+                    self.usage = usage.clone();
+                }
                 if let Some(response_model) = &patch.response_model {
                     metadata.response_model = Some(response_model.clone());
                 }
@@ -403,6 +464,8 @@ impl StreamAssemblerState {
             ResponseMetadata::new("unknown".into(), "unknown".into(), "unknown", 0)
         });
         AssistantMessage {
+            duration_ms: None,
+            thinking_level: None,
             provider_thinking_level: metadata.provider_thinking_level,
             content: vec![ContentBlock::Text(TextContent::new(""))],
             api: metadata.api,
@@ -532,6 +595,8 @@ impl StreamAssemblerState {
         }
 
         Ok(AssistantMessage {
+            duration_ms: None,
+            thinking_level: None,
             provider_thinking_level: metadata.provider_thinking_level,
             content,
             api: metadata.api,
@@ -569,6 +634,37 @@ mod tests {
             "scripted",
             1,
         )
+    }
+
+    #[test]
+    fn observed_usage_survives_before_done_and_on_failure() {
+        let mut assembler = StreamAssembler::new();
+        assembler
+            .push(StreamEvent::Start {
+                metadata: metadata(),
+            })
+            .unwrap();
+        let usage = Usage {
+            input: 7,
+            output: 2,
+            total_tokens: 9,
+            ..Default::default()
+        };
+        assembler
+            .push(StreamEvent::Metadata {
+                patch: ResponseMetadataPatch {
+                    usage: Some(usage.clone()),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        assert_eq!(assembler.snapshot().unwrap().usage, usage);
+        assert_eq!(
+            assembler
+                .failure_message(StopReason::Aborted, "cancelled")
+                .usage,
+            usage
+        );
     }
 
     #[test]
@@ -684,6 +780,7 @@ mod tests {
         assembler
             .push(StreamEvent::Metadata {
                 patch: ResponseMetadataPatch {
+                    usage: None,
                     response_model: Some("resolved-model".to_string()),
                     response_id: Some("response-1".to_string()),
                     diagnostics: Some(vec![serde_json::json!({"code":"retry"})]),

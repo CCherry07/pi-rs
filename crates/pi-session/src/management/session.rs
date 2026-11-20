@@ -200,16 +200,24 @@ impl PiSession {
                 actual_parent, parent_session_id,
             )));
         }
-        // The first selection records the launch grant. Later changes only select
-        // within it; deselecting an entry point must not erase its permission.
-        let initial_tools = document
-            .entries
-            .iter()
-            .find_map(|record| match &record.entry {
-                crate::SessionEntry::ActiveToolsChange(entry) => {
-                    Some(entry.active_tool_names.as_slice())
-                }
-                _ => None,
+        // The initial selection records the launch grant. Older journals keep
+        // it in their first tree selection; later changes cannot erase it.
+        let header_tools = document
+            .header
+            .initial_active_tools()
+            .map_err(SessionError::from)?;
+        let initial_tools = header_tools
+            .as_deref()
+            .or_else(|| {
+                document
+                    .entries
+                    .iter()
+                    .find_map(|record| match &record.entry {
+                        crate::SessionEntry::ActiveToolsChange(entry) => {
+                            Some(entry.active_tool_names.as_slice())
+                        }
+                        _ => None,
+                    })
             })
             .unwrap_or_default();
         let allowed_tools = isolated_tool_scope(&self.current(), initial_tools);

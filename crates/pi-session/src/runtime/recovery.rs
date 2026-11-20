@@ -62,18 +62,7 @@ impl SessionRecoveryPlan {
         &self,
         store: &SessionStore,
     ) -> Result<crate::RestoredSessionConfiguration, SessionError> {
-        let selected = store.find_entries_on_branch(&crate::BranchQuery {
-            entries: crate::EntryQuery {
-                entry_type: Some(crate::SessionEntryType::ActiveToolsChange),
-                limit: Some(1),
-                ..crate::EntryQuery::default()
-            },
-            ..crate::BranchQuery::default()
-        })?;
-        let mut active_tools = selected.into_iter().find_map(|record| match record.entry {
-            SessionEntry::ActiveToolsChange(change) => Some(change.active_tool_names),
-            _ => None,
-        });
+        let mut active_tools = store.selected_active_tools()?;
         // The repair below appends accepted writes in this exact reducer-provided order.
         for target in &self.pending_writes {
             if let SessionEntry::ActiveToolsChange(change) = &target.entry {

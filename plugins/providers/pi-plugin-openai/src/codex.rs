@@ -1502,6 +1502,8 @@ mod tests {
 
     fn assistant_message(text: &str, response_id: &str) -> Message {
         Message::Assistant(Arc::new(AssistantMessage {
+            duration_ms: None,
+            thinking_level: None,
             content: vec![ContentBlock::Text(TextContent::new(text))],
             api: API_NAME.to_string(),
             provider: ProviderId::new(PROVIDER_ID),

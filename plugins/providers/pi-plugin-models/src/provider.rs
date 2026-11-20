@@ -253,7 +253,21 @@ impl ModelsJsonProvider {
             )
         ) {
             model
-                .map(|model| model.spec.sampling_params.clone())
+                .map(|model| {
+                    let mut params = model.spec.sampling_params.clone();
+                    // Resolve the Pi level before any provider-specific level map.
+                    // Explicit request params are merged last below.
+                    let level = model.spec.clamp_thinking_level(request.thinking_level);
+                    if let Some(overrides) = model
+                        .spec
+                        .sampling_params_by_thinking_level
+                        .as_ref()
+                        .and_then(|levels| levels.get(level.as_str()))
+                    {
+                        params.extend(overrides.clone());
+                    }
+                    params
+                })
                 .unwrap_or_default()
         } else {
             BTreeMap::new()

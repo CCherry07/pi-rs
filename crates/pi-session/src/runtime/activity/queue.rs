@@ -14,6 +14,7 @@ impl SessionActivity {
         generation: u64,
         entry_id: &str,
     ) -> Result<String, SessionError> {
+        let _dispatch = self.events.defer_observers();
         let mut state = self.lock();
         if state.active_run.is_some() {
             return Err(SessionError::Busy);
@@ -64,6 +65,7 @@ impl SessionActivity {
         entry_id: &str,
         before: Option<Option<&str>>,
     ) -> Result<(), SessionError> {
+        let _dispatch = self.events.defer_observers();
         let mut state = self.lock();
         let recovered = state
             .recovered_queue
@@ -78,7 +80,9 @@ impl SessionActivity {
                 .and_then(|run| {
                     run.pending
                         .iter()
-                        .find(|item| item.target.id == entry_id && item.run_id.is_some())
+                        .find(|item| {
+                            !item.started && item.target.id == entry_id && item.run_id.is_some()
+                        })
                         .and_then(|item| item.kind)
                 })
                 .ok_or_else(|| {
@@ -98,7 +102,7 @@ impl SessionActivity {
         };
         let original: Vec<_> = pending
             .iter()
-            .filter(|item| recovered || item.kind == Some(kind))
+            .filter(|item| !item.started && (recovered || item.kind == Some(kind)))
             .cloned()
             .collect();
         let mut replacement = original.clone();
@@ -188,7 +192,7 @@ impl SessionActivity {
                 .as_mut()
                 .expect("live queued input")
                 .pending;
-            pending.retain(|item| item.kind != Some(kind));
+            pending.retain(|item| item.started || item.kind != Some(kind));
             pending.extend(replacement);
         }
         self.events.publish_queue(state.queue_snapshot());

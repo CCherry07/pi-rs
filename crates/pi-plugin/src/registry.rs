@@ -511,19 +511,22 @@ impl FrozenRegistries {
                 }
             }
         }
-        let tools = specs
+        let declarations: Vec<_> = specs
             .into_iter()
-            .filter_map(|mut spec| {
-                if hidden_tools.contains(&spec.name) {
-                    return None;
-                }
+            .map(|mut spec| {
                 if let Some(description) = descriptions.remove(&spec.name) {
                     spec.description = description;
                 }
-                Some(spec)
+                spec
             })
             .collect();
+        let tools = declarations
+            .iter()
+            .filter(|spec| !hidden_tools.contains(&spec.name))
+            .cloned()
+            .collect();
         Ok(crate::PreparedToolLoadout {
+            declarations,
             tools,
             hidden_tools,
         })

@@ -146,7 +146,7 @@ impl AgentSession {
                 )
                 .await;
             self.events
-                .publish_compaction_end(reason, None, true, false, None);
+                .publish_compaction_end(reason, None, true, false, None, None);
             return Err(SessionError::Cancelled("session compaction"));
         }
         let from_extension = before
@@ -154,20 +154,29 @@ impl AgentSession {
             .map(|replacement| compaction = replacement)
             .is_some();
 
+        compaction.from_hook = Some(from_extension);
+        compaction.system_message =
+            crate::history::current_system_snapshot(&self.context_updates.current()?.messages)?;
         crate::history::annotate_compaction(
             &mut compaction,
             &self.store.branch_entries()?,
             self.context_updates.options(),
         );
-        let result = self.context_updates.append(
+        let result = self.context_updates.append_from(
             SessionEntry::Compaction(compaction.clone()),
             ContextActivation::Restore,
+            crate::EntryAppendOrigin::Compaction,
         );
 
         match result {
             Ok(committed) => {
                 let record = committed.record;
+                let SessionEntry::Compaction(compaction) = &record.entry else {
+                    unreachable!()
+                };
                 let id = record.id.clone();
+                let estimated_tokens_after =
+                    committed.context.messages.iter().map(estimate_tokens).sum();
                 self.plugin_driver()
                     .session_compact(
                         self.session_dispatch_context(),
@@ -179,8 +188,14 @@ impl AgentSession {
                         },
                     )
                     .await;
-                self.events
-                    .publish_compaction_end(reason, Some(record), false, false, None);
+                self.events.publish_compaction_end(
+                    reason,
+                    Some(record),
+                    false,
+                    false,
+                    None,
+                    Some(estimated_tokens_after),
+                );
                 Ok(id)
             }
             Err(error) => {
@@ -202,6 +217,7 @@ impl AgentSession {
                     false,
                     false,
                     Some(error.to_string()),
+                    None,
                 );
                 Err(error)
             }
@@ -213,6 +229,17 @@ impl AgentSession {
         &self,
         custom_instructions: Option<String>,
     ) -> Result<CompactionEntry, SessionError> {
+        let result = self.compact_with_result(custom_instructions).await?;
+        let SessionEntry::Compaction(entry) = result.record.entry else {
+            unreachable!()
+        };
+        Ok(entry)
+    }
+
+    pub async fn compact_with_result(
+        &self,
+        custom_instructions: Option<String>,
+    ) -> Result<super::SessionCompactionResult, SessionError> {
         self.abort_and_wait().await;
         let _operation = self.activity.begin(ActivityPhase::Updating).await;
         self.ensure_open()?;
@@ -224,7 +251,10 @@ impl AgentSession {
             CompactionActivation::Immediate,
         )
         .await
-        .map(|completed| completed.entry)
+        .map(|completed| super::SessionCompactionResult {
+            record: completed.record,
+            estimated_tokens_after: completed.estimated_tokens_after,
+        })
     }
 
     /// Aborts an in-flight summary request without waiting for the session
@@ -342,6 +372,7 @@ impl AgentSession {
                     false,
                     false,
                     error_message.clone(),
+                    None,
                 );
                 self.plugin_driver()
                     .session_compact_failed(
@@ -421,6 +452,9 @@ impl AgentSession {
             }
         };
 
+        compaction.from_hook = Some(from_extension);
+        compaction.system_message =
+            crate::history::current_system_snapshot(&self.context_updates.current()?.messages)?;
         if reason != crate::CompactionReason::Manual {
             for message in crate::runtime::compaction::unsent_context_inputs(
                 &preparation_entries,
@@ -443,13 +477,20 @@ impl AgentSession {
             }
             CompactionActivation::Immediate => ContextActivation::Restore,
         };
-        let persisted = self
-            .context_updates
-            .append(SessionEntry::Compaction(compaction.clone()), activation);
+        let persisted = self.context_updates.append_from(
+            SessionEntry::Compaction(compaction.clone()),
+            activation,
+            crate::EntryAppendOrigin::Compaction,
+        );
         match persisted {
             Ok(committed) => {
                 let record = committed.record;
+                let SessionEntry::Compaction(compaction) = &record.entry else {
+                    unreachable!()
+                };
+                let compaction = compaction.clone();
                 let context = committed.context;
+                let estimated_tokens_after = context.messages.iter().map(estimate_tokens).sum();
                 self.plugin_driver()
                     .session_compact(
                         self.session_dispatch_context(),
@@ -461,11 +502,18 @@ impl AgentSession {
                         },
                     )
                     .await;
-                self.events
-                    .publish_compaction_end(reason, Some(record), false, will_retry, None);
+                self.events.publish_compaction_end(
+                    reason,
+                    Some(record.clone()),
+                    false,
+                    will_retry,
+                    None,
+                    Some(estimated_tokens_after),
+                );
                 Ok(CompletedCompaction {
-                    entry: compaction,
                     context,
+                    record,
+                    estimated_tokens_after,
                 })
             }
             Err(error) => {
@@ -491,8 +539,14 @@ impl AgentSession {
             };
             format!("{prefix}: {error}")
         });
-        self.events
-            .publish_compaction_end(reason, None, aborted, false, error_message.clone());
+        self.events.publish_compaction_end(
+            reason,
+            None,
+            aborted,
+            false,
+            error_message.clone(),
+            None,
+        );
         self.plugin_driver()
             .session_compact_failed(
                 self.session_dispatch_context(),

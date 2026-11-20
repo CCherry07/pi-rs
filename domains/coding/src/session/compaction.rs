@@ -272,6 +272,8 @@ mod tests {
 
     fn calls(tools: &[(&str, &str)]) -> AgentMessage {
         Message::assistant(AssistantMessage {
+            duration_ms: None,
+            thinking_level: None,
             content: tools
                 .iter()
                 .enumerate()
@@ -363,6 +365,8 @@ Keep each section concise. Preserve exact file paths, function names, and error 
             parent_id: None,
             timestamp_ms: 0,
             entry: SessionEntry::Compaction(CompactionEntry {
+                from_hook: None,
+                system_message: None,
                 retained_entry_ids: Vec::new(),
                 summary: "previous".to_string(),
                 retained_tail: Vec::new(),

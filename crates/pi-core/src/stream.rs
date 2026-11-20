@@ -9,9 +9,11 @@ use crate::{DeferredHandle, ResponseMetadata, StopReason, ToolCallId, Usage};
 /// values leave prior state unchanged. Providers should emit a patch as soon
 /// as upstream supplies the value so failures retain all metadata observed
 /// before the terminal event.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResponseMetadataPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
     pub response_model: Option<String>,
     pub response_id: Option<String>,
     pub diagnostics: Option<Vec<Value>>,

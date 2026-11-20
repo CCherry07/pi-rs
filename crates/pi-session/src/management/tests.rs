@@ -694,6 +694,8 @@ async fn fork_point_excludes_later_compaction_and_rejects_invalid_sources() {
         .current()
         .store()
         .append_session_record(crate::SessionEntry::Compaction(crate::CompactionEntry {
+            from_hook: None,
+            system_message: None,
             retained_entry_ids: Vec::new(),
             summary: "later context must not leak".into(),
             retained_tail: vec![],
@@ -796,6 +798,8 @@ async fn forked_context_survives_reload_without_importing_configuration_or_usage
         .current()
         .store()
         .append_session_record(crate::SessionEntry::Compaction(crate::CompactionEntry {
+            from_hook: None,
+            system_message: None,
             retained_entry_ids: Vec::new(),
             summary: "parent compacted summary".into(),
             retained_tail: vec![extension.clone()],

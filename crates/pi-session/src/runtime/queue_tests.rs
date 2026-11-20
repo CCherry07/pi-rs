@@ -1,6 +1,400 @@
 use super::*;
 
 #[tokio::test]
+async fn started_delivery_keeps_its_journal_identity_until_commit_and_restores_only_if_uncommitted()
+{
+    for commit in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("in-flight.jsonl");
+        let session = AgentSession::create(
+            scripted_runtime([ScriptedTurn::Text("saved".into())]),
+            &path,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        session.prompt("materialize").await.unwrap();
+        let mut events = session.subscribe();
+        let agent = session.runtime.agent();
+        let guard = session
+            .activity
+            .begin(crate::runtime::activity::ActivityPhase::Running)
+            .await;
+        let input = Message::User(UserMessage::text("original", 1));
+        let run = session
+            .activity
+            .begin_messages(1, std::slice::from_ref(&input))
+            .unwrap();
+        session.activity.message_started(&input, &agent.downgrade());
+        session.activity.message_ended(&input, None).unwrap();
+        let queued = Message::User(UserMessage::text("queued", 2));
+        let other = Message::User(UserMessage::text("other", 3));
+        let PromptOutcome::Queued { entry_id: id, .. } = session
+            .activity
+            .enqueue_message(agent, queued.clone(), QueueKind::FollowUp)
+            .unwrap()
+        else {
+            panic!("queued")
+        };
+        let PromptOutcome::Queued {
+            entry_id: other_id, ..
+        } = session
+            .activity
+            .enqueue_message(agent, other.clone(), QueueKind::FollowUp)
+            .unwrap()
+        else {
+            panic!("queued")
+        };
+        // Simulate the Agent's drain, keeping the second input live/editable.
+        assert!(
+            agent
+                .replace_identified_queue(
+                    pi_agent::QueueDestination::FollowUp,
+                    &[id.clone(), other_id.clone()],
+                    vec![(other_id, other)],
+                    || Ok::<_, SessionError>(())
+                )
+                .unwrap()
+        );
+        let consumed = session
+            .activity
+            .message_started(&queued, &agent.downgrade())
+            .unwrap();
+        assert_eq!(consumed.follow_up, ["other"]);
+        session.events.publish_queue(consumed);
+        assert!(
+            session.history().get_entry(&id).is_none(),
+            "start must not persist an unpatched input"
+        );
+        session.clear_queue().unwrap();
+        assert!(session.snapshot().queue.items.is_empty());
+        if commit {
+            let patched = Message::User(UserMessage::text("hook-patched delivery", 2));
+            let result = session.activity.message_ended(&patched, None).unwrap();
+            assert_eq!(result.entry.id, id);
+            assert!(
+                result.queue.is_none(),
+                "there must be no second consumption event"
+            );
+            assert_eq!(
+                serde_json::to_value(&result.entry.entry).unwrap()["message"]["content"][0]["text"],
+                "hook-patched delivery"
+            );
+        }
+        session
+            .activity
+            .finish_run(
+                agent,
+                &run,
+                &Err(SessionError::Runtime("delivery interrupted".into())),
+            )
+            .unwrap();
+        drop(guard);
+        let expected = if commit {
+            Vec::<&str>::new()
+        } else {
+            vec!["queued"]
+        };
+        assert_eq!(session.snapshot().queue.follow_up, expected);
+        if !commit {
+            let mut restored = None;
+            while let Ok(event) = events.events.try_recv() {
+                if let AgentSessionEvent::QueueUpdate { origin, items, .. } = event.event {
+                    restored = Some((origin, items));
+                }
+            }
+            let (origin, items) = restored.unwrap();
+            assert_eq!(origin, crate::QueueUpdateOrigin::Mutation);
+            assert_eq!(items.len(), 1);
+            assert_ne!(items[0].entry_id, id);
+        }
+        session.shutdown().await;
+        drop(session);
+        let reopened = AgentSession::open(scripted_runtime([]), &path, Default::default())
+            .await
+            .unwrap();
+        assert_eq!(reopened.snapshot().queue.follow_up, expected);
+        assert!(
+            reopened
+                .snapshot()
+                .queue
+                .items
+                .iter()
+                .all(|item| item.kind == QueueKind::NextRun)
+        );
+    }
+}
+
+#[tokio::test]
+async fn aborted_follow_up_waits_for_an_explicit_prompt_then_keeps_its_delivery_mode() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("aborted-follow-up.jsonl");
+    let plugin = ScriptedProviderPlugin::scripted([
+        ScriptedTurn::WaitForAbort,
+        ScriptedTurn::Text("resumed answer".into()),
+        ScriptedTurn::Text("queued answer".into()),
+    ]);
+    let provider = plugin.provider();
+    let runtime = PiRuntime::builder()
+        .provider_plugin(plugin)
+        .build()
+        .unwrap();
+    let session = Arc::new(
+        AgentSession::create(runtime, &path, Default::default())
+            .await
+            .unwrap(),
+    );
+    let mut events = session.subscribe();
+    let running = {
+        let session = session.clone();
+        tokio::spawn(async move { session.prompt("first prompt").await.unwrap() })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while provider.requests().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    session.follow_up("surviving follow-up").await.unwrap();
+    let original_id = session.snapshot().queue.items[0].entry_id.clone();
+    session.abort_and_wait().await;
+    running.await.unwrap();
+    assert!(!session.snapshot().agent.is_running);
+    assert_eq!(
+        provider.requests().len(),
+        1,
+        "abort must not implicitly restart a request"
+    );
+    assert_eq!(session.snapshot().queue.follow_up, ["surviving follow-up"]);
+    assert_ne!(session.snapshot().queue.items[0].entry_id, original_id);
+    let mut mutations = 0;
+    let mut rebound = Vec::new();
+    while let Ok(event) = events.events.try_recv() {
+        if let AgentSessionEvent::QueueUpdate { origin, items, .. } = event.event {
+            match origin {
+                crate::QueueUpdateOrigin::Mutation => mutations += 1,
+                crate::QueueUpdateOrigin::Retimed => rebound.push(items),
+            }
+        }
+    }
+    assert_eq!(
+        mutations, 1,
+        "only the explicit enqueue changes the Pi queue"
+    );
+    assert_eq!(
+        rebound,
+        [session.snapshot().queue.items],
+        "native observers receive the new editable identities"
+    );
+
+    session.prompt("resume after abort").await.unwrap();
+    assert_eq!(
+        provider.requests().len(),
+        3,
+        "the explicit prompt must allow the queued follow-up turn"
+    );
+    assert!(session.snapshot().queue.items.is_empty());
+    let mut origins = Vec::new();
+    let mut consumption = Vec::new();
+    while let Ok(event) = events.events.try_recv() {
+        match event.event {
+            AgentSessionEvent::QueueUpdate { origin, .. } => {
+                if origin == crate::QueueUpdateOrigin::Mutation {
+                    consumption.push("queue_empty");
+                }
+                origins.push(origin);
+            }
+            AgentSessionEvent::Agent(event) => match *event {
+                AgentEvent::MessageStart {
+                    message: Message::User(user),
+                } if user.content
+                    == pi_core::UserMessage::text("surviving follow-up", 0).content =>
+                {
+                    consumption.push("user_start");
+                }
+                AgentEvent::MessageEnd {
+                    message: Message::User(user),
+                } if user.content
+                    == pi_core::UserMessage::text("surviving follow-up", 0).content =>
+                {
+                    consumption.push("user_end");
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    assert_eq!(
+        consumption,
+        ["queue_empty", "user_start", "user_end"],
+        "consumption is visible before the queued message starts"
+    );
+    assert_eq!(
+        origins,
+        [
+            crate::QueueUpdateOrigin::Retimed,
+            crate::QueueUpdateOrigin::Mutation
+        ],
+        "binding is not a second enqueue; consumption changes the queue"
+    );
+    let texts = session
+        .snapshot()
+        .agent
+        .messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::User(user) => match user.content.first() {
+                Some(ContentBlock::Text(text)) => Some(text.text.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        texts,
+        ["first prompt", "resume after abort", "surviving follow-up"]
+    );
+    assert!(
+        matches!(provider.requests()[2].messages.last(), Some(Message::User(user)) if matches!(&user.content[0], ContentBlock::Text(text) if text.text == "surviving follow-up"))
+    );
+    session.shutdown().await;
+    drop(session);
+    let reopened = AgentSession::open(scripted_runtime([]), &path, Default::default())
+        .await
+        .unwrap();
+    assert!(
+        reopened.snapshot().queue.items.is_empty(),
+        "delivered input must not replay on resume"
+    );
+}
+
+#[tokio::test]
+async fn aborted_live_queues_keep_modes_in_either_arrival_order_without_admitting_next_run() {
+    for steer_first in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("aborted-mixed-queue.jsonl");
+        let plugin = ScriptedProviderPlugin::scripted([
+            ScriptedTurn::WaitForAbort,
+            ScriptedTurn::Text("resumed answer".into()),
+            ScriptedTurn::Text("follow-up answer".into()),
+        ]);
+        let provider = plugin.provider();
+        let session = Arc::new(
+            AgentSession::create(
+                PiRuntime::builder()
+                    .provider_plugin(plugin)
+                    .build()
+                    .unwrap(),
+                &path,
+                Default::default(),
+            )
+            .await
+            .unwrap(),
+        );
+        let running = {
+            let session = session.clone();
+            tokio::spawn(async move { session.prompt("first").await.unwrap() })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while provider.requests().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // Equal payloads still represent two distinct user operations and modes.
+        if steer_first {
+            session.steer("same").await.unwrap();
+            session.follow_up("same").await.unwrap();
+        } else {
+            session.follow_up("same").await.unwrap();
+            session.steer("same").await.unwrap();
+        }
+        session.queue_next_run("parked explicitly").await.unwrap();
+        let original = session.snapshot().queue;
+        session.abort_and_wait().await;
+        running.await.unwrap();
+        assert_eq!(provider.requests().len(), 1);
+        let retimed = session.snapshot().queue;
+        assert_eq!(retimed.steering, ["same"]);
+        assert_eq!(retimed.follow_up, ["parked explicitly", "same"]);
+        for (old, new) in original.items.iter().zip(&retimed.items) {
+            assert_eq!(old.kind, new.kind);
+            if old.kind == QueueKind::NextRun {
+                assert_eq!(old.entry_id, new.entry_id);
+            } else {
+                assert_ne!(old.entry_id, new.entry_id);
+            }
+        }
+        let mut deliveries = session.subscribe();
+        session.prompt("resume").await.unwrap();
+        let mut consumption = Vec::new();
+        while let Ok(event) = deliveries.events.try_recv() {
+            if let AgentSessionEvent::QueueUpdate {
+                origin: crate::QueueUpdateOrigin::Mutation,
+                items,
+                ..
+            } = event.event
+            {
+                consumption.push(items);
+            }
+        }
+        assert_eq!(consumption.len(), 2);
+        assert_eq!(
+            consumption[0]
+                .iter()
+                .filter(|item| item.kind == QueueKind::Steer)
+                .count(),
+            0,
+            "steering consumes its own identity even if equal-text follow-up arrived first"
+        );
+        assert_eq!(
+            consumption[0]
+                .iter()
+                .filter(|item| item.kind == QueueKind::FollowUp)
+                .count(),
+            1
+        );
+        assert_eq!(provider.requests().len(), 3);
+        let snapshot = session.snapshot();
+        assert_eq!(snapshot.queue.follow_up, ["parked explicitly"]);
+        assert_eq!(snapshot.queue.items[0].kind, QueueKind::NextRun);
+        let users = snapshot
+            .agent
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => match user.content.first() {
+                    Some(ContentBlock::Text(text)) => Some(text.text.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(users, ["first", "resume", "same", "same"]);
+        session.shutdown().await;
+        drop(session);
+        let replay_plugin = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("fresh".into())]);
+        let replay_provider = replay_plugin.provider();
+        let reopened = AgentSession::open(
+            PiRuntime::builder()
+                .provider_plugin(replay_plugin)
+                .build()
+                .unwrap(),
+            &path,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        reopened.prompt("not a queue admission").await.unwrap();
+        assert_eq!(replay_provider.requests().len(), 1);
+        assert_eq!(reopened.snapshot().queue.follow_up, ["parked explicitly"]);
+        assert_eq!(reopened.snapshot().queue.items[0].kind, QueueKind::NextRun);
+    }
+}
+
+#[tokio::test]
 async fn idle_user_queues_keep_delivery_modes_and_join_the_next_explicit_prompt() {
     use pi_plugin::InputStreamingBehavior;
     let directory = tempfile::tempdir().unwrap();
@@ -263,11 +657,20 @@ async fn live_queue_edits_keep_distinct_ids_and_publish_only_after_persistence()
             .queue
             .items
             .iter()
-            .all(|item| item.kind == QueueKind::NextRun)
+            .all(|item| item.kind == QueueKind::FollowUp),
+        "the live queue retains its mode for the next explicit prompt"
     );
     drop(session);
     let reopened = AgentSession::open(scripted_runtime([]), &path, Default::default())
         .await
         .unwrap();
     assert_eq!(reopened.snapshot().queue.follow_up, ["last", "same"]);
+    assert!(
+        reopened
+            .snapshot()
+            .queue
+            .items
+            .iter()
+            .all(|item| item.kind == QueueKind::NextRun)
+    );
 }

@@ -45,6 +45,7 @@ const contextHookBatchInvocationSchema = z.strictObject({
 })
 
 const responseMetadataPatchSchema = z.strictObject({
+  usage: jsonObjectSchema.nullish(),
   responseModel: z.string().nullable(),
   responseId: z.string().nullable(),
   diagnostics: z.array(z.unknown()).nullable(),

@@ -336,7 +336,7 @@ async fn failed_results_do_not_activate_deferred_tools() {
             .iter()
             .filter(|entry| matches!(entry.entry, SessionEntry::ActiveToolsChange(_)))
             .count(),
-        1
+        0
     );
 }
 
@@ -377,7 +377,7 @@ async fn sequential_searches_see_prior_discoveries_in_the_same_batch() {
             .iter()
             .filter(|entry| matches!(entry.entry, SessionEntry::ActiveToolsChange(_)))
             .count(),
-        2
+        1
     );
 }
 
@@ -444,7 +444,7 @@ async fn failed_discovery_write_restores_the_saved_selection_before_settlement()
             .iter()
             .filter(|entry| matches!(entry.entry, SessionEntry::ActiveToolsChange(_)))
             .count(),
-        1
+        0
     );
     std::fs::remove_dir(&path).unwrap();
     std::fs::rename(&backup, &path).unwrap();

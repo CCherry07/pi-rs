@@ -444,21 +444,38 @@ pub fn should_compact(
 
 pub fn estimate_tokens(message: &AgentMessage) -> u64 {
     let chars = match message.as_standard() {
-        Some(Message::System(message)) => message.render().len(),
+        Some(Message::System(system)) => {
+            let mut chars = content_chars(&system.content)
+                + system
+                    .sections
+                    .iter()
+                    .filter_map(|(_, value)| value.as_deref())
+                    .map(utf16_len)
+                    .sum::<usize>();
+            // The lossless wrapper retains toolsAdded even when it is a newer
+            // system-message extension than the provider-facing typed value.
+            let wire = serde_json::to_value(message).expect("agent message serializes");
+            if let Some(tools) = wire.get("toolsAdded").filter(|value| !value.is_null()) {
+                chars += utf16_len(&tools.to_string());
+            }
+            chars
+        }
         Some(Message::User(message)) => content_chars(&message.content),
         Some(Message::Assistant(message)) => message
             .content
             .iter()
             .map(|block| match block {
-                ContentBlock::Text(text) => text.text.len(),
-                ContentBlock::Thinking(thinking) => thinking.thinking.len(),
+                ContentBlock::Text(text) => utf16_len(&text.text),
+                ContentBlock::Thinking(thinking) => utf16_len(&thinking.thinking),
                 ContentBlock::Image(_) => 0,
-                ContentBlock::ToolCall(call) => call.name.len() + call.arguments.to_string().len(),
+                ContentBlock::ToolCall(call) => {
+                    utf16_len(&call.name) + utf16_len(&call.arguments.to_string())
+                }
             })
             .sum(),
         Some(Message::ToolResult(message)) => content_chars(&message.content),
         Some(Message::Custom(message)) => match &message.content {
-            pi_core::CustomMessageContent::Text(text) => text.len(),
+            pi_core::CustomMessageContent::Text(text) => utf16_len(text),
             pi_core::CustomMessageContent::Blocks(content) => content_chars(content),
         },
         None => custom_message_chars(message),
@@ -659,6 +676,8 @@ pub async fn compact(
 
     let details = policy.finalize(preparation, &mut summary);
     Ok(CompactionEntry {
+        from_hook: None,
+        system_message: None,
         retained_entry_ids: Vec::new(),
         summary,
         retained_tail: preparation.retained_tail.clone(),
@@ -982,11 +1001,15 @@ fn message_timestamp(message: &AgentMessage) -> Option<i64> {
     }
 }
 
+fn utf16_len(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
 fn content_chars(content: &[ContentBlock]) -> usize {
     content
         .iter()
         .map(|block| match block {
-            ContentBlock::Text(text) => text.text.len(),
+            ContentBlock::Text(text) => utf16_len(&text.text),
             ContentBlock::Image(_) => ESTIMATED_IMAGE_CHARS,
             ContentBlock::Thinking(_) | ContentBlock::ToolCall(_) => 0,
         })
@@ -1003,30 +1026,30 @@ fn custom_message_chars(message: &AgentMessage) -> usize {
             value
                 .get("command")
                 .and_then(Value::as_str)
-                .map_or(0, str::len)
+                .map_or(0, utf16_len)
                 + value
                     .get("output")
                     .and_then(Value::as_str)
-                    .map_or(0, str::len)
+                    .map_or(0, utf16_len)
         }
         "branchSummary" | "compactionSummary" => value
             .get("summary")
             .and_then(Value::as_str)
-            .map_or(0, str::len),
+            .map_or(0, utf16_len),
         _ => 0,
     }
 }
 
 fn json_content_chars(value: &Value) -> usize {
     match value {
-        Value::String(text) => text.len(),
+        Value::String(text) => utf16_len(text),
         Value::Array(blocks) => blocks
             .iter()
             .map(|block| match block.get("type").and_then(Value::as_str) {
                 Some("text") => block
                     .get("text")
                     .and_then(Value::as_str)
-                    .map_or(0, str::len),
+                    .map_or(0, utf16_len),
                 Some("image") => ESTIMATED_IMAGE_CHARS,
                 _ => 0,
             })
@@ -1075,6 +1098,7 @@ fn combine_usage(first: &Usage, second: &Usage) -> Usage {
         reasoning: combine_optional(first.reasoning, second.reasoning),
         total_tokens: first.total_tokens.saturating_add(second.total_tokens),
         cost: UsageCost {
+            total_from_provider: None,
             input: first.cost.input + second.cost.input,
             output: first.cost.output + second.cost.output,
             cache_read: first.cost.cache_read + second.cost.cache_read,
@@ -1100,6 +1124,23 @@ mod tests {
     use super::*;
     use crate::{MessageEntry, SessionEntry};
 
+    #[test]
+    fn token_estimates_match_executed_legacy_oracle() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/rpc-compaction-oracle.json"
+        ))
+        .unwrap();
+        for case in fixture["tokens"].as_array().unwrap() {
+            let message: AgentMessage = serde_json::from_value(case["message"].clone()).unwrap();
+            assert_eq!(
+                estimate_tokens(&message),
+                case["expected"].as_u64().unwrap(),
+                "message: {}",
+                case["message"]
+            );
+        }
+    }
+
     fn usage(total_tokens: u64) -> Usage {
         Usage {
             input: total_tokens,
@@ -1118,6 +1159,8 @@ mod tests {
 
     fn assistant_at(text: &str, total_tokens: u64, timestamp_ms: i64) -> AgentMessage {
         Message::assistant(AssistantMessage {
+            duration_ms: None,
+            thinking_level: None,
             content: vec![ContentBlock::Text(TextContent::new(text))],
             api: "scripted".to_string(),
             provider: ProviderId::new("scripted"),
@@ -1242,6 +1285,7 @@ mod tests {
             message_record(
                 2,
                 Message::tool_result(ToolResultMessage {
+                    duration_ms: None,
                     tool_call_id: ToolCallId::new("call-1"),
                     tool_name: "read".to_string(),
                     content: vec![ContentBlock::Text(TextContent::new("result"))],
@@ -1270,6 +1314,8 @@ mod tests {
         let previous = record(
             0,
             SessionEntry::Compaction(CompactionEntry {
+                from_hook: None,
+                system_message: None,
                 retained_entry_ids: Vec::new(),
                 summary: "previous".to_string(),
                 retained_tail: vec![user("retained user"), assistant("retained assistant", 50)],
@@ -1321,6 +1367,8 @@ mod tests {
         let latest = record(
             0,
             SessionEntry::Compaction(CompactionEntry {
+                from_hook: None,
+                system_message: None,
                 retained_entry_ids: Vec::new(),
                 summary: "done".to_string(),
                 retained_tail: Vec::new(),
@@ -1346,6 +1394,8 @@ mod tests {
         let entries = vec![record(
             0,
             SessionEntry::Compaction(CompactionEntry {
+                from_hook: None,
+                system_message: None,
                 retained_entry_ids: Vec::new(),
                 summary: "short summary".to_string(),
                 retained_tail: vec![retained],
@@ -1370,6 +1420,8 @@ mod tests {
             record(
                 0,
                 SessionEntry::Compaction(CompactionEntry {
+                    from_hook: None,
+                    system_message: None,
                     retained_entry_ids: Vec::new(),
                     summary: "short summary".to_string(),
                     retained_tail: vec![assistant_at("retained", 100_000, 1)],
@@ -1506,6 +1558,7 @@ mod tests {
     #[test]
     fn serialize_truncates_tool_results() {
         let message: AgentMessage = Message::tool_result(ToolResultMessage {
+            duration_ms: None,
             tool_call_id: ToolCallId::new("call-1"),
             tool_name: "read".to_string(),
             content: vec![ContentBlock::Text(TextContent::new("x".repeat(5_000)))],

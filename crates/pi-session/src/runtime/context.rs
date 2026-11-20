@@ -85,9 +85,18 @@ impl ContextUpdates {
         entry: SessionEntry,
         activation: ContextActivation,
     ) -> Result<ContextCommit, SessionError> {
+        self.append_from(entry, activation, crate::EntryAppendOrigin::Explicit)
+    }
+
+    pub(super) fn append_from(
+        &self,
+        entry: SessionEntry,
+        activation: ContextActivation,
+        origin: crate::EntryAppendOrigin,
+    ) -> Result<ContextCommit, SessionError> {
         let record = self.store.append_session_record(entry)?;
         let context = self.current()?;
-        self.activate_and_publish(&context, std::slice::from_ref(&record), activation)?;
+        self.activate_and_publish(&context, std::slice::from_ref(&record), activation, origin)?;
         Ok(ContextCommit { record, context })
     }
 
@@ -98,7 +107,12 @@ impl ContextUpdates {
     ) -> Result<(), SessionError> {
         let records = self.store.append_batch_records(entries)?;
         if !records.is_empty() {
-            self.activate_and_publish(&self.current()?, &records, activation)?;
+            self.activate_and_publish(
+                &self.current()?,
+                &records,
+                activation,
+                crate::EntryAppendOrigin::Explicit,
+            )?;
         }
         Ok(())
     }
@@ -110,7 +124,12 @@ impl ContextUpdates {
     ) -> Result<(), SessionError> {
         let previous_leaf = self.store.leaf_id();
         self.store.move_lane(crate::MAIN_LANE, leaf_id)?;
-        if let Err(error) = self.activate_and_publish(context, &[], ContextActivation::Restore) {
+        if let Err(error) = self.activate_and_publish(
+            context,
+            &[],
+            ContextActivation::Restore,
+            crate::EntryAppendOrigin::Navigation,
+        ) {
             let _ = self
                 .store
                 .move_lane(crate::MAIN_LANE, previous_leaf.as_deref());
@@ -134,13 +153,23 @@ impl ContextUpdates {
             .transpose()?;
         let mut records = vec![record.clone()];
         records.extend(label_record);
-        self.activate_and_publish(&self.current()?, &records, ContextActivation::Restore)?;
+        self.activate_and_publish(
+            &self.current()?,
+            &records,
+            ContextActivation::Restore,
+            crate::EntryAppendOrigin::Navigation,
+        )?;
         Ok(record)
     }
 
     pub(super) fn reconcile(&self) -> Result<(), SessionError> {
         if let Some(context) = self.pending_context()? {
-            self.activate_and_publish(&context, &[], ContextActivation::KeepConfiguration)?;
+            self.activate_and_publish(
+                &context,
+                &[],
+                ContextActivation::KeepConfiguration,
+                crate::EntryAppendOrigin::Explicit,
+            )?;
         }
         Ok(())
     }
@@ -178,6 +207,7 @@ impl ContextUpdates {
         context: &SessionContext,
         records: &[SessionRecord],
         activation: ContextActivation,
+        origin: crate::EntryAppendOrigin,
     ) -> Result<(), SessionError> {
         match activation {
             ContextActivation::Restore => restore_runtime_context(&self.runtime, context)?,
@@ -189,7 +219,7 @@ impl ContextUpdates {
             ContextActivation::AfterRun => {
                 self.pending.store(true, Ordering::Release);
                 for record in records {
-                    self.events.publish_entry(record.clone());
+                    self.events.publish_entry(record.clone(), origin);
                 }
                 return Ok(());
             }
@@ -201,7 +231,7 @@ impl ContextUpdates {
         } else {
             for record in records {
                 self.events
-                    .publish_initialized_context(record.clone(), state.clone());
+                    .publish_initialized_context(record.clone(), state.clone(), origin);
             }
         }
         Ok(())
@@ -415,7 +445,8 @@ impl AgentSession {
             data,
         });
         let record = self.store.append_session_record(entry)?;
-        self.events.publish_entry(record.clone());
+        self.events
+            .publish_entry(record.clone(), crate::EntryAppendOrigin::Explicit);
         Ok(record)
     }
 
@@ -452,10 +483,32 @@ impl AgentSession {
     /// agreement with the JSONL tree.
     pub fn append_custom_message(&self, message: CustomMessage) -> Result<String, SessionError> {
         let _operation = self.try_begin_operation()?;
+        self.append_custom_message_locked(message)
+    }
+
+    pub(super) fn append_custom_message_locked(
+        &self,
+        message: CustomMessage,
+    ) -> Result<String, SessionError> {
         let entry = SessionEntry::custom_message(&message);
-        let committed = self
-            .context_updates
-            .append(entry, ContextActivation::Restore)?;
+        let committed = self.context_updates.append_from(
+            entry,
+            ContextActivation::Restore,
+            crate::EntryAppendOrigin::MessageDelivery,
+        )?;
+        let message = Message::custom(message);
+        // These are product notifications, not agent-loop callbacks: persistence
+        // already happened above and must not be repeated by the agent bridge.
+        self.events.publish_agent(
+            pi_core::AgentEvent::MessageStart {
+                message: message.clone(),
+            },
+            self.runtime.agent().state(),
+        );
+        self.events.publish_agent(
+            pi_core::AgentEvent::MessageEnd { message },
+            self.runtime.agent().state(),
+        );
         Ok(committed.record.id)
     }
 
@@ -467,7 +520,8 @@ impl AgentSession {
             Some(self.try_begin_operation()?)
         };
         let entry = self.store.set_label_with_entry(entry_id, label)?;
-        self.events.publish_entry(entry);
+        self.events
+            .publish_entry(entry, crate::EntryAppendOrigin::Configuration);
         Ok(())
     }
 }

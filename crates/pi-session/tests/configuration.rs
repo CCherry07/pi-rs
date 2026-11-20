@@ -3,7 +3,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pi_agent::AgentOptions;
-use pi_core::{ModelId, ModelSpec, PluginId, ProviderId, ThinkingLevel, WorkspaceSnapshot};
+use pi_core::{
+    ModelId, ModelSpec, PluginId, ProviderId, ResponseMetadata, StopReason, StreamEvent,
+    ThinkingLevel, Usage, WorkspaceSnapshot,
+};
 use pi_plugin::{ProviderPlugin, ProviderRegisterContext};
 use pi_runtime::{
     PiRuntime, PiRuntimeBuilder, PreparedSystemPrompt, PromptContext, PromptOutput, SystemPrompt,
@@ -86,6 +89,83 @@ fn saved_log(path: &Path, cwd: &Path, id: &str) {
         }),
     ])
     .unwrap();
+}
+
+#[tokio::test]
+async fn initial_tool_selection_survives_resume_without_a_synthetic_history_change() {
+    let directory = tempfile::tempdir().unwrap();
+    for (name, selected) in [("empty", vec![]), ("selected", vec!["delay".to_string()])] {
+        let path = directory.path().join(format!("{name}.jsonl"));
+        let runtime = runtime_builder(
+            directory.path(),
+            ScriptedProviderPlugin::scripted([ScriptedTurn::Events(vec![
+                StreamEvent::Start {
+                    metadata: ResponseMetadata::new(
+                        ProviderId::new("scripted"),
+                        ModelId::new("reasoning"),
+                        "scripted",
+                        1,
+                    ),
+                },
+                StreamEvent::TextStart { content_index: 0 },
+                StreamEvent::TextDelta {
+                    content_index: 0,
+                    delta: "done".into(),
+                },
+                StreamEvent::TextEnd {
+                    content_index: 0,
+                    text_signature: None,
+                },
+                StreamEvent::Done {
+                    reason: StopReason::Stop,
+                    usage: Usage::default(),
+                },
+            ])]),
+        )
+        .build()
+        .unwrap();
+        runtime.set_active_tools(selected.clone()).unwrap();
+        let session = AgentSession::create(runtime, &path, options())
+            .await
+            .unwrap();
+        let initial = session.history().load().unwrap();
+        assert_eq!(
+            initial.entries.len(),
+            2,
+            "new history contains only initial model and thinking selections"
+        );
+        assert!(
+            initial
+                .entries
+                .iter()
+                .all(|record| !matches!(record.entry, SessionEntry::ActiveToolsChange(_)))
+        );
+        assert_eq!(
+            initial.context().unwrap().active_tool_names,
+            Some(selected.clone())
+        );
+        assert!(
+            !path.exists(),
+            "initial configuration keeps persistence lazy"
+        );
+
+        session.prompt("hello").await.unwrap();
+        let before = session.history().load().unwrap();
+        session.shutdown().await;
+        let runtime = runtime_builder(directory.path(), ScriptedProviderPlugin::scripted([]))
+            .build()
+            .unwrap();
+        assert_eq!(runtime.active_tools(), ["echo"]);
+        let resumed = AgentSession::open(runtime, &path, options()).await.unwrap();
+        assert_eq!(resumed.snapshot().agent.active_tools, selected);
+        let after = resumed.history().load().unwrap();
+        assert_eq!(
+            after.entries, before.entries,
+            "resume adds no redundant change"
+        );
+        assert_eq!(after.context().unwrap().active_tool_names, Some(selected));
+        resumed.shutdown().await;
+    }
 }
 
 struct Observation {
@@ -265,10 +345,10 @@ async fn model_and_thinking_commit_in_order_with_immediate_snapshot_reload_and_r
         matches!(&changes[1].entry, SessionEntry::ThinkingLevelChange(entry) if entry.thinking_level == "off")
     );
     assert!(
-        matches!(events.try_recv().unwrap().event, AgentSessionEvent::EntryAppended { entry } if entry.id == changes[0].id)
+        matches!(events.try_recv().unwrap().event, AgentSessionEvent::EntryAppended { entry, .. } if entry.id == changes[0].id)
     );
     assert!(
-        matches!(events.try_recv().unwrap().event, AgentSessionEvent::EntryAppended { entry } if entry.id == changes[1].id)
+        matches!(events.try_recv().unwrap().event, AgentSessionEvent::EntryAppended { entry, .. } if entry.id == changes[1].id)
     );
     assert!(matches!(
         events.try_recv().unwrap().event,
@@ -290,7 +370,7 @@ async fn model_and_thinking_commit_in_order_with_immediate_snapshot_reload_and_r
         document.entries.len() + 1
     );
     assert!(
-        matches!(events.try_recv().unwrap().event, AgentSessionEvent::EntryAppended { entry } if matches!(entry.entry, SessionEntry::ModelChange(_)))
+        matches!(events.try_recv().unwrap().event, AgentSessionEvent::EntryAppended { entry, .. } if matches!(entry.entry, SessionEntry::ModelChange(_)))
     );
     assert!(events.try_recv().is_err());
     session.set_thinking_level(ThinkingLevel::Low).unwrap();

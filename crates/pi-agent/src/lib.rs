@@ -8,6 +8,7 @@ mod llm_callbacks;
 mod namespace_prompt;
 mod pending_queue;
 mod stream_assembler;
+mod tool_declarations;
 mod tool_scheduler;
 
 pub use agent::{

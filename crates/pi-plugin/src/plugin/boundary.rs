@@ -168,7 +168,7 @@ impl PluginDriver {
                 Ok(count) => count,
                 Err(error) => {
                     self.diagnostics
-                        .record(registered.id.clone(), hook, None, error.to_string());
+                        .record_failure(registered.id.clone(), hook, None, &error);
                     continue;
                 }
             };
@@ -198,12 +198,10 @@ impl PluginDriver {
                             state.continue_run = value;
                         }
                     }
-                    Err(error) => self.diagnostics.record(
-                        registered.id.clone(),
-                        hook,
-                        None,
-                        error.to_string(),
-                    ),
+                    Err(error) => {
+                        self.diagnostics
+                            .record_failure(registered.id.clone(), hook, None, &error)
+                    }
                 }
                 match preview(&state.entries) {
                     Ok(context) => {

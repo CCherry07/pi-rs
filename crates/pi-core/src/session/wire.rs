@@ -371,9 +371,49 @@ pub struct ActiveToolsEntry {
     pub active_tool_names: Vec<String>,
 }
 
+/// A complete, validated system-message snapshot, retaining wire extensions such
+/// as tool declarations rather than reducing the checkpoint to rendered text.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct SystemMessageSnapshot(AgentMessage);
+
+impl SystemMessageSnapshot {
+    pub fn new(message: AgentMessage) -> Result<Self, SessionWireError> {
+        if message.role() != "system" {
+            return Err(SessionWireError::InvalidPayload(
+                "compaction systemMessage must have the system role".into(),
+            ));
+        }
+        Ok(Self(message))
+    }
+
+    pub fn as_message(&self) -> &AgentMessage {
+        &self.0
+    }
+
+    /// Bind a newly appended checkpoint snapshot to its authoritative entry time.
+    /// Existing replayed records are not rewritten.
+    pub fn with_timestamp(&self, timestamp_ms: i64) -> Result<Self, SessionWireError> {
+        let mut value = serde_json::to_value(&self.0)
+            .map_err(|error| SessionWireError::InvalidPayload(error.to_string()))?;
+        value["timestamp"] = serde_json::json!(timestamp_ms);
+        Self::new(AgentMessage::custom(value)?)
+    }
+}
+
+impl<'de> Deserialize<'de> for SystemMessageSnapshot {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(AgentMessage::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompactionEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_hook: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_message: Option<SystemMessageSnapshot>,
     pub summary: String,
     #[serde(default)]
     pub retained_tail: Vec<AgentMessage>,
@@ -390,6 +430,8 @@ pub struct CompactionEntry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BranchSummaryEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_hook: Option<bool>,
     pub from_id: String,
     pub summary: String,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -183,10 +183,30 @@ async fn a_lagged_stream_subscription_recovers_from_the_current_snapshot() {
     assert!(event.revision > recovered.revision);
     assert!(matches!(
         event.event,
-        pi_session::AgentSessionEvent::EntryAppended { entry } if entry.id == id
+        pi_session::AgentSessionEvent::EntryAppended { entry, .. } if entry.id == id
+    ));
+    // Custom delivery persists once, then publishes its message lifecycle. The
+    // current snapshot includes that complete synchronous publication sequence.
+    let started = subscription.events.try_recv().unwrap();
+    let ended = subscription.events.try_recv().unwrap();
+    assert!(started.revision > event.revision);
+    assert!(ended.revision > started.revision);
+    assert!(
+        matches!(started.event, pi_session::AgentSessionEvent::Agent(event)
+            if matches!(*event, pi_core::AgentEvent::MessageStart { message: Message::Custom(_), .. })
+        )
+    );
+    assert!(
+        matches!(ended.event, pi_session::AgentSessionEvent::Agent(event)
+            if matches!(*event, pi_core::AgentEvent::MessageEnd { message: Message::Custom(_), .. })
+        )
+    );
+    assert!(matches!(
+        subscription.events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
     ));
     let updated = session.snapshot();
-    assert_eq!(updated.revision, event.revision);
+    assert_eq!(updated.revision, ended.revision);
     assert_eq!(updated.agent.messages.len(), 3);
     assert_eq!(recovered.agent.messages.len(), 2);
 }
@@ -220,6 +240,8 @@ async fn navigation_compaction_and_branch_summary_refresh_the_public_snapshot() 
     session.checkout(Some(&leaf)).await.unwrap();
     session
         .append_compaction(CompactionEntry {
+            from_hook: None,
+            system_message: None,
             summary: "compacted root".into(),
             retained_tail: vec![tail.into()],
             retained_entry_ids: Vec::new(),
@@ -240,6 +262,7 @@ async fn navigation_compaction_and_branch_summary_refresh_the_public_snapshot() 
         .branch_with_summary(
             Some(&root),
             BranchSummaryEntry {
+                from_hook: None,
                 from_id: String::new(),
                 summary: "abandoned branch".into(),
                 details: None,

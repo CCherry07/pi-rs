@@ -192,6 +192,25 @@ mod wire_tests {
     }
 
     #[test]
+    fn complete_tool_results_distinguish_missing_structured_content_from_json_values() {
+        for value in [
+            None,
+            Some(json!(null)),
+            Some(json!(false)),
+            Some(json!("")),
+            Some(json!([])),
+        ] {
+            let mut wire = json!({"content":[{"type":"text","text":"result"}]});
+            if let Some(value) = &value {
+                wire["structuredContent"] = value.clone();
+            }
+            let parsed: super::JsToolResult = serde_json::from_value(wire).unwrap();
+            let result: pi_core::ToolResult = parsed.into();
+            assert_eq!(result.structured_content, value);
+        }
+    }
+
+    #[test]
     fn host_notification_fields_use_camel_case() {
         let cancel = serde_json::to_value(JsHostOperation::Cancel {
             invocation_id: "invocation-1".to_string(),
@@ -334,6 +353,8 @@ pub struct JsHookManifest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JsHookSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
     pub plugin_id: String,
     pub callback_id: String,
 }
@@ -690,6 +711,7 @@ impl JsPluginGeneration {
                         .iter()
                         .filter(|hook| hook.name == "context")
                         .map(|hook| JsAgentHook {
+                            source_path: None,
                             plugin_id: plugin_id.clone(),
                             name: hook.name.clone(),
                             callback_id: hook.callback_id.clone(),
@@ -713,6 +735,7 @@ impl JsPluginGeneration {
                         .iter()
                         .filter(|hook| is_batched_agent_observer(&hook.name))
                         .map(move |hook| JsAgentHook {
+                            source_path: None,
                             plugin_id: plugin_id.clone(),
                             name: hook.name.clone(),
                             callback_id: hook.callback_id.clone(),
@@ -726,6 +749,7 @@ impl JsPluginGeneration {
                 .flat_map(|plugin| {
                     let plugin_id = PluginId::new(plugin.id.clone());
                     plugin.hooks.iter().map(move |hook| JsAgentHook {
+                        source_path: None,
                         plugin_id: plugin_id.clone(),
                         name: hook.name.clone(),
                         callback_id: hook.callback_id.clone(),
@@ -766,6 +790,7 @@ impl JsPluginGeneration {
                     .hooks
                     .into_iter()
                     .map(|hook| JsAgentHook {
+                        source_path: None,
                         plugin_id: plugin_id.clone(),
                         name: hook.name,
                         callback_id: hook.callback_id,
@@ -812,6 +837,7 @@ impl JsPluginGeneration {
                         .into_iter()
                         .filter(|hook| !is_batched_agent_observer(&hook.name))
                         .map(|hook| JsAgentHook {
+                            source_path: None,
                             plugin_id: plugin_id.clone(),
                             name: hook.name,
                             callback_id: hook.callback_id,
@@ -850,6 +876,7 @@ impl JsPluginGeneration {
                         .flat_map(|plugin| {
                             let plugin_id = PluginId::new(plugin.id.clone());
                             plugin.hooks.iter().map(move |hook| JsAgentHook {
+                                source_path: None,
                                 plugin_id: plugin_id.clone(),
                                 name: hook.name.clone(),
                                 callback_id: hook.callback_id.clone(),
@@ -873,6 +900,7 @@ impl JsPluginGeneration {
                         .hooks
                         .into_iter()
                         .map(|hook| JsAgentHook {
+                            source_path: None,
                             plugin_id: plugin_id.clone(),
                             name: hook.name,
                             callback_id: hook.callback_id,
@@ -1457,9 +1485,21 @@ struct ActiveJsStream {
 
 #[derive(Clone)]
 struct JsAgentHook {
+    source_path: Option<String>,
     plugin_id: PluginId,
     name: String,
     callback_id: String,
+}
+
+impl JsAgentHook {
+    fn failure(&self, hook: &'static str, message: impl Into<String>) -> PluginError {
+        PluginError::Hook {
+            plugin_id: self.plugin_id.clone(),
+            hook,
+            source_path: self.source_path.clone(),
+            message: message.into(),
+        }
+    }
 }
 
 struct JsContextHooks {
@@ -1493,8 +1533,11 @@ impl ContextHookBatch for JsContextHooks {
             hooks.extend(snapshot.into_iter().map(|hook| {
                 let plugin_id = PluginId::new(hook.plugin_id);
                 (
-                    context.for_adapter_plugin(plugin_id.clone()),
+                    context
+                        .for_adapter_plugin(plugin_id.clone())
+                        .with_diagnostic_source(hook.source_path.clone()),
                     JsAgentHook {
+                        source_path: hook.source_path,
                         plugin_id,
                         name: "context".to_string(),
                         callback_id: hook.callback_id,
@@ -1554,7 +1597,7 @@ impl ContextHookBatch for JsContextHooks {
                         Err(JsInvokeError::Aborted) => {
                             "JavaScript context hook batch was aborted".to_string()
                         }
-                        Err(JsInvokeError::Callback(error)) => error.to_string(),
+                        Err(JsInvokeError::Callback(error)) => error.message,
                     };
                     for (context, hook) in remaining {
                         report_agent_hook_error(context, "context", hook, message.clone());
@@ -1606,6 +1649,8 @@ fn restore_system_messages(current: &[Message], mut returned: Vec<Message>) -> V
         let head = head.get_or_insert_with(|| pi_core::SystemMessage {
             content: Vec::new(),
             sections: Vec::new(),
+            tools_added: None,
+            tools_removed: None,
             timestamp_ms: message.timestamp_ms,
         });
         let text = message.instruction_text();
@@ -1625,6 +1670,8 @@ fn restore_system_messages(current: &[Message], mut returned: Vec<Message>) -> V
         }
     }
     if let Some(mut head) = head {
+        let tools = pi_core::SystemMessage::current_tools(current);
+        head.tools_added = (!tools.is_empty()).then_some(tools);
         if !content.is_empty() {
             head.content =
                 pi_core::SystemMessage::text(content.join("\n\n"), head.timestamp_ms).content;
@@ -1646,6 +1693,7 @@ impl JsPlugin {
                     return Ok(snapshot
                         .into_iter()
                         .map(|hook| JsAgentHook {
+                            source_path: hook.source_path,
                             plugin_id: PluginId::new(hook.plugin_id),
                             name: name.to_string(),
                             callback_id: hook.callback_id,
@@ -1681,13 +1729,14 @@ impl JsPlugin {
                 Some(signal),
             )
             .await
-            .map_err(|error| PluginError::Hook {
-                plugin_id: hook.plugin_id.clone(),
-                hook: name,
-                message: match error {
-                    JsInvokeError::Aborted => "JavaScript hook was aborted".to_string(),
-                    JsInvokeError::Callback(error) => error.to_string(),
-                },
+            .map_err(|error| {
+                hook.failure(
+                    name,
+                    match error {
+                        JsInvokeError::Aborted => "JavaScript hook was aborted".to_string(),
+                        JsInvokeError::Callback(error) => error.message,
+                    },
+                )
             })
     }
 
@@ -1704,7 +1753,9 @@ impl JsPlugin {
         let callbacks = hooks
             .iter()
             .map(|hook| {
-                let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
+                let callback_context = context
+                    .for_adapter_plugin(hook.plugin_id.clone())
+                    .with_diagnostic_source(hook.source_path.clone());
                 JsHookBatchCallback {
                     callback_id: hook.callback_id.clone(),
                     context: agent_plugin_context_value(&callback_context),
@@ -1736,7 +1787,7 @@ impl JsPlugin {
             Err(error) => {
                 let message = match error {
                     JsInvokeError::Aborted => "JavaScript hook batch was aborted".to_string(),
-                    JsInvokeError::Callback(error) => error.to_string(),
+                    JsInvokeError::Callback(error) => error.message,
                 };
                 for hook in &hooks {
                     report_agent_hook_error(context, name, hook, message.clone());
@@ -1788,7 +1839,9 @@ impl JsPlugin {
         let callbacks = hooks
             .iter()
             .map(|hook| {
-                let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
+                let callback_context = context
+                    .for_adapter_plugin(hook.plugin_id.clone())
+                    .with_diagnostic_source(hook.source_path.clone());
                 JsHookBatchCallback {
                     callback_id: hook.callback_id.clone(),
                     context: agent_plugin_context_value(&callback_context),
@@ -1841,7 +1894,7 @@ impl JsPlugin {
                     JsInvokeError::Aborted => {
                         "JavaScript stream hook batch was aborted".to_string()
                     }
-                    JsInvokeError::Callback(error) => error.to_string(),
+                    JsInvokeError::Callback(error) => error.message,
                 };
                 for hook in &hooks {
                     report_agent_hook_error(context, HOOK, hook, message.clone());
@@ -1858,16 +1911,10 @@ fn report_agent_hook_error(
     hook: &JsAgentHook,
     message: impl Into<String>,
 ) {
-    let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
-    callback_context.report_hook_error(
-        name,
-        PluginError::Hook {
-            plugin_id: hook.plugin_id.clone(),
-            hook: name,
-            message: message.into(),
-        }
-        .to_string(),
-    );
+    let callback_context = context
+        .for_adapter_plugin(hook.plugin_id.clone())
+        .with_diagnostic_source(hook.source_path.clone());
+    callback_context.report_hook_failure(name, &hook.failure(name, message));
 }
 
 fn agent_plugin_context_value(context: &AgentPluginContext) -> Value {
@@ -2089,7 +2136,9 @@ impl Plugin for JsPlugin {
         let mut images = event.images;
         let hooks = self.hook_snapshot("input").await?;
         for hook in &hooks {
-            let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
+            let callback_context = context
+                .for_adapter_plugin(hook.plugin_id.clone())
+                .with_diagnostic_source(hook.source_path.clone());
             let context_value = json!({
                 "pluginId": callback_context.plugin_id().as_str(),
                 "cwd": callback_context.cwd().to_string_lossy(),
@@ -2128,7 +2177,7 @@ impl Plugin for JsPlugin {
             {
                 Ok(result) => result,
                 Err(error) => {
-                    callback_context.report_hook_error("input", error.to_string());
+                    callback_context.report_hook_failure("input", &error);
                     continue;
                 }
             };
@@ -2189,7 +2238,9 @@ impl Plugin for JsPlugin {
             });
         let hooks = self.hook_snapshot("before_agent_start").await?;
         for hook in &hooks {
-            let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
+            let callback_context = context
+                .for_adapter_plugin(hook.plugin_id.clone())
+                .with_diagnostic_source(hook.source_path.clone());
             let mut event_value = json!({
                 "type": "before_agent_start",
                 "prompt": prompt,
@@ -2220,7 +2271,7 @@ impl Plugin for JsPlugin {
             {
                 Ok(result) => result,
                 Err(error) => {
-                    callback_context.report_hook_error("before_agent_start", error.to_string());
+                    callback_context.report_hook_failure("before_agent_start", &error);
                     continue;
                 }
             };
@@ -2391,7 +2442,9 @@ impl Plugin for JsPlugin {
             payload["messageEntryId"] = json!(turn.message_entry_id);
             payload["toolResultEntryIds"] = json!(turn.tool_result_entry_ids);
         }
-        let context = context.for_adapter_plugin(hook.plugin_id.clone());
+        let context = context
+            .for_adapter_plugin(hook.plugin_id.clone())
+            .with_diagnostic_source(hook.source_path.clone());
         let result = self
             .invoke_hook(
                 name,
@@ -2420,7 +2473,7 @@ impl Plugin for JsPlugin {
             });
         }
         serde_json::from_value(result)
-            .map_err(|error| PluginError::Failure(format!("invalid {name} result: {error}")))
+            .map_err(|error| hook.failure(name, format!("invalid {name} result: {error}")))
     }
 
     fn boundary_hook_finished(&self, dispatch_id: u64) {
@@ -2468,7 +2521,9 @@ impl Plugin for JsPlugin {
         let mut message = original.clone();
         let hooks = self.hook_snapshot("message_end").await?;
         for hook in &hooks {
-            let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
+            let callback_context = context
+                .for_adapter_plugin(hook.plugin_id.clone())
+                .with_diagnostic_source(hook.source_path.clone());
             let result = match self
                 .invoke_hook(
                     "message_end",
@@ -2482,7 +2537,7 @@ impl Plugin for JsPlugin {
             {
                 Ok(result) => result,
                 Err(error) => {
-                    callback_context.report_hook_error("message_end", error.to_string());
+                    callback_context.report_hook_failure("message_end", &error);
                     continue;
                 }
             };
@@ -2552,18 +2607,18 @@ impl Plugin for JsPlugin {
         context: AgentPluginContext,
         event: ToolExecutionEndEvent,
     ) -> Result<(), PluginError> {
-        self.notify_hooks(
-            "tool_execution_end",
-            &context,
-            json!({
-                "type": "tool_execution_end",
-                "toolCallId": event.tool_call_id.as_str(),
-                "toolName": event.tool_name,
-                "result": tool_result_value(&event.result),
-                "isError": event.is_error,
-            }),
-        )
-        .await
+        let mut payload = json!({
+            "type": "tool_execution_end",
+            "toolCallId": event.tool_call_id.as_str(),
+            "toolName": event.tool_name,
+            "result": tool_result_value(&event.result),
+            "isError": event.is_error,
+        });
+        if let Some(duration) = event.duration_ms {
+            payload["durationMs"] = json!(duration);
+        }
+        self.notify_hooks("tool_execution_end", &context, payload)
+            .await
     }
 
     fn context_hook_batch(&self) -> Option<&dyn ContextHookBatch> {
@@ -2587,7 +2642,9 @@ impl Plugin for JsPlugin {
         let mut arguments = original_arguments.clone();
         let hooks = self.hook_snapshot("tool_call").await?;
         for hook in &hooks {
-            let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
+            let callback_context = context
+                .for_adapter_plugin(hook.plugin_id.clone())
+                .with_diagnostic_source(hook.source_path.clone());
             let result = self
                 .invoke_hook(
                     "tool_call",
@@ -2638,7 +2695,9 @@ impl Plugin for JsPlugin {
         let mut aggregate = JsToolResultPatch::default();
         let hooks = self.hook_snapshot("tool_result").await?;
         for hook in &hooks {
-            let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
+            let callback_context = context
+                .for_adapter_plugin(hook.plugin_id.clone())
+                .with_diagnostic_source(hook.source_path.clone());
             let patch = match self
                 .invoke_hook(
                     "tool_result",
@@ -2672,7 +2731,7 @@ impl Plugin for JsPlugin {
             {
                 Ok(patch) => patch,
                 Err(error) => {
-                    callback_context.report_hook_error("tool_result", error.to_string());
+                    callback_context.report_hook_failure("tool_result", &error);
                     continue;
                 }
             };
@@ -2750,7 +2809,9 @@ impl Plugin for JsPlugin {
         event: &pi_plugin::UserBashEvent,
     ) -> Result<Option<pi_plugin::UserBashOverride>, PluginError> {
         for hook in self.session_hook_snapshot("user_bash").await? {
-            let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
+            let callback_context = context
+                .for_adapter_plugin(hook.plugin_id.clone())
+                .with_diagnostic_source(hook.source_path.clone());
             let result = self.lease.invoke(
                 &hook.callback_id,
                 JsInvocationKind::SessionHook,
@@ -2760,18 +2821,19 @@ impl Plugin for JsPlugin {
                 }}),
                 callback_context.plugin_context_handle(),
                 Some(&event.signal),
-            ).await.map_err(|error| PluginError::Hook {
-                plugin_id: hook.plugin_id.clone(), hook: "user_bash",
-                message: match error {
-                    JsInvokeError::Aborted => "JavaScript user bash hook was aborted".into(),
-                    JsInvokeError::Callback(error) => error.to_string(),
-                },
-            })?;
+            ).await.map_err(|error| hook.failure("user_bash", match error {
+                JsInvokeError::Aborted => "JavaScript user bash hook was aborted".into(),
+                JsInvokeError::Callback(error) => error.message,
+            }))?;
             if result.is_null() {
                 continue;
             }
-            let result: JsUserBashOverride =
-                serde_json::from_value(result).map_err(invalid_session_result)?;
+            let result: JsUserBashOverride = serde_json::from_value(result).map_err(|error| {
+                hook.failure(
+                    "user_bash",
+                    invalid_session_result(error).diagnostic_message(),
+                )
+            })?;
             return Ok(Some(match result {
                 JsUserBashOverride::Result { result } => {
                     pi_plugin::UserBashOverride::Result(result)
@@ -2888,6 +2950,8 @@ impl Plugin for JsPlugin {
         Ok(Some(SessionBeforeCompactResult {
             cancel: result.cancel,
             compaction: result.compaction.map(|compaction| CompactionEntry {
+                from_hook: None,
+                system_message: None,
                 retained_entry_ids: Vec::new(),
                 summary: compaction.summary,
                 retained_tail: preparation.retained_tail.clone(),
@@ -3192,6 +3256,7 @@ impl JsProviderPlugin {
                     return Ok(snapshot
                         .into_iter()
                         .map(|hook| JsAgentHook {
+                            source_path: hook.source_path,
                             plugin_id: PluginId::new(hook.plugin_id),
                             name: name.to_string(),
                             callback_id: hook.callback_id,
@@ -3230,7 +3295,9 @@ impl ProviderPlugin for JsProviderPlugin {
         let mut payload = original.clone();
         let hooks = self.hook_snapshot("before_provider_request").await?;
         for hook in &hooks {
-            let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
+            let callback_context = context
+                .for_adapter_plugin(hook.plugin_id.clone())
+                .with_diagnostic_source(hook.source_path.clone());
             let result = match self
                 .lease
                 .invoke(
@@ -3260,7 +3327,7 @@ impl ProviderPlugin for JsProviderPlugin {
                 Err(error) => {
                     let message = match error {
                         JsInvokeError::Aborted => "JavaScript hook was aborted".to_string(),
-                        JsInvokeError::Callback(error) => error.to_string(),
+                        JsInvokeError::Callback(error) => error.message,
                     };
                     callback_context.report_hook_error("before_provider_request", message);
                     continue;
@@ -3282,7 +3349,9 @@ impl ProviderPlugin for JsProviderPlugin {
         let mut headers = original.clone();
         let hooks = self.hook_snapshot("before_provider_headers").await?;
         for hook in &hooks {
-            let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
+            let callback_context = context
+                .for_adapter_plugin(hook.plugin_id.clone())
+                .with_diagnostic_source(hook.source_path.clone());
             let result = match self
                 .lease
                 .invoke(
@@ -3329,7 +3398,9 @@ impl ProviderPlugin for JsProviderPlugin {
     ) -> Result<(), PluginError> {
         let hooks = self.hook_snapshot("after_provider_response").await?;
         for hook in &hooks {
-            let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
+            let callback_context = context
+                .for_adapter_plugin(hook.plugin_id.clone())
+                .with_diagnostic_source(hook.source_path.clone());
             if let Err(error) = self
                 .lease
                 .invoke(
@@ -3374,7 +3445,7 @@ fn report_provider_invoke_error(
 ) {
     let message = match error {
         JsInvokeError::Aborted => "JavaScript hook was aborted".to_string(),
-        JsInvokeError::Callback(error) => error.to_string(),
+        JsInvokeError::Callback(error) => error.message,
     };
     context.report_hook_error(hook, message);
 }
@@ -3390,6 +3461,7 @@ impl JsPlugin {
                     return Ok(snapshot
                         .into_iter()
                         .map(|hook| JsAgentHook {
+                            source_path: hook.source_path,
                             plugin_id: PluginId::new(hook.plugin_id),
                             name: name.to_string(),
                             callback_id: hook.callback_id,
@@ -3423,7 +3495,9 @@ impl JsPlugin {
         let mut last = Value::Null;
         let hooks = self.session_hook_snapshot(name).await?;
         for hook in &hooks {
-            let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
+            let callback_context = context
+                .for_adapter_plugin(hook.plugin_id.clone())
+                .with_diagnostic_source(hook.source_path.clone());
             let result = match self
                 .lease
                 .invoke(
@@ -3447,7 +3521,7 @@ impl JsPlugin {
                             JsInvokeError::Aborted => {
                                 "JavaScript session hook was aborted".to_string()
                             }
-                            JsInvokeError::Callback(error) => error.to_string(),
+                            JsInvokeError::Callback(error) => error.message,
                         },
                     );
                     continue;
@@ -3628,7 +3702,7 @@ impl JsTool {
 #[serde(rename_all = "camelCase")]
 struct JsToolResult {
     content: Vec<ContentBlock>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present_structured_content")]
     structured_content: Option<Value>,
     #[serde(default)]
     details: Option<Value>,

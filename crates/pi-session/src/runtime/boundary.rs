@@ -52,7 +52,8 @@ impl AgentSession {
         let mut path = self.store.branch_entries()?;
         let mut prepared = Vec::with_capacity(drafts.len());
         for draft in drafts {
-            let entry = match draft {
+            let timestamp_ms = now_ms();
+            let mut entry = match draft {
                 SessionBoundaryDraft::Invalid(_) => {
                     return Err(SessionError::InvalidEntry(
                         "invalid boundary draft shape".into(),
@@ -93,6 +94,8 @@ impl AgentSession {
                         Vec::new()
                     };
                     let mut compaction = CompactionEntry {
+                        from_hook: Some(true),
+                        system_message: crate::history::current_system_snapshot(&context.messages)?,
                         retained_entry_ids: Vec::new(),
                         summary: value.summary.clone(),
                         retained_tail,
@@ -109,11 +112,20 @@ impl AgentSession {
                     SessionEntry::Compaction(compaction)
                 }
             };
+            if let SessionEntry::Compaction(compaction) = &mut entry
+                && let Some(system) = &compaction.system_message
+            {
+                compaction.system_message = Some(
+                    system
+                        .with_timestamp(timestamp_ms)
+                        .map_err(|error| SessionError::InvalidPayload(error.to_string()))?,
+                );
+            }
             let record = SessionRecord {
                 id: next_unique_id("boundary-preview"),
                 seq: path.last().map_or(1, |entry| entry.seq + 1),
                 parent_id: path.last().map(|entry| entry.id.clone()),
-                timestamp_ms: now_ms(),
+                timestamp_ms,
                 entry: entry.clone(),
             };
             path.push(record);

@@ -33,6 +33,8 @@ use crate::features::FeaturesPlugin;
 use crate::project_trust::ProjectTrustService;
 use crate::runtime_inventory::{configured_native_plugin_ids, javascript_inventory_labels};
 
+type SessionBinding = Arc<dyn Fn(&Arc<pi_session::AgentSession>) + Send + Sync>;
+
 #[derive(Clone)]
 pub struct ProductSessionFactory {
     config: Config,
@@ -41,6 +43,7 @@ pub struct ProductSessionFactory {
     js_plugin_host: Option<Arc<dyn JsPluginHost>>,
     plugin_context_binding: PluginContextBinding,
     plugin_ui_bridge: Option<Arc<dyn PluginUiBridge>>,
+    session_bindings: Vec<SessionBinding>,
     presentation_mode: PresentationMode,
     dynamic_providers: DynamicProviderOverlay,
     subagents: SubagentRuntime,
@@ -113,6 +116,7 @@ impl ProductSessionFactory {
             js_plugin_host: None,
             plugin_context_binding: PluginContextBinding::new(),
             plugin_ui_bridge: None,
+            session_bindings: Vec::new(),
             presentation_mode: PresentationMode::Print,
             dynamic_providers: DynamicProviderOverlay::default(),
             subagents: SubagentRuntime::default(),
@@ -131,6 +135,17 @@ impl ProductSessionFactory {
     ) -> Self {
         self.presentation_mode = mode;
         self.plugin_context_binding = session_binding;
+        self
+    }
+
+    /// Bind frontend observers to every prepared generation before session_start.
+    /// Core plugin capabilities are already bound; activation/rollback stays owned
+    /// by the existing session-generation transaction.
+    pub fn with_session_binding(
+        mut self,
+        binding: impl Fn(&Arc<pi_session::AgentSession>) + Send + Sync + 'static,
+    ) -> Self {
+        self.session_bindings.push(Arc::new(binding));
         self
     }
 
@@ -383,8 +398,14 @@ impl SessionGenerationFactory for ProductSessionFactory {
             dynamic_provider_preparation,
             package_reconciliations,
         };
+        let bindings = self.session_bindings.clone();
         Ok(PreparedSessionGeneration::new(runtime, session_options)
-            .bind_session(move |session| plugin_context.bind_generation_session(session))
+            .bind_session(move |session| {
+                plugin_context.bind_generation_session(session.clone());
+                for binding in bindings {
+                    binding(&session);
+                }
+            })
             .with_activation(activation))
     }
 }

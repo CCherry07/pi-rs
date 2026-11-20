@@ -19,7 +19,9 @@ pub use error::SessionError;
 pub use history::*;
 pub mod plugin;
 
-pub use runtime::{SessionCatalog, SessionHistory};
+pub use runtime::{
+    SessionCatalog, SessionEventObserver, SessionEventObserverGuard, SessionHistory,
+};
 
 pub use management::{
     AgentSessionReplacement, PreparedSessionGeneration, SessionGenerationActivation,
@@ -33,15 +35,16 @@ pub use runtime::compaction::{
 };
 pub(crate) use runtime::compaction::{compact, estimate_session_context_tokens, estimate_tokens};
 pub use runtime::{
-    AgentSession, PromptDisposition, PromptOutcome, SessionInput, ShellExecutionOptions,
+    AgentSession, PromptDisposition, PromptOutcome, SessionCompactionResult, SessionInput,
+    ShellExecutionOptions,
 };
 
 pub use management::{IsolatedSessionObservation, IsolatedSessionUsageSnapshot};
 pub use management::{SessionObservation, SessionResetReason, SessionUpdate, SessionVersion};
 pub use runtime::events::{
     AgentSessionEvent, AgentSessionSnapshot, AgentSessionSubscription, AutoRetrySnapshot,
-    BashExecutionSnapshot, CompactionSnapshot, QueueSnapshot, QueuedMessageSnapshot,
-    RevisionedAgentSessionEvent, SummarizationSource,
+    BashExecutionSnapshot, CompactionSnapshot, EntryAppendOrigin, QueueSnapshot, QueueUpdateOrigin,
+    QueuedMessageSnapshot, RevisionedAgentSessionEvent, SummarizationSource,
 };
 
 pub use management::{

@@ -687,7 +687,7 @@ impl SessionState {
         self,
         header: SessionHeader,
     ) -> Result<crate::history::SessionTranscript, HistoryError> {
-        let context = self.default_context_for_lane(MAIN_LANE)?;
+        let context = header.with_initial_tools(self.default_context_for_lane(MAIN_LANE)?)?;
         let branch = self.branch_entries_for_lane(MAIN_LANE)?;
         let usage = super::usage::aggregate_usage(&self.entries, &self.records);
         Ok(crate::history::SessionTranscript {

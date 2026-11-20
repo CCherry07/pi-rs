@@ -118,6 +118,8 @@ impl SessionContextAccess for StaticAccess {
         assert_eq!(request.messages.len(), 1);
         assert!(!signal.is_aborted());
         Ok(AssistantMessage {
+            duration_ms: None,
+            thinking_level: None,
             content: vec![ContentBlock::Text(TextContent::new("{\"operations\":[]}"))],
             api: "test".to_string(),
             provider: ProviderId::new("test"),

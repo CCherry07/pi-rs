@@ -42,5 +42,6 @@ pub enum AgentEvent {
         tool_name: String,
         result: ToolResult,
         is_error: bool,
+        duration_ms: Option<u64>,
     },
 }

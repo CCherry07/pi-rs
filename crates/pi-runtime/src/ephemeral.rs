@@ -405,6 +405,7 @@ fn add_usage(total: &mut Usage, usage: &Usage) {
         total.reasoning = Some(total.reasoning.unwrap_or(0).saturating_add(value));
     }
     total.cost = UsageCost {
+        total_from_provider: None,
         input: total.cost.input + usage.cost.input,
         output: total.cost.output + usage.cost.output,
         cache_read: total.cost.cache_read + usage.cost.cache_read,

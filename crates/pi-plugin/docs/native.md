@@ -321,9 +321,10 @@ unchanged content reuses one pinned handle, while a rebuilt artifact gets a new 
 The SDK also pins the `serde_json::Value` map representation used by constructor options, so feature
 unification in a host workspace cannot silently change that Rust-ABI type's layout.
 
-The current contract is native ABI **35**. Messages now include a typed `System` variant,
-and assistant/response metadata carry optional `providerThinkingLevel`. Rebuild native plugins
-against this SDK; older descriptors are rejected before constructors are resolved.
+The current contract is native ABI **36**, adding run-local prompt state, tool loadout
+preparation, and typed sampling/output contracts. ABI 35 introduced typed `System` messages
+and optional `providerThinkingLevel` metadata. Rebuild native plugins against this SDK;
+older descriptors are rejected before constructors are resolved.
 
 The current source fingerprint also covers `BeforeAgentStartPatch::prompt_contributions` and
 `ToolDiscovery::origin`. Source fragments are optional accounting metadata; they do not change
@@ -473,6 +474,25 @@ results live in `ToolResult::structured_content`; declare their shape when retur
 drops stale structured output, matching Pi; return both fields to retain a structured result.
 This layout change is covered by the exact-build fingerprint: rebuild native plugins against
 the same SDK. Descriptor symbols and library lifetime are unchanged.
+`CompactionEntry` and `BranchSummaryEntry` now preserve optional `from_hook` metadata.
+Compactions can carry a validated `SystemMessageSnapshot`, retaining the complete extensible
+system wire message rather than only rendered text. Rebuild native plugins for these additive
+value-layout changes under the exact-build fingerprint. Existing v4 entries without the fields
+remain readable; the v4 schema number and shared mutation sequence are unchanged.
+
+Tool-end events and `ToolResultMessage` now carry optional `duration_ms`, measured by the owning
+scheduler only for calls entering execution. Preparation failures and synthesized repair results
+omit it. This value-layout change also requires rebuilding native plugins against the exact SDK.
+
+`ModelSpec` additionally preserves optional `prompt_cache` lifetimes and
+`sampling_params_by_thinking_level` metadata. Explicit empty maps remain distinct from missing
+metadata in catalog/RPC serialization. Native plugins must rebuild for this value-layout change
+under the existing exact-build fingerprint; descriptor symbols and library lifetime are unchanged.
+
 `Tool::prepare_loadout` can rewrite descriptions and hide declarations for the current request.
 It receives original scoped metadata and never mutates the published registry or execution rights.
-Host and native plugins must rebuild against the same ABI and build fingerprint.
+`PreparedToolLoadout::declarations` retains the complete prepared definitions; `tools` contains
+only the request-visible subset. The Agent records changes as typed `SystemMessage::tools_added`
+and `tools_removed` deltas before publishing the pending messages. Hidden declarations remain
+in committed history and are filtered only from the provider request projection. These value-layout
+changes require rebuilding hosts and native plugins against the same ABI and build fingerprint.

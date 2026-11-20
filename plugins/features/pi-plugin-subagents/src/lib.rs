@@ -116,6 +116,7 @@ impl Plugin for SubagentsPlugin {
                     .runtime
                     .bind_child(run_id, &session_id)
                     .map_err(|error| PluginError::Hook {
+                        source_path: None,
                         plugin_id: PluginId::new("subagents"),
                         hook: "before_agent_start",
                         message: error.to_string(),

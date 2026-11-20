@@ -32,6 +32,8 @@ impl Plugin for BlockingCompactionNotification {
         Ok(Some(SessionBeforeCompactResult {
             cancel: false,
             compaction: Some(CompactionEntry {
+                from_hook: None,
+                system_message: None,
                 retained_entry_ids: Vec::new(),
                 summary: "compacted history".into(),
                 retained_tail: Vec::new(),

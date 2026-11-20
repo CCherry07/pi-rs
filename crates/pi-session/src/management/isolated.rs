@@ -681,6 +681,7 @@ fn usage_delta(after: &Usage, before: &Usage) -> Usage {
         reasoning: optional_delta(after.reasoning, before.reasoning),
         total_tokens: after.total_tokens.saturating_sub(before.total_tokens),
         cost: UsageCost {
+            total_from_provider: None,
             input: (after.cost.input - before.cost.input).max(0.0),
             output: (after.cost.output - before.cost.output).max(0.0),
             cache_read: (after.cost.cache_read - before.cost.cache_read).max(0.0),
