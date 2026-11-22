@@ -72,7 +72,15 @@ pub(super) fn balanced(messages: &[Message], model: Option<&ModelSpec>) -> Vec<M
                 {
                     std::sync::Arc::make_mut(result).tool_call_id = id.clone().into();
                 }
-                answered.insert(result.tool_call_id.to_string());
+                // Session restore can synthesize results for replies omitted above.
+                // Only the first result for a pending replayed call belongs on the wire.
+                if !pending
+                    .iter()
+                    .any(|(id, _, _)| id == result.tool_call_id.as_str())
+                    || !answered.insert(result.tool_call_id.to_string())
+                {
+                    continue;
+                }
             }
             _ => {}
         }

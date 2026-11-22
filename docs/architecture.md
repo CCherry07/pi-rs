@@ -1802,9 +1802,13 @@ Responses replay retains ordered text/reasoning/tool blocks, same-model encrypte
 text item IDs/phases, compound call/item IDs and namespaces. Foreign-model reasoning and text
 signatures are omitted, tool IDs/results are normalized together, and missing results are repaired
 only in the request projection. Images in tool results stay inside their result; non-vision models
-receive explicit omission text. Failed/aborted assistant replies are excluded. Codex uses the same
-model-aware replay; cached WebSocket continuation compares significant history, including user
-content, reasoning, phases and namespaces, before sending only a suffix.
+receive explicit omission text. Failed/aborted assistant replies are excluded, and each result must
+match a pending replayed call after ID normalization. Each call accepts one result; missing results
+are synthesized when its batch closes. This deliberately strengthens Pi's replay validation so a
+result synthesized during session restore cannot outlive its excluded failed/aborted call. The
+saved history remains intact. Codex uses the same model-aware replay; cached WebSocket continuation
+compares significant history, including user content, reasoning, phases and namespaces, before
+sending only a suffix.
 
 The SSE adapter tracks separate output slots and persists reasoning items and text signatures.
 Reasoning closes at the terminal response so Azure's terminal-only encrypted content can be

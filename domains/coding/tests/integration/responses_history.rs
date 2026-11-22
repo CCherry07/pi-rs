@@ -1,13 +1,14 @@
 //! Actual provider stream -> AgentSession -> JSONL -> resumed provider request.
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use axum::{Json, Router, extract::State, routing::post};
 use pi_agent::AgentOptions;
-use pi_core::{Message, ModelSpec, SystemMessage, ThinkingLevel, UserMessage};
+use pi_core::{Message, ModelSpec, StopReason, SystemMessage, ThinkingLevel, Usage, UserMessage};
 use pi_plugin::{PluginId, ProviderPlugin, ProviderRegisterContext};
 use pi_plugin_openai::{OpenAiCompatibleConfig, OpenAiResponsesCompatibleProvider};
 use pi_runtime::PiRuntime;
-use pi_session::{AgentSession, AgentSessionOptions};
+use pi_session::{AgentSession, AgentSessionOptions, SessionHeader, SessionStore};
 use serde_json::{Value, json};
 
 struct FixtureProvider(String);
@@ -169,5 +170,93 @@ async fn resume_preserves_system_positions_effort_and_signed_output_without_prov
             .count(),
         1
     );
+    server.abort();
+}
+
+#[tokio::test]
+async fn resume_keeps_successful_tool_pairs_after_an_interrupted_turn() {
+    let requests: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route("/responses", post(response))
+        .with_state(requests.clone());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let assistant = |id: &str, stop_reason: StopReason, timestamp: i64| -> Message {
+        serde_json::from_value(json!({
+            "role": "assistant",
+            "content": [{"type": "toolCall", "id": id, "name": "lookup", "arguments": {}}],
+            "provider": "history-fixture", "api": "openai-responses", "model": "model",
+            "usage": Usage::default(), "stopReason": stop_reason, "timestamp": timestamp,
+        }))
+        .unwrap()
+    };
+    for (index, stop_reason) in [StopReason::Aborted, StopReason::Error]
+        .into_iter()
+        .enumerate()
+    {
+        let path = directory.path().join(format!("history-{index}.jsonl"));
+        let runtime = runtime(&base);
+        let store = SessionStore::create(
+            &path,
+            SessionHeader::new(format!("history-{index}"), runtime.cwd()),
+        )
+        .unwrap();
+        let completed_result: Message = serde_json::from_value(json!({
+            "role": "toolResult", "toolCallId": "completed|fc_completed", "toolName": "lookup",
+            "content": [{"type": "text", "text": "saved result"}], "isError": false, "timestamp": 3,
+        }))
+        .unwrap();
+        for message in [
+            Message::User(UserMessage::text("first lookup", 1)),
+            assistant("completed|fc_completed", StopReason::ToolUse, 2),
+            completed_result,
+            Message::User(UserMessage::text("second lookup", 4)),
+            assistant("interrupted|fc_interrupted", stop_reason, 5),
+        ] {
+            store.append_message(message).unwrap();
+        }
+        drop(store);
+
+        let session = AgentSession::open(runtime, &path, AgentSessionOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(requests.lock().unwrap().len(), index);
+        session.prompt("continue").await.unwrap();
+        session.shutdown().await;
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), index + 1);
+        let input = requests[index]["input"].as_array().unwrap();
+        let mut pending = HashSet::new();
+        for item in input {
+            match item["type"].as_str() {
+                Some("function_call") => {
+                    assert!(pending.insert(item["call_id"].as_str().unwrap()));
+                }
+                Some("function_call_output") => {
+                    assert!(
+                        pending.remove(item["call_id"].as_str().unwrap()),
+                        "resuming {stop_reason:?} sent a result without its tool call: {item}"
+                    );
+                }
+                _ => {}
+            }
+        }
+        assert!(pending.is_empty());
+        assert!(
+            input
+                .iter()
+                .any(|item| { item["type"] == "function_call" && item["call_id"] == "completed" })
+        );
+        assert!(input.iter().any(|item| {
+            item["type"] == "function_call_output"
+                && item["call_id"] == "completed"
+                && item["output"] == "saved result"
+        }));
+    }
     server.abort();
 }

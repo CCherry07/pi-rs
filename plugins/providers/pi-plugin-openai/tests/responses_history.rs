@@ -94,6 +94,100 @@ fn update(level: &str) -> Value {
     json!({"type":"configuration_update","reasoning":{"effort":level}})
 }
 
+fn tool_call(id: &str, stop: pi_core::StopReason) -> Message {
+    serde_json::from_value(json!({
+        "role": "assistant",
+        "content": [{"type": "toolCall", "id": id, "name": "lookup", "arguments": {}}],
+        "provider": "openai", "api": "openai-responses", "model": "model",
+        "usage": pi_core::Usage::default(), "stopReason": stop, "timestamp": 2
+    }))
+    .unwrap()
+}
+
+fn tool_result(id: &str, text: &str) -> Message {
+    serde_json::from_value(json!({
+        "role": "toolResult", "toolCallId": id, "toolName": "lookup",
+        "content": [{"type": "text", "text": text}], "isError": false, "timestamp": 3
+    }))
+    .unwrap()
+}
+
+#[test]
+fn failed_replies_and_their_tool_results_are_excluded_together() {
+    for stop in [pi_core::StopReason::Error, pi_core::StopReason::Aborted] {
+        let messages = vec![
+            user("one"),
+            tool_call("call_kept|fc_kept", pi_core::StopReason::ToolUse),
+            tool_result("call_kept|fc_kept", "completed result"),
+            tool_call("call_failed|fc_failed", stop),
+            Message::System(pi_core::SystemMessage::text("new instruction", 4)),
+            tool_result("call_failed|fc_failed", "interrupted result"),
+            user("retry"),
+        ];
+        let original = messages.clone();
+        let body = pi_plugin_openai::responses::request_body(&request(
+            messages.clone(),
+            ThinkingLevel::Off,
+        ))
+        .unwrap();
+        for input in [
+            body["input"].as_array().unwrap().clone(),
+            pi_plugin_openai::responses::input_items(&messages),
+        ] {
+            let tools: Vec<_> = input
+                .iter()
+                .filter(|item| item.get("call_id").is_some())
+                .collect();
+            assert_eq!(tools.len(), 2, "failed tool history must be omitted");
+            assert_eq!(tools[0]["type"], "function_call");
+            assert_eq!(tools[0]["call_id"], "call_kept");
+            assert_eq!(tools[1]["type"], "function_call_output");
+            assert_eq!(tools[1]["call_id"], "call_kept");
+            assert_eq!(tools[1]["output"], "completed result");
+            assert_eq!(input.last().unwrap()["role"], "user");
+        }
+        assert_eq!(
+            messages, original,
+            "replay must leave stored history intact"
+        );
+    }
+}
+
+#[test]
+fn replay_accepts_one_result_per_pending_call_after_id_normalization() {
+    for provider in ["openai", "other-provider"] {
+        let mut request = request(
+            vec![
+                user("one"),
+                tool_result("unknown", "orphan result"),
+                tool_call("call_kept|fc_kept", pi_core::StopReason::ToolUse),
+                tool_result("call_kept|fc_kept", "first result"),
+                tool_result("call_kept|fc_kept", "duplicate result"),
+                tool_call("call_missing|fc_missing", pi_core::StopReason::ToolUse),
+                user("continue"),
+                tool_result("call_missing|fc_missing", "late result"),
+            ],
+            ThinkingLevel::Off,
+        );
+        request.model_spec.as_mut().unwrap().provider = provider.into();
+        let body = pi_plugin_openai::responses::request_body(&request).unwrap();
+        let tools: Vec<_> = body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item.get("call_id").is_some())
+            .collect();
+        assert_eq!(tools.len(), 4);
+        for pair in tools.as_chunks::<2>().0 {
+            assert_eq!(pair[0]["type"], "function_call");
+            assert_eq!(pair[1]["type"], "function_call_output");
+            assert_eq!(pair[0]["call_id"], pair[1]["call_id"]);
+        }
+        assert_eq!(tools[1]["output"], "first result");
+        assert_eq!(tools[3]["output"], "No result provided");
+    }
+}
+
 #[tokio::test]
 async fn system_inside_tool_batch_waits_for_results_and_failed_replies_are_not_replayed() {
     let call:Message=serde_json::from_value(json!({"role":"assistant","content":[{"type":"toolCall","id":"call|fc_1","name":"lookup","arguments":{}}],"provider":"openai","api":"openai-responses","model":"model","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":2})).unwrap();
