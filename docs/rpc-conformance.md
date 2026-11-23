@@ -350,6 +350,8 @@ Normal retirement queue preservation is reviewed separately as S3, not asserted 
 
 ## Reproducible validation environment
 
+- [`sikemux.json`](../sikemux.json) declares locked Node dependency setup for new worktrees,
+  quick TypeScript/RPC checks, and final Rust, Node and native-host checks.
 - The product is a CLI; no server/database port is fabricated. Current validation uses checkout-local
   `packages/pi/node_modules` and the guarded `.build/rpc-validation/cargo` target, selected per command
   with `CARGO_TARGET_DIR`. A missing or replaced dedicated directory stops the run rather than
