@@ -183,7 +183,7 @@ async fn a_lagged_stream_subscription_recovers_from_the_current_snapshot() {
     assert!(event.revision > recovered.revision);
     assert!(matches!(
         event.event,
-        pi_session::AgentSessionEvent::EntryAppended { entry } if entry.id == id
+        pi_session::AgentSessionEvent::EntryAppended { entry, .. } if entry.id == id
     ));
     let updated = session.snapshot();
     assert_eq!(updated.revision, event.revision);
@@ -220,6 +220,8 @@ async fn navigation_compaction_and_branch_summary_refresh_the_public_snapshot() 
     session.checkout(Some(&leaf)).await.unwrap();
     session
         .append_compaction(CompactionEntry {
+            from_hook: None,
+            system_message: None,
             summary: "compacted root".into(),
             retained_tail: vec![tail.into()],
             retained_entry_ids: Vec::new(),
@@ -240,6 +242,7 @@ async fn navigation_compaction_and_branch_summary_refresh_the_public_snapshot() 
         .branch_with_summary(
             Some(&root),
             BranchSummaryEntry {
+                from_hook: None,
                 from_id: String::new(),
                 summary: "abandoned branch".into(),
                 details: None,

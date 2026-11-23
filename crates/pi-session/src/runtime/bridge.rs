@@ -13,7 +13,7 @@ pub(super) fn attach(session: &AgentSession) {
     let activity = Arc::clone(&session.activity);
     let retry_settings = Arc::clone(&session.retry_settings);
     session.runtime.agent().subscribe(Arc::new(
-        move |event: AgentEvent, _: pi_core::AbortSignal| {
+        move |event: AgentEvent, signal: pi_core::AbortSignal| {
             let events = Arc::clone(&events);
             let agent = agent.clone();
             let activity = Arc::clone(&activity);
@@ -54,11 +54,12 @@ pub(super) fn attach(session: &AgentSession) {
                     if let Some(queue) = committed.queue {
                         events.publish_queue(queue);
                     }
-                    events.publish_entry(committed.entry);
+                    events.publish_entry(committed.entry, crate::EntryAppendOrigin::Agent);
                     if let Some(configuration) = committed.configuration {
-                        events.publish_initialized_context(configuration, configuration_state);
+                        events.publish_initialized_context(configuration, configuration_state, crate::EntryAppendOrigin::Configuration);
                     }
                 }
+                events.flush_observers(signal).await.map_err(EventError)?;
                 Ok(())
             }
         },

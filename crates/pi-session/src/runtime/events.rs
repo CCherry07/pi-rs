@@ -6,9 +6,40 @@ use pi_plugin::NoticeLevel;
 use pi_shell::{ShellResult, ShellStream};
 use tokio::sync::broadcast;
 
+use super::observers::{EventObservers, SessionEventObserver, SessionEventObserverGuard};
 use crate::{CompactionReason, SessionRecord};
 
 const DEFAULT_EVENT_CAPACITY: usize = 512;
+
+/// Why a history entry was appended. This is transient publication provenance,
+/// not a journal flag or a frontend-specific visibility policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EntryAppendOrigin {
+    /// An explicit custom/context mutation (including extension boundary drafts).
+    Explicit,
+    /// Persistence of an already-published agent message lifecycle.
+    Agent,
+    /// Model, thinking, tool selection, name or label configuration.
+    Configuration,
+    /// A manual/automatic summarization checkpoint with its own lifecycle events.
+    Compaction,
+    /// A history navigation/branch update, rather than an explicit entry append.
+    Navigation,
+    /// A delivered custom message with its own message lifecycle.
+    MessageDelivery,
+    /// Persistence of user shell output with its own shell lifecycle.
+    Shell,
+}
+
+/// Transient cause of a queue notification, never a persisted frontend flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueUpdateOrigin {
+    /// An explicit enqueue/edit/clear, including idempotent clear requests.
+    Mutation,
+    /// Rebinding queue identities to/from a run without changing either message list.
+    Retimed,
+}
 
 /// Product events emitted by an [`crate::AgentSession`].
 ///
@@ -30,6 +61,7 @@ pub enum AgentSessionEvent {
         aborted: bool,
     },
     QueueUpdate {
+        origin: QueueUpdateOrigin,
         steering: Vec<String>,
         follow_up: Vec<String>,
         items: Vec<QueuedMessageSnapshot>,
@@ -42,6 +74,7 @@ pub enum AgentSessionEvent {
         /// The committed compaction record. Keeping its tree identity lets
         /// Pi JSON/RPC consumers recover `firstKeptEntryId` exactly.
         result: Option<SessionRecord>,
+        estimated_tokens_after: Option<u64>,
         aborted: bool,
         will_retry: bool,
         error_message: Option<String>,
@@ -69,6 +102,7 @@ pub enum AgentSessionEvent {
     SummarizationRetryFinished,
     EntryAppended {
         entry: SessionRecord,
+        origin: EntryAppendOrigin,
     },
     /// Detached provider usage was added to the session ledger without a
     /// corresponding conversation entry.
@@ -85,6 +119,9 @@ pub enum AgentSessionEvent {
     PluginNotice {
         message: String,
         level: NoticeLevel,
+    },
+    PluginError {
+        diagnostic: pi_plugin::PluginDiagnostic,
     },
     ThinkingLevelChanged {
         level: ThinkingLevel,
@@ -180,6 +217,7 @@ pub struct AgentSessionSubscription {
 pub(crate) struct AgentSessionEventHub {
     snapshot: RwLock<AgentSessionSnapshot>,
     sender: broadcast::Sender<RevisionedAgentSessionEvent>,
+    observers: Arc<EventObservers>,
 }
 
 impl AgentSessionEventHub {
@@ -200,6 +238,7 @@ impl AgentSessionEventHub {
                 name,
             }),
             sender,
+            observers: Arc::default(),
         })
     }
 
@@ -232,6 +271,37 @@ impl AgentSessionEventHub {
         AgentSessionSubscription { snapshot, events }
     }
 
+    pub(crate) fn defer_observers(&self) -> super::observers::ObserverDispatchGuard {
+        self.observers.defer()
+    }
+
+    pub(crate) fn observe(
+        &self,
+        observer: Arc<dyn SessionEventObserver>,
+    ) -> SessionEventObserverGuard {
+        let snapshot = self
+            .snapshot
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.observers.register(observer, snapshot.revision)
+    }
+
+    pub(crate) async fn flush_observers(&self, signal: pi_core::AbortSignal) -> Result<(), String> {
+        self.observers.flush(signal).await
+    }
+
+    pub(crate) async fn retire_observers(&self) -> Result<(), String> {
+        self.observers.retire().await
+    }
+
+    pub(crate) fn close_observers(&self) {
+        self.observers.close();
+    }
+
+    pub(crate) fn publish_plugin_error(&self, diagnostic: pi_plugin::PluginDiagnostic) {
+        self.publish(AgentSessionEvent::PluginError { diagnostic }, |_| {});
+    }
+
     pub(crate) fn publish_agent(&self, event: AgentEvent, agent: AgentStateSnapshot) {
         self.publish(AgentSessionEvent::Agent(Box::new(event)), |snapshot| {
             snapshot.agent = agent;
@@ -259,10 +329,11 @@ impl AgentSessionEventHub {
         });
     }
 
-    pub(crate) fn publish_entry(&self, entry: SessionRecord) {
+    pub(crate) fn publish_entry(&self, entry: SessionRecord, origin: EntryAppendOrigin) {
         self.publish(
             AgentSessionEvent::EntryAppended {
                 entry: entry.clone(),
+                origin,
             },
             |_| {},
         );
@@ -272,10 +343,12 @@ impl AgentSessionEventHub {
         &self,
         entry: SessionRecord,
         agent: AgentStateSnapshot,
+        origin: EntryAppendOrigin,
     ) {
-        self.publish(AgentSessionEvent::EntryAppended { entry }, |snapshot| {
-            snapshot.agent = agent
-        });
+        self.publish(
+            AgentSessionEvent::EntryAppended { entry, origin },
+            |snapshot| snapshot.agent = agent,
+        );
     }
 
     pub(crate) fn publish_tree(
@@ -299,7 +372,11 @@ impl AgentSessionEventHub {
         thinking_level: Option<ThinkingLevel>,
     ) {
         for entry in entries {
-            self.publish_initialized_context(entry, agent.clone());
+            self.publish_initialized_context(
+                entry,
+                agent.clone(),
+                EntryAppendOrigin::Configuration,
+            );
         }
         if let Some(thinking_level) = thinking_level {
             self.publish_thinking(thinking_level, agent);
@@ -307,8 +384,13 @@ impl AgentSessionEventHub {
     }
 
     pub(crate) fn publish_queue(&self, queue: QueueSnapshot) {
+        self.publish_queue_with_origin(queue, QueueUpdateOrigin::Mutation);
+    }
+
+    pub(crate) fn publish_queue_with_origin(&self, queue: QueueSnapshot, origin: QueueUpdateOrigin) {
         self.publish(
             AgentSessionEvent::QueueUpdate {
+                origin,
                 steering: queue.steering.clone(),
                 follow_up: queue.follow_up.clone(),
                 items: queue.items.clone(),
@@ -330,11 +412,13 @@ impl AgentSessionEventHub {
         aborted: bool,
         will_retry: bool,
         error_message: Option<String>,
+        estimated_tokens_after: Option<u64>,
     ) {
         self.publish(
             AgentSessionEvent::CompactionEnd {
                 reason,
                 result,
+                estimated_tokens_after,
                 aborted,
                 will_retry,
                 error_message,
@@ -508,10 +592,16 @@ impl AgentSessionEventHub {
         snapshot.revision = snapshot.revision.saturating_add(1);
         // Revision assignment and publication have the same order, including
         // concurrent queue, shell and plugin producers.
-        let _ = self.sender.send(RevisionedAgentSessionEvent {
+        let event = RevisionedAgentSessionEvent {
             revision: snapshot.revision,
             event,
-        });
+        };
+        let dispatch = self.observers.enqueue(&event);
+        let _ = self.sender.send(event);
+        drop(snapshot);
+        if dispatch {
+            self.observers.dispatch();
+        }
     }
 }
 
@@ -599,7 +689,7 @@ mod tests {
 
         hub.publish_compaction_start(CompactionReason::Manual);
         assert!(hub.snapshot().compaction.is_some());
-        hub.publish_compaction_end(CompactionReason::Manual, None, false, false, None);
+        hub.publish_compaction_end(CompactionReason::Manual, None, false, false, None, None);
         assert!(hub.snapshot().compaction.is_none());
     }
 

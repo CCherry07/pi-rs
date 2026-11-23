@@ -106,6 +106,12 @@ impl ChunkState {
         }
         if let Some(usage) = chunk.get("usage").filter(|value| !value.is_null()) {
             self.usage = parse_usage(usage);
+            events.push(StreamEvent::Metadata {
+                patch: ResponseMetadataPatch {
+                    usage: Some(self.usage.clone()),
+                    ..Default::default()
+                },
+            });
         }
         if let Some(message) = chunk.pointer("/error/message").and_then(Value::as_str) {
             return Err(ProviderError::Failure(message.to_string()));
@@ -324,9 +330,13 @@ fn parse_usage(value: &Value) -> Usage {
         cache_read,
         cache_write,
         cache_write_1h: None,
-        reasoning: value
-            .pointer("/completion_tokens_details/reasoning_tokens")
-            .and_then(Value::as_u64),
+        reasoning: Some(
+            value
+                .pointer("/completion_tokens_details/reasoning_tokens")
+                .and_then(Value::as_u64)
+                .or_else(|| value.get("reasoning_tokens").and_then(Value::as_u64))
+                .unwrap_or(0),
+        ),
         total_tokens: input + output + cache_read + cache_write,
         cost: pi_core::UsageCost::default(),
     }
@@ -366,6 +376,31 @@ mod tests {
                 Some(StreamEvent::ToolCallEnd { .. })
             ));
         }
+    }
+
+    #[test]
+    fn observed_usage_precedes_closing_content_and_defaults_reasoning_to_zero() {
+        let mut state = ChunkState::default();
+        state
+            .consume(&json!({"choices":[{"delta":{"content":"ok"}}]}))
+            .unwrap();
+        let events = state.consume(&json!({"choices":[{"delta":{},"finish_reason":"stop"}], "usage":{"prompt_tokens":10,"completion_tokens":4}})).unwrap();
+        let usage = events
+            .iter()
+            .position(
+                |event| matches!(event, StreamEvent::Metadata { patch } if patch.usage.is_some()),
+            )
+            .unwrap();
+        let end = events
+            .iter()
+            .position(|event| matches!(event, StreamEvent::TextEnd { .. }))
+            .unwrap();
+        assert!(usage < end);
+        assert_eq!(state.usage.reasoning, Some(0));
+        assert_eq!(
+            parse_usage(&json!({"reasoning_tokens":3})).reasoning,
+            Some(3)
+        );
     }
 
     #[test]

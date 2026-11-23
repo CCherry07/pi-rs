@@ -90,6 +90,7 @@ fn close_pending(
     for (id, name, timestamp) in pending.drain(..) {
         if !answered.contains(&id) {
             output.push(Message::tool_result(ToolResultMessage {
+                duration_ms: None,
                 tool_call_id: id.into(),
                 tool_name: name,
                 content: vec![ContentBlock::Text(TextContent::new("No result provided"))],

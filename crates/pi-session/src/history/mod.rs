@@ -5,6 +5,7 @@
 mod journal;
 mod projection;
 mod provenance;
+mod system_snapshot;
 mod types;
 pub use journal::{
     EffectiveLaneConfiguration, ExactSessionIdResolution, JsonlSessionRepo, LaneOperationState,
@@ -22,6 +23,7 @@ pub use projection::{
     build_session_context, default_context_entry_transform, project_session_entries,
     session_entry_to_context_messages,
 };
+pub(crate) use system_snapshot::current_system_snapshot;
 pub use types::*;
 
 pub use journal::{reduce_lane_operation, validate_session_id};

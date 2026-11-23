@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use pi_core::{
-    AgentEvent, AssistantMessage, AssistantStream, ContentBlock, StopReason, StreamEvent,
+    AgentEvent, AssistantMessage, AssistantStream, ContentBlock, Message, StopReason, StreamEvent,
     ToolResult,
 };
 use pi_session::{
@@ -66,17 +66,17 @@ pub fn session_event_json(
         AgentSessionEvent::AgentSettled { aborted } => {
             json!({"type":"agent_settled", "aborted":aborted})
         }
-        AgentSessionEvent::QueueUpdate {
-            steering,
-            follow_up,
-            ..
-        } => json!({"type":"queue_update","steering":steering,"followUp":follow_up}),
+        AgentSessionEvent::QueueUpdate { origin, steering, follow_up, .. } => {
+            if origin == pi_session::QueueUpdateOrigin::Retimed { return Ok(None); }
+            json!({"type":"queue_update","steering":steering,"followUp":follow_up})
+        },
         AgentSessionEvent::CompactionStart { reason } => {
             json!({"type":"compaction_start","reason":compaction_reason(reason)})
         }
         AgentSessionEvent::CompactionEnd {
             reason,
             result,
+            estimated_tokens_after,
             aborted,
             will_retry,
             error_message,
@@ -91,10 +91,11 @@ pub fn session_event_json(
                     .history()
                     .load()
                     .map_err(|error| error.to_string())?;
-                object.insert(
-                    "result".to_string(),
-                    compaction_result_json(&record, &document)?,
-                );
+                let mut result = compaction_result_json(&record, &document)?;
+                if let Some(tokens) = estimated_tokens_after {
+                    result["estimatedTokensAfter"] = json!(tokens);
+                }
+                object.insert("result".to_string(), result);
             }
             insert_optional(&mut object, "errorMessage", error_message)?;
             Value::Object(object)
@@ -143,7 +144,10 @@ pub fn session_event_json(
         AgentSessionEvent::SummarizationRetryFinished => {
             json!({"type":"summarization_retry_finished"})
         }
-        AgentSessionEvent::EntryAppended { entry } => {
+        AgentSessionEvent::EntryAppended { entry, origin } => {
+            if origin != pi_session::EntryAppendOrigin::Explicit {
+                return Ok(None);
+            }
             let document = session
                 .history()
                 .load()
@@ -156,6 +160,12 @@ pub fn session_event_json(
             insert_optional(&mut object, "name", name)?;
             Value::Object(object)
         }
+        AgentSessionEvent::PluginError { diagnostic } => json!({
+            "type":"extension_error",
+            "extensionPath":diagnostic.source_path.as_deref().unwrap_or(diagnostic.plugin_id.as_str()),
+            "event":diagnostic.hook.as_str(),
+            "error":diagnostic.raw_message.as_deref().unwrap_or(diagnostic.message.as_str()),
+        }),
         AgentSessionEvent::ThinkingLevelChanged { level } => {
             json!({"type":"thinking_level_changed","level":level})
         }
@@ -233,17 +243,27 @@ pub(crate) fn session_entry_json(
             object.insert("type".to_string(), json!("thinking_level_change"));
             object.insert("thinkingLevel".to_string(), json!(change.thinking_level));
         }
-        SessionEntry::Compaction(_) => {
+        SessionEntry::Compaction(compaction) => {
             object.insert("type".to_string(), json!("compaction"));
             let Value::Object(result) = compaction_result_json(record, document)? else {
                 unreachable!("compaction result projection is always an object");
             };
             object.extend(result);
+            if object["firstKeptEntryId"].is_null() {
+                object.insert("firstKeptEntryId".into(), json!(record.id));
+            }
+            insert_optional(&mut object, "fromHook", compaction.from_hook)?;
+            insert_optional(
+                &mut object,
+                "systemMessage",
+                compaction.system_message.as_ref(),
+            )?;
         }
         SessionEntry::BranchSummary(summary) => {
             object.insert("type".to_string(), json!("branch_summary"));
             object.insert("fromId".to_string(), json!(summary.from_id));
             object.insert("summary".to_string(), json!(summary.summary));
+            insert_optional(&mut object, "fromHook", summary.from_hook)?;
             if let Some(details) = &summary.details {
                 object.insert("details".to_string(), details.clone());
             }
@@ -357,7 +377,9 @@ fn agent_event_json(event: AgentEvent) -> Result<Option<Value>, String> {
         AgentEvent::TurnEnd {
             message,
             tool_results,
-        } => json!({"type":"turn_end","message":message,"toolResults":tool_results}),
+        } => {
+            json!({"type":"turn_end","message":Message::Assistant(message),"toolResults":tool_results.into_iter().map(Message::tool_result).collect::<Vec<_>>()})
+        }
         AgentEvent::MessageStart { message } => json!({"type":"message_start","message":message}),
         AgentEvent::MessageUpdate { stream, update } => {
             let Some(value) = message_update_json(&stream, update)? else {
@@ -393,13 +415,20 @@ fn agent_event_json(event: AgentEvent) -> Result<Option<Value>, String> {
             tool_name,
             result,
             is_error,
-        } => json!({
-            "type":"tool_execution_end",
-            "toolCallId":tool_call_id,
-            "toolName":tool_name,
-            "result":tool_result_json(&result),
-            "isError":is_error,
-        }),
+            duration_ms,
+        } => {
+            let mut event = json!({
+                "type":"tool_execution_end",
+                "toolCallId":tool_call_id,
+                "toolName":tool_name,
+                "result":tool_result_json(&result),
+                "isError":is_error,
+            });
+            if let Some(duration) = duration_ms {
+                event["durationMs"] = json!(duration);
+            }
+            event
+        }
     }))
 }
 
@@ -535,6 +564,9 @@ fn tool_call_at(message: &AssistantMessage, index: usize) -> Result<&pi_core::To
 fn tool_result_json(result: &ToolResult) -> Value {
     let mut object = Map::new();
     object.insert("content".to_string(), json!(result.content));
+    if let Some(structured) = &result.structured_content {
+        object.insert("structuredContent".to_string(), structured.clone());
+    }
     if let Some(details) = &result.details {
         object.insert("details".to_string(), details.clone());
     }
@@ -587,6 +619,8 @@ mod tests {
 
     fn assistant(content: Vec<ContentBlock>, stop_reason: StopReason) -> AssistantMessage {
         AssistantMessage {
+            duration_ms: None,
+            thinking_level: None,
             content,
             api: "test".to_string(),
             provider: "test".into(),
@@ -623,6 +657,19 @@ mod tests {
             AssistantStreamId::new("test-stream"),
             Arc::new(FixedStream(message)),
         )
+    }
+
+    #[test]
+    fn turn_end_serializes_both_message_roles() {
+        let tool = serde_json::from_value(json!({"toolCallId":"call","toolName":"fixture","content":[],"isError":false,"timestamp":1})).unwrap();
+        let value = agent_event_json(AgentEvent::TurnEnd {
+            message: Arc::new(assistant(vec![], StopReason::ToolUse)),
+            tool_results: vec![tool],
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(value["message"]["role"], "assistant");
+        assert_eq!(value["toolResults"][0]["role"], "toolResult");
     }
 
     #[test]

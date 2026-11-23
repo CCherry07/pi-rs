@@ -24,6 +24,24 @@ use serde_json::{Value, json};
 use super::*;
 use fixtures::*;
 
+#[test]
+fn assistant_metadata_times_current_responses_but_keeps_forwarded_and_explicit_durations() {
+    let stamp = AssistantResponseStamp {
+        started: std::time::Instant::now(),
+        started_at: 100,
+        thinking_level: ThinkingLevel::High,
+    };
+    let mut message = text_response("fixture");
+    message.timestamp_ms = 100;
+    let timed = stamp.finish(message.clone());
+    assert!(timed.duration_ms.is_some());
+    assert_eq!(timed.thinking_level, Some(ThinkingLevel::High));
+    message.timestamp_ms = 99;
+    assert_eq!(stamp.finish(message.clone()).duration_ms, None);
+    message.duration_ms = Some(17);
+    assert_eq!(stamp.finish(message).duration_ms, Some(17));
+}
+
 mod default_stream_function_compatibility {
     use super::*;
 
@@ -166,6 +184,7 @@ mod agent_loop_with_agent_message {
             cache_write: 4,
             total_tokens: 10,
             cost: UsageCost {
+                total_from_provider: None,
                 input: 0.1,
                 output: 0.2,
                 cache_read: 0.3,
@@ -181,6 +200,7 @@ mod agent_loop_with_agent_message {
             cache_write: 8,
             total_tokens: 26,
             cost: UsageCost {
+                total_from_provider: None,
                 input: 0.5,
                 output: 0.6,
                 cache_read: 0.7,

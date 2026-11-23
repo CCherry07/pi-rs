@@ -62,6 +62,8 @@ impl Plugin for DeterministicCompaction {
         Ok(Some(SessionBeforeCompactResult {
             cancel: false,
             compaction: Some(CompactionEntry {
+                from_hook: None,
+                system_message: None,
                 retained_entry_ids: Vec::new(),
                 summary: "compacted history".to_string(),
                 retained_tail: Vec::new(),

@@ -4,9 +4,8 @@ use std::sync::Arc;
 use pi_core::{ContentBlock, CustomMessage, CustomMessageContent, Message, UserMessage};
 
 use super::activity::ActivityPhase;
-use super::context::ContextActivation;
 use super::{AgentSession, SessionInput};
-use crate::{QueueKind, SessionEntry, SessionError};
+use crate::{QueueKind, SessionError};
 
 pub(crate) enum SessionDelivery {
     Custom {
@@ -146,10 +145,7 @@ impl AgentSession {
                 // between an idle notification and this context write.
                 let _operation = self.activity.begin(ActivityPhase::Updating).await;
                 self.ensure_open()?;
-                self.context_updates.append(
-                    SessionEntry::custom_message(&message),
-                    ContextActivation::Restore,
-                )?;
+                self.append_custom_message_locked(message)?;
                 Ok(())
             }
         }

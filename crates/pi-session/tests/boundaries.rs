@@ -251,6 +251,7 @@ impl Plugin for SideEffectBoundary {
                 .session
                 .append_entry("side-effect", Some(json!({"value": 1})))?;
             return Err(PluginError::Hook {
+                source_path: None,
                 plugin_id: self.id(),
                 hook: "turn_end",
                 message: "after append".into(),
@@ -632,6 +633,8 @@ async fn editing_retained_messages_after_repeated_compaction_keeps_provenance() 
             .collect();
         session
             .append_compaction(CompactionEntry {
+                from_hook: None,
+                system_message: None,
                 summary: "checkpoint".into(),
                 retained_tail,
                 retained_entry_ids: vec![],
@@ -916,6 +919,8 @@ impl Plugin for BoundaryCompactionProbe {
         Ok(Some(pi_plugin::SessionBeforeCompactResult {
             cancel: false,
             compaction: Some(CompactionEntry {
+                from_hook: None,
+                system_message: None,
                 summary: "summary".into(),
                 retained_tail: vec![],
                 retained_entry_ids: vec![],

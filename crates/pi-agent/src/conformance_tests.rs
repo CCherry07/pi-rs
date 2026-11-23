@@ -122,6 +122,8 @@ fn build_agent(
 
 fn assistant_message(content: Vec<ContentBlock>, stop_reason: StopReason) -> AssistantMessage {
     AssistantMessage {
+        duration_ms: None,
+        thinking_level: None,
         content,
         api: "scripted".to_string(),
         provider: ProviderId::new("scripted"),
@@ -142,6 +144,7 @@ fn assistant_message(content: Vec<ContentBlock>, stop_reason: StopReason) -> Ass
 
 fn tool_result_message(id: &str, name: &str, text: &str) -> Message {
     Message::tool_result(ToolResultMessage {
+        duration_ms: None,
         tool_call_id: ToolCallId::new(id),
         tool_name: name.to_string(),
         content: vec![ContentBlock::Text(TextContent::new(text))],
@@ -936,6 +939,59 @@ async fn listeners_receive_the_active_abort_signal() {
     let outcome = prompt.await.unwrap();
     assert_eq!(outcome.stop, AgentLoopStop::Aborted);
     assert!(signal.is_aborted());
+}
+
+#[tokio::test]
+async fn abort_closes_observed_text_before_the_aborted_message() {
+    let (agent, _) = build_agent(
+        [ScriptedTurn::Text("partial".into())],
+        vec![],
+        AgentOptions::default(),
+    );
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (notify, resume, events) = (entered.clone(), release.clone(), captured.clone());
+    agent.subscribe(Arc::new(move |event, _| {
+        let (notify, resume, events) = (notify.clone(), resume.clone(), events.clone());
+        async move {
+            let is_delta = matches!(&event, AgentEvent::MessageUpdate { update, .. } if matches!(update.as_ref(), StreamEvent::TextDelta { .. }));
+            events.lock().unwrap().push(event);
+            if is_delta { notify.notify_one(); resume.notified().await; }
+            Ok(())
+        }
+    }));
+    let running = agent.clone();
+    let task = tokio::spawn(async move { running.prompt("hello").await.unwrap() });
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .unwrap();
+    agent.abort();
+    release.notify_one();
+    let outcome = task.await.unwrap();
+    assert_eq!(outcome.stop, AgentLoopStop::Aborted);
+    let events = captured.lock().unwrap();
+    let text_end = events.iter().position(|event| matches!(event, AgentEvent::MessageUpdate { update, .. } if matches!(update.as_ref(), StreamEvent::TextEnd { .. }))).expect("missing text_end on cancellation");
+    let message_end = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                AgentEvent::MessageEnd {
+                    message: Message::Assistant(_)
+                }
+            )
+        })
+        .unwrap();
+    assert!(text_end < message_end);
+    let Message::Assistant(message) = outcome.new_messages.last().unwrap() else {
+        panic!("assistant missing")
+    };
+    assert_eq!(
+        message.error_message.as_deref(),
+        Some("Request was aborted")
+    );
+    assert!(matches!(&message.content[0], ContentBlock::Text(text) if text.text == "partial"));
 }
 
 #[tokio::test]

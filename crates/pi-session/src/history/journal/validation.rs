@@ -362,6 +362,8 @@ mod tests {
             )
             .unwrap();
         let assistant = Message::assistant(AssistantMessage {
+            duration_ms: None,
+            thinking_level: None,
             content: Vec::new(),
             api: "test".to_string(),
             provider: ProviderId::new("provider"),
@@ -379,6 +381,7 @@ mod tests {
                 reasoning: None,
                 total_tokens: 20,
                 cost: UsageCost {
+                    total_from_provider: None,
                     input: 1.0,
                     output: 2.0,
                     cache_read: 3.0,

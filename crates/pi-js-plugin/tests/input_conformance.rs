@@ -246,10 +246,12 @@ async fn dynamic_snapshot_handlers_still_chain_through_rust_validation() {
     let dispatcher = Arc::new(InputDispatcher {
         dynamic_snapshot: Mutex::new(Some(vec![
             JsHookSnapshot {
+                source_path: None,
                 plugin_id: "first-extension".to_string(),
                 callback_id: "append-first".to_string(),
             },
             JsHookSnapshot {
+                source_path: None,
                 plugin_id: "second-extension".to_string(),
                 callback_id: "append-second".to_string(),
             },
@@ -281,6 +283,52 @@ async fn dynamic_snapshot_handlers_still_chain_through_rust_validation() {
     let events = dispatcher.events.lock().unwrap();
     assert_eq!(events[1].1["text"], "X[1]");
     assert_eq!(events[0].1["source"], "interactive");
+}
+
+#[tokio::test]
+async fn dynamic_hook_diagnostics_keep_source_path_and_raw_message() {
+    let dispatcher = Arc::new(InputDispatcher {
+        dynamic_snapshot: Mutex::new(Some(vec![
+            JsHookSnapshot {
+                source_path: Some("/fixtures/bad.ts".into()),
+                plugin_id: "bad-extension".into(),
+                callback_id: "throw".into(),
+            },
+            JsHookSnapshot {
+                source_path: Some("/fixtures/good.ts".into()),
+                plugin_id: "good-extension".into(),
+                callback_id: "append-first".into(),
+            },
+        ])),
+        ..Default::default()
+    });
+    let driver = dynamic_driver(dispatcher);
+    let (_, signal) = AbortHandle::new();
+    let patch = driver
+        .input(
+            std::path::Path::new("/workspace"),
+            &signal,
+            input("X", None, InputSource::Rpc, None),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(patch, InputPatch::Transform { text, .. } if text == "X[1]"),
+        "later hook must continue"
+    );
+    let diagnostics = driver.diagnostics();
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].plugin_id.as_str(), "bad-extension");
+    assert_eq!(
+        diagnostics[0].source_path.as_deref(),
+        Some("/fixtures/bad.ts")
+    );
+    assert_eq!(diagnostics[0].raw_message.as_deref(), Some("boom"));
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("bad-extension failed in input")
+    );
 }
 
 #[tokio::test]

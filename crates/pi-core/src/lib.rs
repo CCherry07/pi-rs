@@ -29,8 +29,8 @@ pub use message::{
 };
 pub use model::{
     ModelCost, ModelCostTier, ModelImageInputLimits, ModelImageResizeOptions, ModelInput,
-    ModelInputLimits, ModelSelection, ModelSpec, ResponseMetadata, StopReason, ThinkingBudgets,
-    ThinkingLevel,
+    ModelInputLimits, ModelPromptCache, ModelSamplingParamsByThinkingLevel, ModelSelection,
+    ModelSpec, ResponseMetadata, StopReason, ThinkingBudgets, ThinkingLevel,
 };
 pub use model_operations::{
     AnyModelSpec, ClassifierAnswer, ClassifierBoolCriteria, ClassifierContext, ClassifierModelSpec,

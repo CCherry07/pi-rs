@@ -537,7 +537,8 @@ test('keeps unread stream events lazy and stable across later updates', async (t
     content: [{ type: 'text', text: 'start' }],
   })
   for (let i = 0; i < 8; i++) await update({ type: 'textDelta', contentIndex: 0, delta: String(i) })
-  await update({ type: 'metadata', patch: { ...metadata, responseId: 'new' } })
+  const observedUsage = { input: 7, output: 2, totalTokens: 9, cost: { totalFromProvider: false } }
+  await update({ type: 'metadata', patch: { ...metadata, responseId: 'new', usage: observedUsage } })
   await update({ type: 'textEnd', contentIndex: 0, textSignature: 'signed' })
   await update({ type: 'toolCallStart', contentIndex: 1, id: 'call', name: 'read' })
   await update({ type: 'toolCallDelta', contentIndex: 1, argumentsDelta: '{"id":1}' })
@@ -566,6 +567,7 @@ test('keeps unread stream events lazy and stable across later updates', async (t
       content: [{ type: 'text', text: `start${'01234567'.slice(0, i + 1)}` }],
     })
   }
+  assert.deepEqual(events[8]?.message.usage, observedUsage, 'usage patches reach later snapshots, never prior retained events')
   assert.deepEqual(events[9]?.message.content, [
     { type: 'text', text: 'start01234567', textSignature: 'signed' },
     { type: 'toolCall', id: 'call', name: 'read', arguments: null },

@@ -55,7 +55,8 @@ impl AgentSession {
             && let Some(target_id) = leaf_id
         {
             let entry = self.store.set_label_with_entry(target_id, Some(label))?;
-            self.events.publish_entry(entry);
+            self.events
+                .publish_entry(entry, crate::EntryAppendOrigin::Configuration);
         }
         self.finish_tree_change(previous_leaf, None, None).await?;
         Ok(context)
@@ -147,6 +148,7 @@ impl AgentSession {
         }
         let summary = if let Some(summary) = before.summary {
             BranchSummaryEntry {
+                from_hook: None,
                 from_id: String::new(),
                 summary: summary.summary,
                 details: summary.details,
@@ -259,6 +261,7 @@ impl AgentSession {
             (summary, Some(response.usage), details)
         };
         Ok(BranchSummaryEntry {
+            from_hook: None,
             from_id: String::new(),
             summary,
             details,
@@ -275,6 +278,7 @@ impl AgentSession {
         from_extension: bool,
     ) -> Result<String, SessionError> {
         summary.from_id = previous_leaf.clone().unwrap_or_else(|| "root".to_string());
+        summary.from_hook = Some(from_extension);
         let record = self
             .context_updates
             .branch(leaf_id, summary.clone(), label)?;

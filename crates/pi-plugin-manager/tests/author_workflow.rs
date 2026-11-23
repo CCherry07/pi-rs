@@ -18,8 +18,14 @@ async fn scaffold_build_verify_install_and_construct_all_plugin_kinds() {
         .unwrap();
     let cargo_config = root.path().join(".cargo");
     std::fs::create_dir(&cargo_config).unwrap();
-    // Share one nested Cargo cache across the independently generated crates.
-    let cache = workspace.join("target/plugin-tools-fixtures");
+    // Share one nested cache outside the parent's build lock. Deriving from the
+    // executable respects Cargo env/config/--target-dir, including cross-target builds.
+    let executable = std::env::current_exe().unwrap();
+    let cache = executable
+        .parent()
+        .and_then(Path::parent)
+        .unwrap()
+        .join("plugin-tools-fixtures");
     let config = toml::Table::from_iter([(
         "build".into(),
         toml::Value::Table(toml::Table::from_iter([(

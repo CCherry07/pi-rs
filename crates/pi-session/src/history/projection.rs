@@ -97,7 +97,11 @@ fn session_entry_to_context_messages_inner(
             vec![AgentMessage::from(message.to_message(record.timestamp_ms))]
         }
         SessionEntry::Compaction(compaction) => {
-            let mut messages = Vec::with_capacity(compaction.retained_tail.len() + 1);
+            let prefix = 1 + usize::from(compaction.system_message.is_some());
+            let mut messages = Vec::with_capacity(compaction.retained_tail.len() + prefix);
+            if let Some(system) = &compaction.system_message {
+                messages.push(system.as_message().clone());
+            }
             messages.push(
                 AgentMessage::custom(json!({
                     "role": "compactionSummary",
@@ -308,7 +312,8 @@ pub fn project_session_entries(
                 .position(|entry| entry.id == record.id)
                 .unwrap_or(path.len());
             let ids = retained_entry_ids(compaction, &path[..end], options);
-            let tail = messages.split_off(1.min(messages.len()));
+            let prefix = 1 + usize::from(compaction.system_message.is_some());
+            let tail = messages.split_off(prefix.min(messages.len()));
             output.push(ProjectedSessionEntry {
                 source_entry: record.clone(),
                 messages,
@@ -518,6 +523,7 @@ fn append_missing_tool_results(
 ) {
     messages.extend(pending.drain(..).map(|(tool_call_id, tool_name, timestamp_ms)| {
         Message::tool_result(ToolResultMessage {
+            duration_ms: None,
             content: vec![ContentBlock::Text(pi_core::TextContent::new(format!(
                 "Tool call \"{tool_name}\" did not complete because the previous agent run ended before recording a result. Continue without assuming it succeeded."
             )))],
@@ -746,6 +752,8 @@ mod tests {
 
     fn assistant(text: &str, stop_reason: StopReason) -> AgentMessage {
         Message::assistant(AssistantMessage {
+            duration_ms: None,
+            thinking_level: None,
             content: vec![ContentBlock::Text(TextContent::new(text))],
             provider_thinking_level: None,
             api: "anthropic-messages".to_string(),
@@ -767,6 +775,8 @@ mod tests {
 
     fn assistant_tool_call(id: &str, name: &str) -> AgentMessage {
         Message::assistant(AssistantMessage {
+            duration_ms: None,
+            thinking_level: None,
             content: vec![ContentBlock::ToolCall(ToolCall::new(id, name, json!({})))],
             provider_thinking_level: None,
             api: "openai-completions".to_string(),
@@ -811,6 +821,7 @@ mod tests {
             Some("batch"),
             SessionEntry::message(Message::ToolResult(
                 ToolResultMessage {
+                    duration_ms: None,
                     tool_call_id: ToolCallId::new("child-a"),
                     tool_name: "subagent".into(),
                     content: vec![ContentBlock::Text(TextContent::new("sibling finished"))],
@@ -850,6 +861,8 @@ mod tests {
                 2,
                 Some("old"),
                 SessionEntry::Compaction(CompactionEntry {
+                    from_hook: None,
+                    system_message: None,
                     retained_entry_ids: Vec::new(),
                     summary: "summary".to_string(),
                     retained_tail: vec![user("retained"), assistant("answer", StopReason::Stop)],

@@ -1,6 +1,70 @@
 use super::*;
 
 #[tokio::test]
+async fn aborted_follow_up_waits_for_an_explicit_prompt_then_keeps_its_delivery_mode() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("aborted-follow-up.jsonl");
+    let plugin = ScriptedProviderPlugin::scripted([
+        ScriptedTurn::WaitForAbort,
+        ScriptedTurn::Text("resumed answer".into()),
+        ScriptedTurn::Text("queued answer".into()),
+    ]);
+    let provider = plugin.provider();
+    let runtime = PiRuntime::builder().provider_plugin(plugin).build().unwrap();
+    let session = Arc::new(AgentSession::create(runtime, &path, Default::default()).await.unwrap());
+    let mut events = session.subscribe();
+    let running = {
+        let session = session.clone();
+        tokio::spawn(async move { session.prompt("first prompt").await.unwrap() })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while provider.requests().is_empty() { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    session.follow_up("surviving follow-up").await.unwrap();
+    let original_id = session.snapshot().queue.items[0].entry_id.clone();
+    session.abort_and_wait().await;
+    running.await.unwrap();
+    assert!(!session.snapshot().agent.is_running);
+    assert_eq!(provider.requests().len(), 1, "abort must not implicitly restart a request");
+    assert_eq!(session.snapshot().queue.follow_up, ["surviving follow-up"]);
+    assert_ne!(session.snapshot().queue.items[0].entry_id, original_id);
+    let mut mutations = 0;
+    let mut rebound = Vec::new();
+    while let Ok(event) = events.events.try_recv() {
+        if let AgentSessionEvent::QueueUpdate { origin, items, .. } = event.event {
+            match origin {
+                crate::QueueUpdateOrigin::Mutation => mutations += 1,
+                crate::QueueUpdateOrigin::Retimed => rebound.push(items),
+            }
+        }
+    }
+    assert_eq!(mutations, 1, "only the explicit enqueue changes the Pi queue");
+    assert_eq!(rebound, [session.snapshot().queue.items], "native observers receive the new editable identities");
+
+    session.prompt("resume after abort").await.unwrap();
+    assert_eq!(provider.requests().len(), 3, "the explicit prompt must allow the queued follow-up turn");
+    assert!(session.snapshot().queue.items.is_empty());
+    let mut origins = Vec::new();
+    while let Ok(event) = events.events.try_recv() {
+        if let AgentSessionEvent::QueueUpdate { origin, .. } = event.event { origins.push(origin); }
+    }
+    assert_eq!(origins, [crate::QueueUpdateOrigin::Retimed, crate::QueueUpdateOrigin::Mutation], "binding is not a second enqueue; consumption changes the queue");
+    let texts = session.snapshot().agent.messages.iter().filter_map(|message| match message {
+        Message::User(user) => match user.content.first() {
+            Some(ContentBlock::Text(text)) => Some(text.text.clone()),
+            _ => None,
+        },
+        _ => None,
+    }).collect::<Vec<_>>();
+    assert_eq!(texts, ["first prompt", "resume after abort", "surviving follow-up"]);
+    assert!(matches!(provider.requests()[2].messages.last(), Some(Message::User(user)) if matches!(&user.content[0], ContentBlock::Text(text) if text.text == "surviving follow-up")));
+    session.shutdown().await;
+    drop(session);
+    let reopened = AgentSession::open(scripted_runtime([]), &path, Default::default()).await.unwrap();
+    assert!(reopened.snapshot().queue.items.is_empty(), "delivered input must not replay on resume");
+}
+
+#[tokio::test]
 async fn idle_user_queues_keep_delivery_modes_and_join_the_next_explicit_prompt() {
     use pi_plugin::InputStreamingBehavior;
     let directory = tempfile::tempdir().unwrap();
@@ -263,11 +327,13 @@ async fn live_queue_edits_keep_distinct_ids_and_publish_only_after_persistence()
             .queue
             .items
             .iter()
-            .all(|item| item.kind == QueueKind::NextRun)
+            .all(|item| item.kind == QueueKind::FollowUp),
+        "the live queue retains its mode for the next explicit prompt"
     );
     drop(session);
     let reopened = AgentSession::open(scripted_runtime([]), &path, Default::default())
         .await
         .unwrap();
     assert_eq!(reopened.snapshot().queue.follow_up, ["last", "same"]);
+    assert!(reopened.snapshot().queue.items.iter().all(|item| item.kind == QueueKind::NextRun));
 }

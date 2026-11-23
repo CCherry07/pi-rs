@@ -65,6 +65,11 @@ impl PartialEq for SessionPluginContext {
 impl Eq for SessionPluginContext {}
 
 impl SessionPluginContext {
+    pub fn report_hook_failure(&self, hook: &'static str, error: &super::diagnostics::PluginError) {
+        self.diagnostics
+            .record_failure(self.plugin_id.clone(), hook, Some(self.generation), error);
+    }
+
     #[doc(hidden)]
     pub fn unavailable_for_testing(
         plugin_id: PluginId,
@@ -115,6 +120,12 @@ impl SessionPluginContext {
         let mut context = self.clone();
         context.plugin_id = plugin_id;
         context
+    }
+
+    #[doc(hidden)]
+    pub fn with_diagnostic_source(mut self, source_path: Option<String>) -> Self {
+        self.diagnostics = self.diagnostics.with_source(source_path);
+        self
     }
 
     pub(crate) fn with_plugin_context(

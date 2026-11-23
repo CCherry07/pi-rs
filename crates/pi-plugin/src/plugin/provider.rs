@@ -29,6 +29,11 @@ pub struct ProviderPluginContext {
 }
 
 impl ProviderPluginContext {
+    pub fn report_hook_failure(&self, hook: &'static str, error: &super::diagnostics::PluginError) {
+        self.diagnostics
+            .record_failure(self.plugin_id.clone(), hook, Some(self.generation), error);
+    }
+
     #[allow(clippy::too_many_arguments)]
     #[doc(hidden)]
     pub fn unavailable_for_testing(
@@ -93,6 +98,12 @@ impl ProviderPluginContext {
         let mut context = self.clone();
         context.plugin_id = plugin_id;
         context
+    }
+
+    #[doc(hidden)]
+    pub fn with_diagnostic_source(mut self, source_path: Option<String>) -> Self {
+        self.diagnostics = self.diagnostics.with_source(source_path);
+        self
     }
 
     #[doc(hidden)]
@@ -334,6 +345,13 @@ impl ProviderPluginDriver {
             .collect()
     }
 
+    pub fn observe_diagnostics(
+        &self,
+        observer: super::diagnostics::PluginDiagnosticObserver,
+    ) -> super::diagnostics::PluginDiagnosticSubscription {
+        self.diagnostics.observe(observer)
+    }
+
     pub fn diagnostics(&self) -> Vec<PluginDiagnostic> {
         self.diagnostics.snapshot()
     }
@@ -386,11 +404,11 @@ impl ProviderPluginDriver {
             let replacement = match replacement {
                 Ok(replacement) => replacement,
                 Err(error) => {
-                    self.diagnostics.record(
+                    self.diagnostics.record_failure(
                         registered.id.clone(),
                         ProviderHook::BeforeProviderRequest,
                         Some(generation),
-                        error.to_string(),
+                        &error,
                     );
                     continue;
                 }
@@ -442,11 +460,11 @@ impl ProviderPluginDriver {
             match replacement {
                 Ok(Some(replacement)) => headers = replacement,
                 Ok(None) => {}
-                Err(error) => self.diagnostics.record(
+                Err(error) => self.diagnostics.record_failure(
                     registered.id.clone(),
                     ProviderHook::BeforeProviderHeaders,
                     Some(generation),
-                    error.to_string(),
+                    &error,
                 ),
             }
         }
@@ -491,11 +509,11 @@ impl ProviderPluginDriver {
                 )
                 .await;
             if let Err(error) = result {
-                self.diagnostics.record(
+                self.diagnostics.record_failure(
                     registered.id.clone(),
                     ProviderHook::AfterProviderResponse,
                     Some(generation),
-                    error.to_string(),
+                    &error,
                 );
             }
         }

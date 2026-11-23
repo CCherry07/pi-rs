@@ -732,6 +732,8 @@ async fn manual_compaction_reports_empty_and_already_compacted_with_terminal_eve
         if already {
             session
                 .append_compaction(CompactionEntry {
+                    from_hook: None,
+                    system_message: None,
                     retained_entry_ids: Vec::new(),
                     summary: "existing summary".into(),
                     retained_tail: Vec::new(),

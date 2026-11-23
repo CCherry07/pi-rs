@@ -360,12 +360,13 @@ impl SessionStore {
         let mut state = self.state();
         let parent_id = state.require_lane(lane)?;
         state.validate_unused_id(&provisioned.id)?;
+        let timestamp_ms = now_ms();
         let record = SessionRecord {
             id: provisioned.id,
             seq: state.next_sequence(),
             parent_id,
-            timestamp_ms: now_ms(),
-            entry: provisioned.entry,
+            timestamp_ms,
+            entry: bind_checkpoint_timestamp(provisioned.entry, timestamp_ms)?,
         };
         let mutation = SessionMutation::Entry {
             lane: Some(lane.to_string()),
@@ -441,11 +442,13 @@ impl SessionStore {
         let mut next_sequence = state.next_sequence();
         for entry in entries {
             let id = next_unique_id("entry");
+            let timestamp_ms = now_ms();
+            let entry = bind_checkpoint_timestamp(entry, timestamp_ms)?;
             let record = SessionRecord {
                 id: id.clone(),
                 seq: next_sequence,
                 parent_id,
-                timestamp_ms: now_ms(),
+                timestamp_ms,
                 entry,
             };
             let mutation = SessionMutation::Entry {
@@ -1329,6 +1332,22 @@ fn file_modified_at(path: &Path) -> Result<f64, HistoryError> {
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0.0, |duration| duration.as_secs_f64() * 1_000.0))
+}
+
+fn bind_checkpoint_timestamp(
+    mut entry: SessionEntry,
+    timestamp_ms: i64,
+) -> Result<SessionEntry, HistoryError> {
+    if let SessionEntry::Compaction(compaction) = &mut entry
+        && let Some(system) = &compaction.system_message
+    {
+        compaction.system_message = Some(
+            system
+                .with_timestamp(timestamp_ms)
+                .map_err(|error| HistoryError::InvalidPayload(error.to_string()))?,
+        );
+    }
+    Ok(entry)
 }
 
 #[cfg(test)]

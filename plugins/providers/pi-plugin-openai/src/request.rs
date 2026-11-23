@@ -1108,6 +1108,7 @@ mod tests {
             session_id: None,
             messages: vec![
                 Message::ToolResult(Arc::new(ToolResultMessage {
+                    duration_ms: None,
                     tool_call_id: ToolCallId::new("image"),
                     tool_name: "read".to_string(),
                     content: vec![ContentBlock::Image(ImageContent {
@@ -1122,6 +1123,7 @@ mod tests {
                 })),
                 Message::System(pi_core::SystemMessage::text("", 0)),
                 Message::ToolResult(Arc::new(ToolResultMessage {
+                    duration_ms: None,
                     tool_call_id: ToolCallId::new("text"),
                     tool_name: "bash".to_string(),
                     content: vec![ContentBlock::Text(TextContent::new("passed"))],
@@ -1175,6 +1177,7 @@ mod tests {
             system_prompt: "system".to_string(),
             messages: vec![
                 Message::ToolResult(Arc::new(ToolResultMessage {
+                    duration_ms: None,
                     tool_call_id: ToolCallId::new("call"),
                     tool_name: "lookup".to_string(),
                     content: vec![ContentBlock::Text(TextContent::new("result"))],

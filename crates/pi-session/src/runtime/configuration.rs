@@ -288,7 +288,8 @@ impl AgentSession {
             (!name.is_empty()).then_some(name)
         });
         let entry = self.store.set_name_with_entry(normalized.clone())?;
-        self.events.publish_entry(entry);
+        self.events
+            .publish_entry(entry, crate::EntryAppendOrigin::Configuration);
         Ok(normalized)
     }
 }

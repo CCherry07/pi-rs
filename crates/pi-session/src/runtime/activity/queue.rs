@@ -14,6 +14,7 @@ impl SessionActivity {
         generation: u64,
         entry_id: &str,
     ) -> Result<String, SessionError> {
+        let _dispatch = self.events.defer_observers();
         let mut state = self.lock();
         if state.active_run.is_some() {
             return Err(SessionError::Busy);
@@ -64,6 +65,7 @@ impl SessionActivity {
         entry_id: &str,
         before: Option<Option<&str>>,
     ) -> Result<(), SessionError> {
+        let _dispatch = self.events.defer_observers();
         let mut state = self.lock();
         let recovered = state
             .recovered_queue

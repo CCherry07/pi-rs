@@ -308,6 +308,7 @@ impl SessionActivity {
         expected: Option<LiveDelivery>,
         input: QueuedInput,
     ) -> Result<PromptOutcome, SessionError> {
+        let _dispatch = self.events.defer_observers();
         let mut state = self.lock();
         let idle_delivery =
             input.kind != QueueKind::NextRun && state.active_run.is_none() && expected.is_none();
@@ -370,6 +371,7 @@ impl SessionActivity {
 
     /// Binds idle queued input to the newly admitted run before the Agent can consume it.
     pub(super) fn activate_idle_queue(&self, agent: &Agent) -> Result<(), SessionError> {
+        let _dispatch = self.events.defer_observers();
         let mut state = self.lock();
         let run_id = state
             .active_run
@@ -418,7 +420,9 @@ impl SessionActivity {
             .expect("admitted run")
             .pending
             .extend(pending.clone());
-        self.events.publish_queue(state.queue_snapshot());
+        // Only the journal identities/run association changed; the ordered
+        // steering/follow-up lists are still the same pending input.
+        self.events.publish_queue_with_origin(state.queue_snapshot(), crate::QueueUpdateOrigin::Retimed);
         for item in pending {
             let destination = match item.kind {
                 Some(QueueKind::Steer) => pi_agent::QueueDestination::Steering,
@@ -544,6 +548,7 @@ impl SessionActivity {
     /// Clears queued messages and returns their editor-ready text. The
     /// cancellation records make the same result survive process recovery.
     pub(super) fn clear_queue(&self, agent: &Agent) -> Result<QueueSnapshot, SessionError> {
+        let _dispatch = self.events.defer_observers();
         let mut activity = self.lock();
         if activity.active_run.as_ref().is_some_and(|run| {
             run.pending
@@ -626,6 +631,7 @@ impl SessionActivity {
         self.phase.send_replace(ActivityPhase::Settling);
         let snapshot = {
             let mut activity = self.lock();
+            let before = activity.queue_snapshot();
             let Some(run) = activity.active_run.take() else {
                 return Err(SessionError::Runtime(
                     "active session operation disappeared before completion".to_string(),
@@ -639,12 +645,20 @@ impl SessionActivity {
             }
             for mut item in run.pending.into_iter().filter(|item| item.kind.is_some()) {
                 requeue_for_next_run(&self.store, &mut item)?;
+                // Keep live delivery intent across abort/error. It is activated only
+                // by a later explicit prompt, never by settlement itself. Reopened
+                // journals still recover conservative NextRun items.
+                item.deliver_on_prompt = matches!(item.kind, Some(QueueKind::Steer | QueueKind::FollowUp));
                 activity.recovered_queue.push(item);
             }
             agent.clear_all_queues();
-            activity.queue_snapshot()
+            let after = activity.queue_snapshot();
+            let origin = if after.steering == before.steering && after.follow_up == before.follow_up { crate::QueueUpdateOrigin::Retimed } else { crate::QueueUpdateOrigin::Mutation };
+            (after != before).then_some((after, origin))
         };
-        self.events.publish_queue(snapshot);
+        if let Some((snapshot, origin)) = snapshot {
+            self.events.publish_queue_with_origin(snapshot, origin);
+        }
 
         let (outcome, error) = match result {
             Ok(outcome) => match outcome.stop {

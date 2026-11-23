@@ -157,6 +157,7 @@ impl Plugin for PrivatePlugin {
             },
             "error" => {
                 return Err(PluginError::Hook {
+                    source_path: None,
                     plugin_id: self.id(),
                     hook: "tool_call",
                     message: "private hook failure".into(),

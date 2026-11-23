@@ -42,6 +42,13 @@ the configured model's documented behavior. Keep existing providers while valida
 Responses provider sends the resolved `apiKey` as `Authorization: Bearer ...`; do not add a second
 command-backed `Authorization` header or copy a token into the file.
 
+Model metadata includes optional `promptCache` lifetimes and `samplingParamsByThinkingLevel`.
+For compatible request bodies, defaults merge in this order: model `samplingParams`, the clamped
+Pi thinking level's parameter map, then explicit request `samplingParams`. The level lookup occurs
+before translating the Pi level through `thinkingLevelMap`; a provider value such as `medium`
+does not accidentally select the `medium` defaults when the requested Pi level is `high`.
+Merging is shallow per parameter and retains JSON null, false and empty string values.
+
 Adding or changing the helper command requires reload; changes to the credential it returns do
 not. A helper's successful execution alone does not prove gateway access, model permissions,
 streaming, or tool-call compatibility. Validate those separately against your intended endpoint.

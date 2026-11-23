@@ -53,6 +53,7 @@ pub fn aggregate_session_usage<'a>(entries: impl IntoIterator<Item = &'a Session
             total.reasoning = Some(total.reasoning.unwrap_or(0).saturating_add(reasoning));
         }
         total.cost = UsageCost {
+            total_from_provider: None,
             input: total.cost.input + usage.cost.input,
             output: total.cost.output + usage.cost.output,
             cache_read: total.cost.cache_read + usage.cost.cache_read,
@@ -134,6 +135,7 @@ pub(super) fn aggregate_usage(entries: &[SessionRecord], records: &[LaneRecord])
             .saturating_add(cache_read)
             .saturating_add(cache_write),
         cost: UsageCost {
+            total_from_provider: cost.total_from_provider,
             input: cost.input.max(0.0),
             output: cost.output.max(0.0),
             cache_read: cost.cache_read.max(0.0),
@@ -182,6 +184,8 @@ mod tests {
     #[test]
     fn totals_include_tool_results_compactions_and_branch_summaries() {
         let assistant = SessionEntry::message(Message::assistant(AssistantMessage {
+            duration_ms: None,
+            thinking_level: None,
             content: vec![ContentBlock::Text(TextContent::new("answer"))],
             api: "test".to_string(),
             provider: ProviderId::new("test"),
@@ -199,6 +203,7 @@ mod tests {
             timestamp_ms: 1,
         }));
         let tool_result = SessionEntry::message(Message::tool_result(ToolResultMessage {
+            duration_ms: None,
             tool_call_id: ToolCallId::new("call"),
             tool_name: "metered".to_string(),
             content: vec![ContentBlock::Text(TextContent::new("result"))],
@@ -209,6 +214,8 @@ mod tests {
             timestamp_ms: 2,
         }));
         let compaction = SessionEntry::Compaction(CompactionEntry {
+            from_hook: None,
+            system_message: None,
             retained_entry_ids: Vec::new(),
             summary: "summary".to_string(),
             retained_tail: Vec::<AgentMessage>::new(),
@@ -217,6 +224,7 @@ mod tests {
             usage: Some(usage(30, 8, 9, 10, 0.3)),
         });
         let branch = SessionEntry::BranchSummary(BranchSummaryEntry {
+            from_hook: None,
             from_id: "root".to_string(),
             summary: "branch".to_string(),
             details: None,
@@ -236,6 +244,8 @@ mod tests {
     #[test]
     fn document_totals_add_only_explicit_usage_adjustments() {
         let assistant = SessionEntry::message(Message::assistant(AssistantMessage {
+            duration_ms: None,
+            thinking_level: None,
             content: vec![ContentBlock::Text(TextContent::new("answer"))],
             api: "test".to_string(),
             provider: ProviderId::new("test"),

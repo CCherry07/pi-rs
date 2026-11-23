@@ -265,10 +265,10 @@ async fn model_and_thinking_commit_in_order_with_immediate_snapshot_reload_and_r
         matches!(&changes[1].entry, SessionEntry::ThinkingLevelChange(entry) if entry.thinking_level == "off")
     );
     assert!(
-        matches!(events.try_recv().unwrap().event, AgentSessionEvent::EntryAppended { entry } if entry.id == changes[0].id)
+        matches!(events.try_recv().unwrap().event, AgentSessionEvent::EntryAppended { entry, .. } if entry.id == changes[0].id)
     );
     assert!(
-        matches!(events.try_recv().unwrap().event, AgentSessionEvent::EntryAppended { entry } if entry.id == changes[1].id)
+        matches!(events.try_recv().unwrap().event, AgentSessionEvent::EntryAppended { entry, .. } if entry.id == changes[1].id)
     );
     assert!(matches!(
         events.try_recv().unwrap().event,
@@ -290,7 +290,7 @@ async fn model_and_thinking_commit_in_order_with_immediate_snapshot_reload_and_r
         document.entries.len() + 1
     );
     assert!(
-        matches!(events.try_recv().unwrap().event, AgentSessionEvent::EntryAppended { entry } if matches!(entry.entry, SessionEntry::ModelChange(_)))
+        matches!(events.try_recv().unwrap().event, AgentSessionEvent::EntryAppended { entry, .. } if matches!(entry.entry, SessionEntry::ModelChange(_)))
     );
     assert!(events.try_recv().is_err());
     session.set_thinking_level(ThinkingLevel::Low).unwrap();

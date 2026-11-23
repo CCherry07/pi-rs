@@ -24,7 +24,7 @@ function nativeEnvironment(root: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const name of [
     "PATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "COMSPEC", "PATHEXT",
-    "TMP", "TEMP", "TMPDIR", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH",
+    "TMP", "TEMP", "TMPDIR", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "CARGO_TARGET_DIR",
   ]) {
     if (process.env[name] !== undefined) env[name] = process.env[name];
   }

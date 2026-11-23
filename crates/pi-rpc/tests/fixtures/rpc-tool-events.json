@@ -1,0 +1,616 @@
+{
+  "commit": "05fd3fbda0bbb9a1c7a76e4bf92ab58ed77c8d94",
+  "source": "packages/coding-agent/src/modes/json-event.ts",
+  "cases": [
+    {
+      "input": {
+        "type": "tool_execution_update",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "args": {
+          "value": 1
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          }
+        }
+      },
+      "expected": {
+        "type": "tool_execution_update",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "args": {
+          "value": 1
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          }
+        }
+      }
+    },
+    {
+      "input": {
+        "type": "tool_execution_end",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          }
+        },
+        "isError": false
+      },
+      "expected": {
+        "type": "tool_execution_end",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          }
+        },
+        "isError": false
+      }
+    },
+    {
+      "input": {
+        "type": "tool_execution_update",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "args": {
+          "value": 1
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          },
+          "structuredContent": null
+        }
+      },
+      "expected": {
+        "type": "tool_execution_update",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "args": {
+          "value": 1
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          },
+          "structuredContent": null
+        }
+      }
+    },
+    {
+      "input": {
+        "type": "tool_execution_end",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          },
+          "structuredContent": null
+        },
+        "isError": false
+      },
+      "expected": {
+        "type": "tool_execution_end",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          },
+          "structuredContent": null
+        },
+        "isError": false
+      }
+    },
+    {
+      "input": {
+        "type": "tool_execution_update",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "args": {
+          "value": 1
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          },
+          "structuredContent": false
+        }
+      },
+      "expected": {
+        "type": "tool_execution_update",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "args": {
+          "value": 1
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          },
+          "structuredContent": false
+        }
+      }
+    },
+    {
+      "input": {
+        "type": "tool_execution_end",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          },
+          "structuredContent": false
+        },
+        "isError": false
+      },
+      "expected": {
+        "type": "tool_execution_end",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          },
+          "structuredContent": false
+        },
+        "isError": false
+      }
+    },
+    {
+      "input": {
+        "type": "tool_execution_update",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "args": {
+          "value": 1
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          },
+          "structuredContent": ""
+        }
+      },
+      "expected": {
+        "type": "tool_execution_update",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "args": {
+          "value": 1
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          },
+          "structuredContent": ""
+        }
+      }
+    },
+    {
+      "input": {
+        "type": "tool_execution_end",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          },
+          "structuredContent": ""
+        },
+        "isError": false
+      },
+      "expected": {
+        "type": "tool_execution_end",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          },
+          "structuredContent": ""
+        },
+        "isError": false
+      }
+    },
+    {
+      "input": {
+        "type": "tool_execution_update",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "args": {
+          "value": 1
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          },
+          "structuredContent": []
+        }
+      },
+      "expected": {
+        "type": "tool_execution_update",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "args": {
+          "value": 1
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          },
+          "structuredContent": []
+        }
+      }
+    },
+    {
+      "input": {
+        "type": "tool_execution_end",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          },
+          "structuredContent": []
+        },
+        "isError": false
+      },
+      "expected": {
+        "type": "tool_execution_end",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          },
+          "structuredContent": []
+        },
+        "isError": false
+      }
+    },
+    {
+      "input": {
+        "type": "tool_execution_update",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "args": {
+          "value": 1
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          },
+          "structuredContent": {
+            "answer": 42,
+            "nested": {
+              "empty": ""
+            }
+          }
+        }
+      },
+      "expected": {
+        "type": "tool_execution_update",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "args": {
+          "value": 1
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          },
+          "structuredContent": {
+            "answer": 42,
+            "nested": {
+              "empty": ""
+            }
+          }
+        }
+      }
+    },
+    {
+      "input": {
+        "type": "tool_execution_end",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          },
+          "structuredContent": {
+            "answer": 42,
+            "nested": {
+              "empty": ""
+            }
+          }
+        },
+        "isError": false
+      },
+      "expected": {
+        "type": "tool_execution_end",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          },
+          "structuredContent": {
+            "answer": 42,
+            "nested": {
+              "empty": ""
+            }
+          }
+        },
+        "isError": false
+      }
+    },
+    {
+      "input": {
+        "type": "tool_execution_end",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          }
+        },
+        "isError": false,
+        "durationMs": 0
+      },
+      "expected": {
+        "type": "tool_execution_end",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          }
+        },
+        "isError": false,
+        "durationMs": 0
+      }
+    },
+    {
+      "input": {
+        "type": "tool_execution_end",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          }
+        },
+        "isError": false,
+        "durationMs": 42
+      },
+      "expected": {
+        "type": "tool_execution_end",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          }
+        },
+        "isError": false,
+        "durationMs": 42
+      }
+    },
+    {
+      "input": {
+        "type": "tool_execution_end",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          }
+        },
+        "isError": false,
+        "durationMs": 1000
+      },
+      "expected": {
+        "type": "tool_execution_end",
+        "toolCallId": "call-1",
+        "toolName": "fixture",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "visible"
+            }
+          ],
+          "details": {
+            "fixture": true
+          }
+        },
+        "isError": false,
+        "durationMs": 1000
+      }
+    }
+  ]
+}

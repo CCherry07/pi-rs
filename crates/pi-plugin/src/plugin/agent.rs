@@ -32,6 +32,11 @@ pub struct AgentPluginContext {
 }
 
 impl AgentPluginContext {
+    pub fn report_hook_failure(&self, hook: &'static str, error: &super::diagnostics::PluginError) {
+        self.diagnostics
+            .record_failure(self.plugin_id.clone(), hook, None, error);
+    }
+
     #[doc(hidden)]
     pub fn unavailable_for_testing(
         plugin_id: PluginId,
@@ -90,6 +95,12 @@ impl AgentPluginContext {
         context.plugin_id = plugin_id;
         context
     }
+
+    #[doc(hidden)]
+    pub fn with_diagnostic_source(mut self, source_path: Option<String>) -> Self {
+        self.diagnostics = self.diagnostics.with_source(source_path);
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -104,6 +115,11 @@ pub struct InputContext {
 }
 
 impl InputContext {
+    pub fn report_hook_failure(&self, hook: &'static str, error: &super::diagnostics::PluginError) {
+        self.diagnostics
+            .record_failure(self.plugin_id.clone(), hook, None, error);
+    }
+
     pub fn plugin_id(&self) -> &PluginId {
         &self.plugin_id
     }
@@ -136,6 +152,12 @@ impl InputContext {
     #[doc(hidden)]
     pub fn plugin_context_handle(&self) -> PluginContextHandle {
         self.session.handle_for_adapter()
+    }
+
+    #[doc(hidden)]
+    pub fn with_diagnostic_source(mut self, source_path: Option<String>) -> Self {
+        self.diagnostics = self.diagnostics.with_source(source_path);
+        self
     }
 }
 
@@ -301,6 +323,7 @@ pub struct ToolExecutionUpdateEvent {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolExecutionEndEvent {
+    pub duration_ms: Option<u64>,
     pub tool_call_id: ToolCallId,
     pub tool_name: String,
     pub result: ToolResult,
@@ -948,6 +971,13 @@ impl PluginDriver {
             .collect()
     }
 
+    pub fn observe_diagnostics(
+        &self,
+        observer: super::diagnostics::PluginDiagnosticObserver,
+    ) -> super::diagnostics::PluginDiagnosticSubscription {
+        self.diagnostics.observe(observer)
+    }
+
     pub fn diagnostics(&self) -> Vec<PluginDiagnostic> {
         self.diagnostics.snapshot()
     }
@@ -995,14 +1025,9 @@ impl PluginDriver {
         }
     }
 
-    fn record_error(
-        &self,
-        registered: &RegisteredPlugin,
-        hook: AgentHook,
-        error: impl std::fmt::Display,
-    ) {
+    fn record_error(&self, registered: &RegisteredPlugin, hook: AgentHook, error: PluginError) {
         self.diagnostics
-            .record(registered.id.clone(), hook, None, error.to_string());
+            .record_failure(registered.id.clone(), hook, None, &error);
     }
 
     /// Chains input transformations in plugin registration order. A handled
@@ -1185,11 +1210,11 @@ impl PluginDriver {
                 Ok(patch) => patch,
                 Err(error) => {
                     for &index in batch {
-                        self.diagnostics.record(
+                        self.diagnostics.record_failure(
                             self.plugins[index].id.clone(),
                             AgentHook::Context,
                             None,
-                            error.to_string(),
+                            &error,
                         );
                     }
                     continue;
@@ -1224,11 +1249,9 @@ impl PluginDriver {
                     },
                 )
                 .await
-                .map_err(|error| PluginError::Hook {
-                    plugin_id: registered.id.clone(),
-                    hook: "tool_call",
-                    message: error.to_string(),
-                })?;
+                // Pi propagates tool_call failures to the fail-closed tool result;
+                // unlike observer failures they do not also emit extension_error.
+                .map_err(|error| error.with_hook(registered.id.clone(), "tool_call"))?;
             if let Some(replacement) = patch.arguments {
                 arguments = replacement;
             }
@@ -1434,6 +1457,8 @@ mod tests {
         ])
         .unwrap();
         let message = Arc::new(AssistantMessage {
+            duration_ms: None,
+            thinking_level: None,
             content: Vec::new(),
             api: "test".to_string(),
             provider: ProviderId::new("scripted"),

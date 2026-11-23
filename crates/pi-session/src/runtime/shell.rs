@@ -112,10 +112,11 @@ impl AgentSession {
             "excludeFromContext": options.exclude_from_context,
         }))?;
         let entry = SessionEntry::message(message);
-        if let Err(error) = self
-            .context_updates
-            .append(entry, ContextActivation::Restore)
-        {
+        if let Err(error) = self.context_updates.append_from(
+            entry,
+            ContextActivation::Restore,
+            crate::EntryAppendOrigin::Shell,
+        ) {
             self.events
                 .publish_bash_end(id, Some(result), Some(error.to_string()));
             return Err(error);

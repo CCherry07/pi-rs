@@ -348,8 +348,13 @@ function resolveWorkspacePath(value: string | undefined, fallback: string): stri
   return isAbsolute(value) ? value : resolve(workspaceDirectory, value);
 }
 
-function targetOutputDirectory(target: NativeTarget, profile: "debug" | "release"): string {
-  return join(workspaceDirectory, "target", target.rustTarget, profile);
+export function cargoTargetDirectory(environment: NodeJS.ProcessEnv = process.env): string {
+  // cargoBuild runs from the workspace, so relative environment paths use that cwd.
+  return resolveWorkspacePath(environment.CARGO_TARGET_DIR, join(workspaceDirectory, "target"));
+}
+
+export function targetOutputDirectory(target: NativeTarget, profile: "debug" | "release", environment: NodeJS.ProcessEnv = process.env): string {
+  return join(cargoTargetDirectory(environment), target.rustTarget, profile);
 }
 
 function nativeLibraryName(target: NativeTarget): string {

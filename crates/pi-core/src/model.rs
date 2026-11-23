@@ -85,6 +85,7 @@ impl ModelCost {
             + input_rate * 2.0 * long_cache_write as f64)
             / per_million;
         UsageCost {
+            total_from_provider: Some(false),
             input,
             output,
             cache_read,
@@ -131,6 +132,20 @@ pub struct ModelInputLimits {
     pub images: Option<ModelImageInputLimits>,
 }
 
+/// Best-effort prompt cache lifetimes in seconds for known retention tiers.
+/// Configuration validation belongs to the catalog owner.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelPromptCache {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub long: Option<f64>,
+}
+
+/// Per-thinking-level request body fields; values remain provider-defined JSON.
+pub type ModelSamplingParamsByThinkingLevel = BTreeMap<String, BTreeMap<String, Value>>;
+
 /// Immutable model metadata contributed by a provider/catalog plugin.
 ///
 /// Routing credentials and resolved headers deliberately stay inside the
@@ -147,6 +162,9 @@ pub struct ModelSpec {
     pub input: Vec<ModelInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_limits: Option<ModelInputLimits>,
+    /// Rare cache hints are boxed so ordinary catalog entries stay compact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache: Option<Box<ModelPromptCache>>,
     pub cost: ModelCost,
     pub context_window: u64,
     pub max_tokens: u64,
@@ -154,6 +172,8 @@ pub struct ModelSpec {
     pub thinking_level_map: BTreeMap<String, Option<String>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub sampling_params: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampling_params_by_thinking_level: Option<ModelSamplingParamsByThinkingLevel>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compat: Option<Value>,
 }
@@ -174,11 +194,13 @@ impl ModelSpec {
             reasoning: false,
             input: vec![ModelInput::Text],
             input_limits: None,
+            prompt_cache: None,
             cost: ModelCost::default(),
             context_window: 128_000,
             max_tokens: 16_384,
             thinking_level_map: BTreeMap::new(),
             sampling_params: BTreeMap::new(),
+            sampling_params_by_thinking_level: None,
             compat: None,
         }
     }

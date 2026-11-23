@@ -85,7 +85,9 @@ async fn explicit_stream_wins_and_continue_uses_the_configured_default() {
     harness.config.stream_fn = None;
     harness.context.messages = vec![user("Continue")];
     let outcome = harness.continue_run().await.unwrap();
-    assert_eq!(outcome.new_messages, [assistant("fallback")]);
+    let mut expected = text_response("fallback");
+    expected.thinking_level = Some(ThinkingLevel::Off);
+    assert_eq!(outcome.new_messages, [Message::assistant(expected)]);
     assert_eq!(harness.provider.requests().len(), 1);
     assert_eq!(fallback.requests()[0].messages, [user("Continue")]);
 }

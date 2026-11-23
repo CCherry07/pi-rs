@@ -11,6 +11,20 @@ import {
 import type { NativeExtensionContext } from "./native-binding.js";
 
 export interface DialogOptions { signal?: AbortSignal; timeout?: number }
+// These are RPC facade defaults, not terminal capabilities. In particular, an
+// arbitrary theme name/object must return Pi's failure result before TUI validation.
+const rpcInactiveUI = {
+  getAllThemes: () => [],
+  getTheme: () => undefined,
+  setTheme: () => ({ success: false, error: "Theme switching not supported in RPC mode" }),
+  onTerminalInput: () => () => {},
+  getEditorText: () => "",
+  getToolsExpanded: () => false,
+  setWorkingIndicator: () => {},
+  addAutocompleteProvider: () => {},
+  setEditorComponent: () => {},
+  getEditorComponent: () => undefined,
+};
 type RpcDialogRequest =
   | { method: "confirm"; title: string; message: string }
   | { method: "select"; title: string; options: string[] }
@@ -114,7 +128,9 @@ export class ExtensionUI {
     return new Proxy(this, {
       get: (target, property) => {
         target.#assertActive();
-        const value = Reflect.get(target, property, target);
+        const value = target.#isRpc() && Object.hasOwn(rpcInactiveUI, property)
+          ? Reflect.get(rpcInactiveUI, property)
+          : Reflect.get(target, property, target);
         if (typeof value !== "function") return value;
         return (...args: unknown[]) => {
           target.#assertActive();

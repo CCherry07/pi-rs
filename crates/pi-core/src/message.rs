@@ -51,7 +51,10 @@ impl Message {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemMessage {
-    #[serde(deserialize_with = "deserialize_user_content")]
+    #[serde(
+        deserialize_with = "deserialize_user_content",
+        serialize_with = "serialize_system_content"
+    )]
     pub content: Vec<ContentBlock>,
     #[serde(default, skip_serializing_if = "Vec::is_empty", with = "sections")]
     pub sections: Vec<(String, Option<String>)>,
@@ -114,6 +117,19 @@ impl SystemMessage {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+}
+
+fn serialize_system_content<S: serde::Serializer>(
+    content: &[ContentBlock],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match content {
+        [] => serializer.serialize_str(""),
+        [ContentBlock::Text(text)] if text.text_signature.is_none() => {
+            serializer.serialize_str(&text.text)
+        }
+        blocks => blocks.serialize(serializer),
     }
 }
 
@@ -250,6 +266,11 @@ pub struct CustomMessage {
 #[serde(rename_all = "camelCase")]
 pub struct AssistantMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Requested Pi level, independent of the provider-specific mapped level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<crate::ThinkingLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_thinking_level: Option<String>,
     pub content: Vec<ContentBlock>,
     pub api: String,
@@ -305,6 +326,9 @@ pub struct DeferredHandle {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolResultMessage {
+    /// Execution time, absent when the tool was rejected before execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
     pub tool_call_id: ToolCallId,
     pub tool_name: String,
     pub content: Vec<ContentBlock>,

@@ -465,6 +465,8 @@ mod tests {
     fn memory_add_messages(content: &str) -> Vec<Message> {
         vec![
             Message::assistant(pi_core::AssistantMessage {
+                duration_ms: None,
+                thinking_level: None,
                 content: vec![pi_core::ContentBlock::ToolCall(pi_core::ToolCall::new(
                     "call-memory",
                     "memory",
@@ -490,6 +492,7 @@ mod tests {
                 timestamp_ms: 1,
             }),
             Message::tool_result(pi_core::ToolResultMessage {
+                duration_ms: None,
                 tool_call_id: pi_core::ToolCallId::new("call-memory"),
                 tool_name: "memory".into(),
                 content: vec![],

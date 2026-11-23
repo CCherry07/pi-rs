@@ -300,6 +300,7 @@ interface GenerationState {
   streams: Map<string, AssistantStreamState>
   nextCallbackId: number
   hooks: GenerationHookRegistry
+  sources: Map<string, string>
   registrations: RegistrationPlanner
 }
 
@@ -706,10 +707,14 @@ export class ExtensionHost {
     switch (operation.type) {
       case 'prepareGeneration':
         return JSON.stringify(await this.#prepareGeneration(operation.request))
-      case 'snapshotHooks':
+      case 'snapshotHooks': {
+        const state = this.#requireGeneration(operation.generationId)
         return JSON.stringify({
-          callbacks: this.#requireGeneration(operation.generationId).hooks.snapshot(operation.hook),
+          callbacks: state.hooks.snapshot(operation.hook).map(callback => ({
+            ...callback, sourcePath: state.sources.get(callback.pluginId),
+          })),
         })
+      }
       case 'invoke':
         return JSON.stringify(await this.#invoke(operation.invocation, nativeContext) ?? null)
       case 'invokeHookBatch':
@@ -757,6 +762,7 @@ export class ExtensionHost {
       streams: new Map(),
       nextCallbackId: 0,
       hooks: new GenerationHookRegistry(extensions.map(extension => extension.id)),
+      sources: new Map(extensions.map(extension => [extension.id, extension.path])),
       registrations: new RegistrationPlanner(),
     }
     this.#generations.set(generationId, state)

@@ -41,6 +41,8 @@ pub fn assistant(text: &str) -> Message {
 
 pub fn text_response(text: &str) -> AssistantMessage {
     AssistantMessage {
+        duration_ms: None,
+        thinking_level: None,
         content: vec![ContentBlock::Text(TextContent::new(text))],
         api: "scripted".to_string(),
         provider: ProviderId::new("scripted"),

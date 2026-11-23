@@ -1,0 +1,199 @@
+{
+  "commit": "05fd3fbda0bbb9a1c7a76e4bf92ab58ed77c8d94",
+  "source": "packages/coding-agent/src/core/agent-session.ts",
+  "cases": [
+    {
+      "name": "empty",
+      "messages": [],
+      "expected": {}
+    },
+    {
+      "name": "whitespace",
+      "messages": [
+        {
+          "role": "assistant",
+          "stopReason": "stop",
+          "content": [
+            {
+              "type": "text",
+              "text": "  "
+            }
+          ]
+        }
+      ],
+      "expected": {}
+    },
+    {
+      "name": "text",
+      "messages": [
+        {
+          "role": "assistant",
+          "stopReason": "stop",
+          "content": [
+            {
+              "type": "text",
+              "text": " answer "
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "text": "answer"
+      }
+    },
+    {
+      "name": "aborted-text",
+      "messages": [
+        {
+          "role": "assistant",
+          "stopReason": "stop",
+          "content": [
+            {
+              "type": "text",
+              "text": " earlier "
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "stopReason": "aborted",
+          "content": [
+            {
+              "type": "text",
+              "text": " partial "
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "text": "partial"
+      }
+    },
+    {
+      "name": "error-text",
+      "messages": [
+        {
+          "role": "assistant",
+          "stopReason": "stop",
+          "content": [
+            {
+              "type": "text",
+              "text": " earlier "
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "stopReason": "error",
+          "content": [
+            {
+              "type": "text",
+              "text": " failure partial "
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "text": "failure partial"
+      }
+    },
+    {
+      "name": "stop-no-text",
+      "messages": [
+        {
+          "role": "assistant",
+          "stopReason": "stop",
+          "content": [
+            {
+              "type": "text",
+              "text": " earlier "
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "stopReason": "stop",
+          "content": []
+        }
+      ],
+      "expected": {}
+    },
+    {
+      "name": "stop-whitespace",
+      "messages": [
+        {
+          "role": "assistant",
+          "stopReason": "stop",
+          "content": [
+            {
+              "type": "text",
+              "text": " earlier "
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "stopReason": "stop",
+          "content": [
+            {
+              "type": "text",
+              "text": "  "
+            }
+          ]
+        }
+      ],
+      "expected": {}
+    },
+    {
+      "name": "aborted-no-text",
+      "messages": [
+        {
+          "role": "assistant",
+          "stopReason": "stop",
+          "content": [
+            {
+              "type": "text",
+              "text": " earlier "
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "stopReason": "aborted",
+          "content": []
+        }
+      ],
+      "expected": {
+        "text": "earlier"
+      }
+    },
+    {
+      "name": "error-whitespace",
+      "messages": [
+        {
+          "role": "assistant",
+          "stopReason": "stop",
+          "content": [
+            {
+              "type": "text",
+              "text": " earlier "
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "stopReason": "error",
+          "content": [
+            {
+              "type": "text",
+              "text": "  "
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "text": "earlier"
+      }
+    }
+  ]
+}

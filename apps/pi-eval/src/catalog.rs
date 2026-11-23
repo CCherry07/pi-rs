@@ -1062,12 +1062,21 @@ fn build_native_provider_fixture() -> Result<PathBuf, String> {
         .clone()
 }
 
+fn native_provider_fixture_target(
+    root: &Path,
+    override_path: Option<std::ffi::OsString>,
+) -> PathBuf {
+    root.join(override_path.unwrap_or_else(|| "target".into()))
+        .join("pi-eval-fixtures/native-provider")
+}
+
 fn compile_native_provider_fixture() -> Result<PathBuf, String> {
     let root = repository_root()?;
     let fixture = root.join("apps/pi-eval/fixtures/native-provider");
-    let target = root.join("target/pi-eval-fixtures/native-provider");
+    let target = native_provider_fixture_target(&root, std::env::var_os("CARGO_TARGET_DIR"));
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let output = Command::new(cargo)
+        .current_dir(&root)
         .args(["build", "--locked", "--quiet", "--manifest-path"])
         .arg(fixture.join("Cargo.toml"))
         .args(["--target-dir"])
@@ -1219,6 +1228,25 @@ mod tests {
     use pi_eval::ArtifactStore;
 
     use super::*;
+
+    #[test]
+    fn native_fixture_target_follows_unset_absolute_and_relative_cargo_paths() {
+        let root = repository_root().unwrap();
+        let absolute = std::env::temp_dir().join("pi-eval-target");
+        for (value, target) in [
+            (None, root.join("target")),
+            (
+                Some(".build/rpc-validation/cargo".into()),
+                root.join(".build/rpc-validation/cargo"),
+            ),
+            (Some(absolute.clone().into_os_string()), absolute),
+        ] {
+            assert_eq!(
+                native_provider_fixture_target(&root, value),
+                target.join("pi-eval-fixtures/native-provider")
+            );
+        }
+    }
 
     #[test]
     fn documentation_manifest_covers_framework_and_coding_with_existing_files() {

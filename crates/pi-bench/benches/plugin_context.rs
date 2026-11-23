@@ -102,6 +102,8 @@ fn js_plugins(count: usize, dispatcher: Arc<EncodeOnlyDispatcher>) -> Vec<Arc<dy
 
 fn assistant(bytes: usize) -> AssistantMessage {
     AssistantMessage {
+        duration_ms: None,
+        thinking_level: None,
         content: vec![ContentBlock::Text(TextContent::new("a".repeat(bytes)))],
         api: "scripted".into(),
         provider: ProviderId::new("scripted"),

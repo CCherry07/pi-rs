@@ -112,6 +112,7 @@ impl Plugin for FailingAgentSettledPlugin {
         _event: AgentSettledEvent,
     ) -> Result<(), PluginError> {
         Err(PluginError::Hook {
+            source_path: None,
             plugin_id: self.id(),
             hook: "agent_settled",
             message: "intentional settled failure".to_string(),
@@ -1382,6 +1383,8 @@ impl Plugin for LifecyclePlugin {
             return Ok(None);
         }
         let compaction = CompactionEntry {
+            from_hook: None,
+            system_message: None,
             retained_entry_ids: Vec::new(),
             summary: "extension summary".to_string(),
             retained_tail: event.preparation.retained_tail.clone(),
@@ -2045,6 +2048,8 @@ async fn compaction_uses_persisted_retained_tail() {
         .unwrap();
     session
         .append_compaction(CompactionEntry {
+            from_hook: None,
+            system_message: None,
             retained_entry_ids: Vec::new(),
             summary: "short".to_string(),
             retained_tail: vec![Message::User(UserMessage::text("retained", 2)).into()],
@@ -2091,6 +2096,8 @@ async fn lifecycle_hooks_can_replace_compaction_and_cancel_tree_navigation() {
 
     session
         .append_compaction(CompactionEntry {
+            from_hook: None,
+            system_message: None,
             retained_entry_ids: Vec::new(),
             summary: "default summary".to_string(),
             retained_tail: Vec::new(),
@@ -2832,6 +2839,8 @@ async fn context_budget_uses_session_limits_and_clears_after_compaction_and_rest
     );
     session
         .append_compaction(CompactionEntry {
+            from_hook: None,
+            system_message: None,
             retained_entry_ids: Vec::new(),
             summary: "short summary".into(),
             retained_tail: Vec::new(),

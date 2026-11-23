@@ -441,7 +441,7 @@ async fn run_loop(
                     "operation aborted".to_string(),
                     StopReason::Aborted,
                 );
-                let assistant = emit_message_pair(&events, &signal, &assistant).await?;
+                let assistant = emit_message_pair(&events, &signal, &assistant, None).await?;
                 Arc::make_mut(&mut context)
                     .messages
                     .push(Message::assistant(assistant.clone()));
@@ -648,6 +648,32 @@ async fn run_loop(
     })
 }
 
+struct AssistantResponseStamp {
+    started: std::time::Instant,
+    started_at: i64,
+    thinking_level: ThinkingLevel,
+}
+
+impl AssistantResponseStamp {
+    fn new(thinking_level: ThinkingLevel) -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            started_at: now_ms(),
+            thinking_level,
+        }
+    }
+    fn finish(&self, mut message: AssistantMessage) -> AssistantMessage {
+        // Forwarded/cached responses and explicitly timed provider responses keep
+        // their provenance. Pi only times a response that started in this request.
+        if message.duration_ms.is_none() && message.timestamp_ms >= self.started_at {
+            message.duration_ms =
+                Some((self.started.elapsed().as_secs_f64() * 1000.0).round() as u64);
+        }
+        message.thinking_level = Some(self.thinking_level);
+        message
+    }
+}
+
 async fn stream_assistant_response(
     run_id: &RunId,
     context: &mut AgentContext,
@@ -726,18 +752,20 @@ async fn stream_assistant_response(
             operation: AiOperation::Stream,
             provider: config.provider_id.to_string(),
             model: config.model_id.to_string(),
-            api,
+            api: api.clone(),
             streaming: true,
             deferred: None,
         });
-    let request_started = std::time::Instant::now();
+    let stamp = AssistantResponseStamp::new(config.thinking_level);
+    let request_started = stamp.started;
     let mut chunk_count = 0_u64;
     let mut time_to_first_chunk_ms = None;
     let stream_result = tokio::select! {
         biased;
         () = signal.wait() => {
-            let message = provider_failure_message(config, "operation aborted".to_string(), StopReason::Aborted);
-            let message = emit_message_pair(&events, &signal, &message).await?;
+            let mut message = provider_failure_message(config, "Request aborted".to_string(), StopReason::Aborted);
+            message.api = api.clone();
+            let message = emit_message_pair(&events, &signal, &message, Some(&stamp)).await?;
             context.messages.push(Message::assistant(message.clone()));
             finish_ai_request(&telemetry_span, &message, 0, None);
             return Ok(message);
@@ -747,10 +775,12 @@ async fn stream_assistant_response(
     let mut stream = match stream_result {
         Ok(AssistantResponse::Stream(stream)) => stream,
         Ok(AssistantResponse::Complete(mut message)) => {
-            if let Some(cost) = &model_cost {
+            if let Some(cost) = &model_cost
+                && message.usage.cost.total_from_provider != Some(true)
+            {
                 message.usage.cost = cost.calculate(&message.usage);
             }
-            let message = emit_message_pair(&events, &signal, &message).await?;
+            let message = emit_message_pair(&events, &signal, &message, Some(&stamp)).await?;
             context.messages.push(Message::assistant(message.clone()));
             let elapsed_ms =
                 u64::try_from(request_started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -761,8 +791,9 @@ async fn stream_assistant_response(
             return Err(AgentLoopError::ProviderNotFound(provider_id.to_string()));
         }
         Err(StreamFnError::Provider(error)) => {
-            let message = provider_failure_message(config, error.to_string(), StopReason::Error);
-            let message = emit_message_pair(&events, &signal, &message).await?;
+            let mut message = provider_failure_message(config, error.to_string(), StopReason::Error);
+            message.api = api.clone();
+            let message = emit_message_pair(&events, &signal, &message, Some(&stamp)).await?;
             context.messages.push(Message::assistant(message.clone()));
             finish_ai_request(
                 &telemetry_span,
@@ -780,12 +811,15 @@ async fn stream_assistant_response(
         let item = tokio::select! {
             biased;
             () = signal.wait() => {
-                let message = assembler.failure_message(StopReason::Aborted, "operation aborted");
+                for update in assembler.close_interrupted_content().map_err(|error| AgentLoopError::Assembly(error.to_string()))? {
+                    emit(&events, AgentEvent::MessageUpdate { stream: assembler.stream(), update }, &signal).await?;
+                }
+                let message = assembler.failure_message(StopReason::Aborted, "Request was aborted");
                 if !started {
                     emit(&events, AgentEvent::MessageStart { message: Message::assistant(message.clone()) }, &signal).await?;
                 }
                 let message = message_as_assistant(
-                    emit_message_end(&events, &signal, Message::assistant(message)).await?
+                    emit_message_end(&events, &signal, Message::assistant(stamp.finish(message))).await?
                 )?;
                 if started {
                     replace_last_assistant(context, message.clone());
@@ -824,7 +858,8 @@ async fn stream_assistant_response(
                     .await?;
                 }
                 let message = message_as_assistant(
-                    emit_message_end(&events, &signal, Message::assistant(message)).await?,
+                    emit_message_end(&events, &signal, Message::assistant(stamp.finish(message)))
+                        .await?,
                 )?;
                 if started {
                     replace_last_assistant(context, message.clone());
@@ -840,15 +875,25 @@ async fn stream_assistant_response(
                 return Ok(message);
             }
         };
-        if let (Some(cost), StreamEvent::Done { usage, .. }) = (&model_cost, &mut stream_event) {
-            usage.cost = cost.calculate(usage);
+        if let Some(cost) = &model_cost {
+            let usage = match &mut stream_event {
+                StreamEvent::Done { usage, .. } => Some(usage),
+                StreamEvent::Metadata { patch } => patch.usage.as_mut(),
+                _ => None,
+            };
+            if let Some(usage) = usage
+                && usage.cost.total_from_provider != Some(true)
+            {
+                usage.cost = cost.calculate(usage);
+            }
         }
         let update = match assembler.push(stream_event) {
             Ok(update) => update,
             Err(error) => {
                 let message = assembler.failure_message(StopReason::Error, error.to_string());
                 let message =
-                    commit_failed_assistant(context, &events, &signal, message, started).await?;
+                    commit_failed_assistant(context, &events, &signal, message, started, &stamp)
+                        .await?;
                 finish_ai_request(
                     &telemetry_span,
                     &message,
@@ -894,7 +939,8 @@ async fn stream_assistant_response(
         Err(error) => {
             let message = assembler.failure_message(StopReason::Error, error.to_string());
             let message =
-                commit_failed_assistant(context, &events, &signal, message, started).await?;
+                commit_failed_assistant(context, &events, &signal, message, started, &stamp)
+                    .await?;
             finish_ai_request(
                 &telemetry_span,
                 &message,
@@ -920,7 +966,12 @@ async fn stream_assistant_response(
         .await?;
     }
     let final_message = message_as_assistant(
-        emit_message_end(&events, &signal, Message::assistant(final_message)).await?,
+        emit_message_end(
+            &events,
+            &signal,
+            Message::assistant(stamp.finish(final_message)),
+        )
+        .await?,
     )?;
     replace_last_assistant(context, final_message.clone());
     finish_ai_request(
@@ -1016,6 +1067,7 @@ async fn commit_failed_assistant(
     signal: &AbortSignal,
     message: AssistantMessage,
     started: bool,
+    stamp: &AssistantResponseStamp,
 ) -> Result<AssistantMessage, AgentLoopError> {
     if !started {
         emit(
@@ -1027,8 +1079,9 @@ async fn commit_failed_assistant(
         )
         .await?;
     }
-    let message =
-        message_as_assistant(emit_message_end(events, signal, Message::assistant(message)).await?)?;
+    let message = message_as_assistant(
+        emit_message_end(events, signal, Message::assistant(stamp.finish(message))).await?,
+    )?;
     if started {
         replace_last_assistant(context, message.clone());
     } else {
@@ -1055,7 +1108,9 @@ fn provider_failure_message(
     reason: StopReason,
 ) -> AssistantMessage {
     AssistantMessage {
-        content: vec![ContentBlock::Text(TextContent::new(""))],
+        duration_ms: None,
+        thinking_level: None,
+        content: Vec::new(),
         api: "unknown".to_string(),
         provider: config.provider_id.clone(),
         model: config.model_id.clone(),
@@ -1134,7 +1189,9 @@ async fn emit_message_pair(
     events: &Arc<dyn AgentEventSink>,
     signal: &AbortSignal,
     message: &AssistantMessage,
+    stamp: Option<&AssistantResponseStamp>,
 ) -> Result<AssistantMessage, AgentLoopError> {
+    let message = stamp.map_or_else(|| message.clone(), |stamp| stamp.finish(message.clone()));
     emit(
         events,
         AgentEvent::MessageStart {
@@ -1143,9 +1200,7 @@ async fn emit_message_pair(
         signal,
     )
     .await?;
-    message_as_assistant(
-        emit_message_end(events, signal, Message::assistant(message.clone())).await?,
-    )
+    message_as_assistant(emit_message_end(events, signal, Message::assistant(message)).await?)
 }
 
 async fn fail_truncated_tool_calls(
@@ -1193,11 +1248,13 @@ where
                 tool_name: call.name.clone(),
                 result: result.clone(),
                 is_error: true,
+                duration_ms: None,
             },
             signal,
         )
         .await?;
         let message = ToolResultMessage {
+            duration_ms: None,
             tool_call_id: call.id,
             tool_name: call.name,
             content: result.content,
@@ -1285,6 +1342,7 @@ mod tests {
     #[test]
     fn blocked_images_are_replaced_only_in_the_provider_projection() {
         let original = Message::tool_result(ToolResultMessage {
+            duration_ms: None,
             tool_call_id: ToolCallId::new("call"),
             tool_name: "read".to_string(),
             content: vec![

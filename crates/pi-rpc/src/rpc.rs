@@ -6,20 +6,23 @@
 use std::future::{Future, poll_fn};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Poll;
 
 use pi_agent::QueueMode;
 use pi_core::{ContentBlock, ImageContent, Message, ModelSpec, StopReason, ThinkingLevel};
 use pi_session::{
     AgentSession, AgentSessionReplacement, ForkPosition, PiSession, PromptDisposition,
-    SessionDocument, SessionEntry, SessionInput, SessionRecord, SessionResetReason, SessionUpdate,
-    ShellExecutionOptions, aggregate_document_usage, current_session_context_tokens,
+    SessionDocument, SessionEntry, SessionInput, SessionRecord, ShellExecutionOptions,
+    aggregate_document_usage, current_session_context_tokens,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use crate::json_wire::{compaction_result_json, session_entry_json, session_event_json};
+use crate::json_wire::{compaction_result_json, session_entry_json};
 use crate::output::RpcOutput;
+
+type PromptReceipt = Box<dyn FnOnce(PromptDisposition) + Send>;
 
 #[derive(Debug, Deserialize)]
 #[serde(
@@ -290,15 +293,7 @@ pub async fn run_connection_with_shutdown(
     shutdown: impl Future<Output = ()>,
 ) -> Result<(), String> {
     let output = connection.bridge.output.clone();
-    let (stop_events, stopping_events) = tokio::sync::oneshot::channel();
-    let events = EventForwarder {
-        stop: Some(stop_events),
-        task: Some(tokio::spawn(forward_events(
-            session.observe(),
-            output.clone(),
-            stopping_events,
-        ))),
-    };
+    connection.bridge.bind_session(&session.current());
     let mut commands = tokio::task::JoinSet::new();
     tokio::pin!(shutdown);
     let mut shutdown_requested = false;
@@ -308,6 +303,7 @@ pub async fn run_connection_with_shutdown(
                 result.map_err(|error| error.to_string())??;
             }
             let current = session.current();
+            connection.bridge.bind_session(&current);
             let line = tokio::select! {
                 biased;
                 // Read commands already delivered before an idle shutdown request.
@@ -315,6 +311,7 @@ pub async fn run_connection_with_shutdown(
                     Some(line) => line,
                     None => break,
                 },
+                () = output.closed() => return Err("RPC output closed".to_string()),
                 result = commands.join_next(), if !commands.is_empty() => {
                     if let Some(result) = result {
                         result.map_err(|error| error.to_string())??;
@@ -335,9 +332,9 @@ pub async fn run_connection_with_shutdown(
                 line.pop();
             }
             let command_session = session.clone();
-            let command_output = output.clone();
+            let command_bridge = connection.bridge.clone();
             let mut command = Box::pin(async move {
-                handle_line(command_session, command_output, &line, export_html).await
+                handle_line(command_session, command_bridge, &line, export_html).await
             });
             // Pi starts each async handler as its input line arrives. Poll once before
             // spawning so synchronous queries enqueue their responses before EOF can
@@ -354,105 +351,23 @@ pub async fn run_connection_with_shutdown(
     }
     .await;
 
+    connection.bridge.close_events();
     connection.bridge.cancel_pending();
     session.abort();
     session.current().abort_shell();
     commands.abort_all();
     while commands.join_next().await.is_some() {}
-    events.finish().await;
     let flushed = output.flush().await;
     result.and(flushed)
 }
 
-struct EventForwarder {
-    stop: Option<tokio::sync::oneshot::Sender<()>>,
-    task: Option<tokio::task::JoinHandle<()>>,
-}
-
-impl EventForwarder {
-    async fn finish(mut self) {
-        if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
-        }
-        if let Some(task) = self.task.take() {
-            let _ = task.await;
-        }
-    }
-}
-
-impl Drop for EventForwarder {
-    fn drop(&mut self) {
-        if let Some(task) = &self.task {
-            task.abort();
-        }
-    }
-}
-
-async fn forward_events(
-    mut observation: pi_session::SessionObservation,
-    output: RpcOutput,
-    mut stop: tokio::sync::oneshot::Receiver<()>,
-) {
-    loop {
-        let update = tokio::select! {
-            biased;
-            update = observation.recv() => match update {
-                Some(update) => update,
-                None => return,
-            },
-            _ = &mut stop => return,
-        };
-        let value = match update {
-            SessionUpdate::Event {
-                event: pi_session::AgentSessionEvent::PluginNotice { message, level },
-                ..
-            } => Some(json!({
-                "type":"extension_ui_request", "id":uuid::Uuid::now_v7().to_string(),
-                "method":"notify", "message":message, "notifyType":level,
-            })),
-            SessionUpdate::Event { event, .. } => {
-                match session_event_json(event, &observation.current()) {
-                    Ok(value) => value,
-                    Err(error) => Some(json!({
-                        "type":"extension_error",
-                        "extensionPath":"pi-rs/json-wire",
-                        "event":"projection",
-                        "error":error,
-                    })),
-                }
-            }
-            SessionUpdate::Reset {
-                reason: SessionResetReason::Lagged { missed_events },
-                ..
-            } => {
-                // The Pi wire has no snapshot-reset event. Make the gap visible so
-                // clients can re-read get_state/get_messages instead of assuming replay.
-                Some(json!({
-                    "type":"extension_error",
-                    "extensionPath":"pi-rs/session",
-                    "event":"subscription",
-                    "error":format!("Session event stream missed {missed_events} events; refresh with get_state and get_messages."),
-                }))
-            }
-            SessionUpdate::Reset {
-                reason: SessionResetReason::Replacement,
-                ..
-            } => None,
-        };
-        if let Some(value) = value
-            && output.emit(value).await.is_err()
-        {
-            return;
-        }
-    }
-}
-
 async fn handle_line(
     session: PiSession,
-    output: RpcOutput,
+    bridge: Arc<crate::ui::RpcUiBridge>,
     line: &[u8],
     export_html: HtmlExporter,
 ) -> Result<(), String> {
+    let output = &bridge.output;
     let parsed = match serde_json::from_slice::<Value>(line) {
         Ok(value) => value,
         Err(error) => {
@@ -465,7 +380,13 @@ async fn handle_line(
                 .await;
         }
     };
-    if let Some(response) = dispatch(&session, parsed, export_html).await {
+    if let Some(response) =
+        dispatch_with_receipt(&session, parsed, export_html, Some(output.clone())).await
+    {
+        // Publications caused by this command must enter the shared writer first.
+        // This waits for synchronous projection, not I/O, so piped queries can
+        // still enqueue their response during the initial poll before stdin EOF.
+        bridge.publication_barrier(&session.current()).await?;
         output.emit(response).await?;
     }
     Ok(())
@@ -480,6 +401,15 @@ pub async fn dispatch(
     session: &PiSession,
     parsed: Value,
     export_html: HtmlExporter,
+) -> Option<Value> {
+    dispatch_with_receipt(session, parsed, export_html, None).await
+}
+
+async fn dispatch_with_receipt(
+    session: &PiSession,
+    parsed: Value,
+    export_html: HtmlExporter,
+    prompt_output: Option<RpcOutput>,
 ) -> Option<Value> {
     if parsed.get("type").and_then(Value::as_str) == Some("extension_ui_response") {
         // The connection routes UI responses before command dispatch. Embedders using this
@@ -511,7 +441,30 @@ pub async fn dispatch(
     };
     let id = command.id().map(str::to_string);
     let name = command.name();
-    Some(match handle_command(session, command, export_html).await {
+    let sent = Arc::new(AtomicBool::new(false));
+    let receipt: Option<PromptReceipt> = if matches!(&command, RpcCommand::Prompt { .. }) {
+        prompt_output.map(|output| {
+            let sent = sent.clone();
+            let id = id.clone();
+            Box::new(move |disposition| {
+                // The runtime invokes this before agent_start; enqueue here rather
+                // than after waking a separate command task. The writer owns I/O.
+                let _ = output.enqueue(success_response(
+                    id.as_deref(),
+                    "prompt",
+                    Some(disposition_json(disposition)),
+                ));
+                sent.store(true, Ordering::Release);
+            }) as PromptReceipt
+        })
+    } else {
+        None
+    };
+    let result = handle_command(session, command, export_html, receipt).await;
+    if sent.load(Ordering::Acquire) {
+        return None;
+    }
+    Some(match result {
         Ok(data) => success_response(id.as_deref(), name, data),
         Err(error) => error_response(id.as_deref(), name, &error),
     })
@@ -521,6 +474,7 @@ async fn handle_command(
     session: &PiSession,
     command: RpcCommand,
     export_html: HtmlExporter,
+    receipt: Option<PromptReceipt>,
 ) -> Result<Option<Value>, String> {
     match command {
         RpcCommand::Unknown => Err("Unknown command".into()),
@@ -530,8 +484,14 @@ async fn handle_command(
             streaming_behavior,
             ..
         } => {
-            let disposition =
-                start_prompt(session.current(), message, images, streaming_behavior).await?;
+            let disposition = start_prompt(
+                session.current(),
+                message,
+                images,
+                streaming_behavior,
+                receipt,
+            )
+            .await?;
             Ok(Some(disposition_json(disposition)))
         }
         RpcCommand::Steer {
@@ -675,8 +635,8 @@ async fn handle_command(
             ..
         } => {
             let current = session.current();
-            current
-                .compact(custom_instructions)
+            let completed = current
+                .compact_with_result(custom_instructions)
                 .await
                 .map_err(|error| match error {
                     pi_session::SessionError::Cancelled(_) => "Compaction cancelled".to_string(),
@@ -686,13 +646,9 @@ async fn handle_command(
                 .history()
                 .load()
                 .map_err(|error| error.to_string())?;
-            let record = document
-                .entries
-                .iter()
-                .rev()
-                .find(|record| matches!(record.entry, SessionEntry::Compaction(_)))
-                .ok_or_else(|| "compaction completed without a session entry".to_string())?;
-            Ok(Some(compaction_result_json(record, &document)?))
+            let mut result = compaction_result_json(completed.record(), &document)?;
+            result["estimatedTokensAfter"] = json!(completed.estimated_tokens_after());
+            Ok(Some(result))
         }
         RpcCommand::SetAutoCompaction { enabled, .. } => {
             session
@@ -729,7 +685,7 @@ async fn handle_command(
                     },
                 )
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(session_error_message)?;
             Ok(Some(omit_null_fields(json!({
                 "output":result.output,
                 "exitCode":result.exit_code,
@@ -884,8 +840,11 @@ async fn start_prompt(
     message: String,
     images: Vec<ImageContent>,
     streaming_behavior: Option<StreamingBehavior>,
+    receipt: Option<PromptReceipt>,
 ) -> Result<PromptDisposition, String> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
+    let accepted = Arc::new(AtomicBool::new(false));
+    let admitted = accepted.clone();
     let running = tokio::spawn(async move {
         session
             .prompt_with_streaming_behavior_and_receipt(
@@ -895,6 +854,10 @@ async fn start_prompt(
                     StreamingBehavior::FollowUp => pi_plugin::InputStreamingBehavior::FollowUp,
                 }),
                 move |disposition| {
+                    admitted.store(true, Ordering::Release);
+                    if let Some(receipt) = receipt {
+                        receipt(disposition);
+                    }
                     let _ = sender.send(disposition);
                 },
             )
@@ -902,26 +865,34 @@ async fn start_prompt(
     });
     // Admission belongs to this request. A disconnected client must not leave
     // an unacknowledged command or input hook running in a detached task.
-    let mut pending = PendingPrompt(Some(running.abort_handle()));
+    let mut pending = PendingPrompt {
+        task: Some(running.abort_handle()),
+        accepted,
+    };
     match receiver.await {
         Ok(disposition) => {
             // Once admitted, the session owns settlement and cancellation.
-            pending.0.take();
+            pending.task.take();
             Ok(disposition)
         }
         Err(_) => running
             .await
             .map_err(|error| error.to_string())?
             .map(|outcome| outcome.disposition())
-            .map_err(|error| error.to_string()),
+            .map_err(session_error_message),
     }
 }
 
-struct PendingPrompt(Option<tokio::task::AbortHandle>);
+struct PendingPrompt {
+    task: Option<tokio::task::AbortHandle>,
+    accepted: Arc<AtomicBool>,
+}
 
 impl Drop for PendingPrompt {
     fn drop(&mut self) {
-        if let Some(task) = self.0.take() {
+        if !self.accepted.load(Ordering::Acquire)
+            && let Some(task) = self.task.take()
+        {
             task.abort();
         }
     }
@@ -952,7 +923,15 @@ async fn queue_message(
         )
         .await
         .map(|outcome| outcome.disposition())
-        .map_err(|error| error.to_string())
+        .map_err(session_error_message)
+}
+
+fn session_error_message(error: pi_session::SessionError) -> String {
+    match error {
+        pi_session::SessionError::Plugin(error) => error.diagnostic_message(),
+        pi_session::SessionError::Runtime(message) => message,
+        other => other.to_string(),
+    }
 }
 
 fn session_input(text: String, images: Vec<ImageContent>) -> SessionInput {

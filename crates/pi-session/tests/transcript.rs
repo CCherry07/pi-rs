@@ -97,6 +97,8 @@ fn transcript_preserves_branch_compaction_and_native_inherited_context() {
     );
     store
         .append(SessionEntry::Compaction(CompactionEntry {
+            from_hook: None,
+            system_message: None,
             summary: "summary".into(),
             retained_tail: vec![Message::User(UserMessage::text("retained", 3)).into()],
             retained_entry_ids: vec![],

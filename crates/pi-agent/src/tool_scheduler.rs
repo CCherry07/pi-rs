@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use futures::stream::{FuturesUnordered, StreamExt};
 use pi_core::{
@@ -48,6 +49,7 @@ struct FinalizedToolCall {
     source_index: usize,
     call: ToolCall,
     result: ToolResult,
+    duration_ms: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -333,6 +335,7 @@ impl ToolScheduler {
         timestamp_ms: i64,
     ) -> Result<ToolResultMessage, SchedulerError> {
         let message = ToolResultMessage {
+            duration_ms: finalized.duration_ms,
             tool_call_id: finalized.call.id.clone(),
             tool_name: finalized.call.name.clone(),
             content: finalized.result.content.clone(),
@@ -523,74 +526,91 @@ impl ToolScheduler {
         signal: &AbortSignal,
         events: Arc<dyn AgentEventSink>,
     ) -> FinalizedToolCall {
-        let (source_index, call, args, mut result, run_after_hook, interrupted) = match prepared {
-            PreparedToolCall::Immediate {
-                source_index,
-                call,
-                result,
-            } => (
-                source_index,
-                call,
-                serde_json::json!({}),
-                result,
-                false,
-                false,
-            ),
-            PreparedToolCall::Ready {
-                source_index,
-                call,
-                tool,
-                context,
-                args,
-                lifetime,
-            } => {
-                let (updates, mut update_receiver) = ToolUpdateSink::channel();
-                let mut execution = tool.execute(context, call.id.clone(), args.clone(), updates);
-                let mut updates_open = true;
-                let mut interrupted = false;
+        let (source_index, call, args, mut result, run_after_hook, interrupted, duration_ms) =
+            match prepared {
+                PreparedToolCall::Immediate {
+                    source_index,
+                    call,
+                    result,
+                } => (
+                    source_index,
+                    call,
+                    serde_json::json!({}),
+                    result,
+                    false,
+                    false,
+                    None,
+                ),
+                PreparedToolCall::Ready {
+                    source_index,
+                    call,
+                    tool,
+                    context,
+                    args,
+                    lifetime,
+                } => {
+                    let (updates, mut update_receiver) = ToolUpdateSink::channel();
+                    let started_at = Instant::now();
+                    let mut execution =
+                        tool.execute(context, call.id.clone(), args.clone(), updates);
+                    let mut updates_open = true;
+                    let mut interrupted = false;
 
-                let mut result = loop {
-                    tokio::select! {
-                        biased;
-                        () = signal.wait() => {
-                            interrupted = true;
-                            break ToolResult::error("Operation aborted");
-                        }
-                        update = update_receiver.recv(), if updates_open => {
-                            if let Some(update) = update {
-                                Self::emit_update(&events, signal, &call, update).await;
-                            } else {
-                                // A tool may move/drop its sink before returning. A closed
-                                // biased branch must not starve the execution future.
-                                updates_open = false;
+                    let mut result = loop {
+                        tokio::select! {
+                            biased;
+                            () = signal.wait() => {
+                                interrupted = true;
+                                break ToolResult::error("Operation aborted");
+                            }
+                            update = update_receiver.recv(), if updates_open => {
+                                if let Some(update) = update {
+                                    Self::emit_update(&events, signal, &call, update).await;
+                                } else {
+                                    // A tool may move/drop its sink before returning. A closed
+                                    // biased branch must not starve the execution future.
+                                    updates_open = false;
+                                }
+                            }
+                            executed = &mut execution => {
+                                break executed.unwrap_or_else(|error| ToolResult::error(error.to_string()));
                             }
                         }
-                        executed = &mut execution => {
-                            break executed.unwrap_or_else(|error| ToolResult::error(error.to_string()));
-                        }
+                    };
+                    // Match Pi's rounded execution-only duration: preparation and result
+                    // hooks are outside it, as are updates drained after the tool settles.
+                    let duration_ms =
+                        u64::try_from((started_at.elapsed().as_nanos() + 500_000) / 1_000_000)
+                            .unwrap_or(u64::MAX);
+                    // A cancelled compositor may own futures awaiting nested
+                    // calls. Drop it first, then finish those tracked pipelines
+                    // before the parent's result hook and terminal end event.
+                    lifetime.close();
+                    drop(execution);
+                    let nested_usage = lifetime.settle().await;
+                    if interrupted {
+                        result.usage = nested_usage;
                     }
-                };
-                // A cancelled compositor may own futures awaiting nested
-                // calls. Drop it first, then finish those tracked pipelines
-                // before the parent's result hook and terminal end event.
-                lifetime.close();
-                drop(execution);
-                let nested_usage = lifetime.settle().await;
-                if interrupted {
-                    result.usage = nested_usage;
+                    // Dropping the execution future closes its update sink. Drain
+                    // updates accepted before settlement; sends after settlement fail
+                    // and are ignored by ToolUpdateSink.
+                    while let Ok(update) = update_receiver.try_recv() {
+                        Self::emit_update(&events, signal, &call, update).await;
+                    }
+                    // Retained contexts and unawaited nested calls lose their
+                    // capability as soon as the owning tool settles.
+                    drop(lifetime);
+                    (
+                        source_index,
+                        call,
+                        args,
+                        result,
+                        true,
+                        interrupted,
+                        Some(duration_ms),
+                    )
                 }
-                // Dropping the execution future closes its update sink. Drain
-                // updates accepted before settlement; sends after settlement fail
-                // and are ignored by ToolUpdateSink.
-                while let Ok(update) = update_receiver.try_recv() {
-                    Self::emit_update(&events, signal, &call, update).await;
-                }
-                // Retained contexts and unawaited nested calls lose their
-                // capability as soon as the owning tool settles.
-                drop(lifetime);
-                (source_index, call, args, result, true, interrupted)
-            }
-        };
+            };
 
         if run_after_hook {
             result = self
@@ -616,6 +636,7 @@ impl ToolScheduler {
             source_index,
             call,
             result,
+            duration_ms,
         }
     }
 
@@ -660,6 +681,7 @@ impl ToolScheduler {
                     tool_name: finalized.call.name.clone(),
                     result: finalized.result.clone(),
                     is_error: finalized.result.is_error,
+                    duration_ms: finalized.duration_ms,
                 },
                 signal.clone(),
             )
@@ -855,6 +877,8 @@ mod tests {
 
     pub(super) fn assistant() -> AssistantMessage {
         AssistantMessage {
+            duration_ms: None,
+            thinking_level: None,
             content: Vec::new(),
             api: "test".to_string(),
             provider: ProviderId::new("test"),
@@ -907,6 +931,129 @@ mod tests {
             PathBuf::from("."),
             8,
         )
+    }
+
+    #[tokio::test]
+    async fn only_executed_tools_have_a_duration_in_result_messages() {
+        struct Blocker;
+        #[pi_plugin::plugin]
+        impl Plugin for Blocker {
+            fn id(&self) -> PluginId {
+                PluginId::new("duration-blocker")
+            }
+            async fn tool_call(
+                &self,
+                _: AgentPluginContext,
+                event: ToolCallEvent,
+            ) -> Result<pi_plugin::ToolCallPatch, PluginError> {
+                Ok(pi_plugin::ToolCallPatch {
+                    block: (event.tool_call.id.as_str() == "blocked").then(|| {
+                        pi_plugin::ToolCallBlock {
+                            reason: "blocked by fixture".into(),
+                            terminate: false,
+                        }
+                    }),
+                    ..Default::default()
+                })
+            }
+        }
+        #[derive(Default)]
+        struct EndEvents(Mutex<Vec<(String, Option<u64>)>>);
+        #[async_trait]
+        impl AgentEventSink for EndEvents {
+            async fn emit(
+                &self,
+                event: AgentEvent,
+                _: AbortSignal,
+            ) -> Result<AgentEvent, crate::EventError> {
+                if let AgentEvent::ToolExecutionEnd {
+                    tool_call_id,
+                    duration_ms,
+                    ..
+                } = &event
+                {
+                    self.0
+                        .lock()
+                        .unwrap()
+                        .push((tool_call_id.to_string(), *duration_ms));
+                }
+                Ok(event)
+            }
+        }
+        for mode in [ToolExecutionMode::Sequential, ToolExecutionMode::Parallel] {
+            let (plugins, registries) = RegistriesBuilder::new()
+                .register_plugins(vec![
+                    Arc::new(pi_test_support::TestToolsPlugin::new()),
+                    Arc::new(Blocker),
+                ])
+                .unwrap();
+            let scheduler = ToolScheduler::new(
+                Arc::new(registries),
+                Arc::new(plugins),
+                PathBuf::from("."),
+                8,
+            );
+            let mut context = Arc::unwrap_or_clone(context());
+            context.active_tools = vec!["echo".into(), "fail".into()];
+            let context = Arc::new(context);
+            let events = Arc::new(EndEvents::default());
+            let (_abort, signal) = AbortHandle::new();
+            let result = scheduler
+                .execute_batch(
+                    &RunId::new("durations"),
+                    &assistant(),
+                    context.clone(),
+                    vec![
+                        ToolCall::new("success", "echo", serde_json::json!({"text":"ok"})),
+                        ToolCall::new("throws", "fail", serde_json::json!({})),
+                        ToolCall::new("missing", "missing", serde_json::json!({})),
+                        ToolCall::new("invalid", "echo", serde_json::Value::Null),
+                        ToolCall::new("blocked", "echo", serde_json::json!({})),
+                    ],
+                    mode,
+                    signal,
+                    events.clone(),
+                    1,
+                )
+                .await
+                .unwrap();
+            let durations: Vec<_> = result
+                .messages
+                .iter()
+                .map(|message| message.duration_ms.is_some())
+                .collect();
+            assert_eq!(durations, [true, true, false, false, false]);
+            {
+                let ends = events.0.lock().unwrap();
+                assert_eq!(ends.len(), result.messages.len());
+                for message in &result.messages {
+                    assert_eq!(
+                        ends.iter()
+                            .find(|(id, _)| id == message.tool_call_id.as_str())
+                            .unwrap()
+                            .1,
+                        message.duration_ms
+                    );
+                }
+            }
+            let (abort, signal) = AbortHandle::new();
+            abort.abort();
+            let cancelled = scheduler
+                .execute_batch(
+                    &RunId::new("cancelled"),
+                    &assistant(),
+                    context,
+                    vec![ToolCall::new("cancelled", "echo", serde_json::json!({}))],
+                    mode,
+                    signal,
+                    events,
+                    1,
+                )
+                .await
+                .unwrap();
+            assert_eq!(cancelled.messages.len(), 1);
+            assert_eq!(cancelled.messages[0].duration_ms, None);
+        }
     }
 
     #[tokio::test]

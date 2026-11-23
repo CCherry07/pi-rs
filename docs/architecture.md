@@ -98,6 +98,10 @@ when an edge violates either rule.
 
 `pi-session` owns operation admission, cancellation, event ordering and persistence/compaction
 cut points; its internal `history` module owns durable mutations and storage.
+`EntryAppendOrigin` is transient event provenance: automatic agent persistence and configuration
+updates remain visible to native observers/history while the Pi RPC projector omits their redundant
+`entry_appended` frames. Explicit custom/context appends keep that notification. Provenance is not
+stored in v4 records and is not inferred from command names or entry payload types.
 `AgentSessionOptions` selects a shell executor and compaction policy. Defaults have no
 shell executor and use `GenericCompactionPolicy`; `domains/coding/src/session` supplies
 `CodingShellExecutor` and `CodingCompactionPolicy`, including shell defaults, Coding summary text,
@@ -172,8 +176,20 @@ channel without a forwarding task or another transcript reducer. Closing the man
 observers, drains final events and ends the stream even while callers retain a `PiSession`.
 
 Lag recovery restores current state; it cannot replay missed transient notices/errors. TUI and
-Desktop rehydrate their presentation, and RPC reports a subscription gap through its existing
-`extension_error` wire event so clients can query state/messages. Desktop's own message refresh
+Desktop rehydrate their presentation. RPC instead installs a generation-bound synchronous
+`SessionEventObserver` through the existing pre-start binding seam. It projects into one ordered
+writer at publication time and does not forward the lossy broadcast or maintain a replay cache.
+Agent execution awaits actual observer/writer acknowledgement; command responses fence prior
+synchronous publications, while prompt receipts enqueue at the runtime's preflight callback.
+Arbitrary synchronous extension/startup bursts retain legacy-style queuing, not a hard memory
+bound. Current-thread runtimes remain supported; no blocking I/O or terminal policy enters Session.
+Observer callbacks run outside hub and owning mutation locks. Queue mutations defer observer
+dispatch across their state/Agent queue locks while retaining the original snapshot, revision,
+persistence and enqueue cut points. Reentrant/concurrent publications retain revision order.
+Normal retirement freezes further observer publications and fences accepted synchronous callbacks
+before closing leases; it does not await external stdout flush. Forced runtime cancellation/drop
+releases leases without pretending dropped publications were delivered. The existing manager's
+complete-on-drop replacement transaction remains distinct from cancelling a direct runtime shutdown. Desktop's own message refresh
 keeps the observation cursor unchanged: covered message deltas can be skipped while pending
 lifecycle, error and notice events are still projected. Run-scoped ACP/print subscriptions remain
 pinned to their original generation. Low-level `subscribe()` remains available for those callers.
@@ -2178,6 +2194,12 @@ These limits are documented by the feature; generic runtimes contain no codemode
   `ModelSpec.input_limits` preserves typed optional input/resize metadata through catalog generation,
   models.json overrides and plugin serialization. Image resize policy consumes its resize profile;
   request byte/count metadata alone does not imply provider-side enforcement.
+  `ModelSpec.prompt_cache` and `sampling_params_by_thinking_level` retain optional typed cache
+  lifetimes and per-level JSON parameter maps for RPC/catalog consumers, including explicitly empty
+  metadata objects. The models.json owner validates positive cache lifetimes and merges overrides
+  per retention tier / per thinking-level parameter. This metadata does not create a cache-warming
+  service or change v4 persistence. The native exact-build fingerprint requires rebuilding plugins
+  for the extended ModelSpec layout.
 - `TelemetryContext`: starts schema-typed spans through an injected sink; the no-op and in-memory
   sinks are adapters, not alternate event systems.
 - `AbortHandle` / `AbortSignal`: provide cooperative cancellation without exposing Tokio types in public signatures.
@@ -2418,6 +2440,14 @@ declared sequential. Its two observable schedules are:
 
 Unknown, invalid, blocked, and truncated tool calls produce error tool-result messages rather than disappearing from provider history. Final result messages preserve non-empty `added_tool_names`; tool-call and tool-result hooks share one immutable `AgentContext` batch snapshot.
 
+`ToolScheduler` measures rounded execution-only `duration_ms` after preparation and before result
+hooks / post-settlement update draining. Actual success and execution failure carry the same
+optional value in tool-end events, plugin callbacks and tool-result messages. Immediate preparation,
+unknown-tool, blocked and pre-aborted results omit it rather than inventing zero. Replay accepts
+older messages without the optional field; synthesized repair results remain untimed. This is
+additive message metadata, not a v4 mutation/schema change. Native plugins must rebuild against the
+extended value layout under the existing exact-build fingerprint.
+
 ## Session persistence and restore
 
 Session History preserves the existing Rust v4 storage contract. The current local behavior
@@ -2439,6 +2469,19 @@ preparation. An unreadable or invalid parent fails the replacement. `AgentSessio
 only `parent_session_id`. Pi v3 JSON/JS header projections omit the path-based `parentSession`
 property. This is a deliberate Rust storage/API divergence from the upstream v3 path representation;
 ordinary forks continue to record their source session ID.
+
+Compaction and branch-summary entries retain optional `fromHook` provenance. A compaction may
+also hold a validated, lossless `SystemMessageSnapshot`: its complete system message, including
+section and tool-declaration extensions, projects before the summary and retained tail. Old v4
+entries without either field keep their prior interpretation. New append operations bind the
+snapshot's timestamp to the authoritative checkpoint entry timestamp; replay never rewrites old
+records. Retained-message provenance accounts for both leading snapshot and summary, so later
+context edits still target the original retained entries.
+Session Runtime captures `estimatedTokensAfter` from the committed context before completion hooks.
+`compact_with_result` returns that estimate together with its exact committed record; JSON/RPC does
+not search for a later "latest compaction" or recompute from subsequent mutable context. Estimates
+use the Pi UTF-16 character heuristic, including system sections and serialized tool declarations.
+These additions keep the v4 mutation sequence/schema version and lazy persistence unchanged.
 
 Entries form an immutable parent-linked tree. Named lanes are durable pointers into that tree and
 remain available after moving away from their prior leaves. Lane records hold operation starts and
@@ -2733,7 +2776,13 @@ methods. Session identity and generation are immutable data supplied through `Se
 the driver builds callback contexts from that metadata and its generation-bound capability epoch.
 Agent and Session failures share one ordered `PluginDiagnostic` sink, exposed through
 `diagnostics` and `take_diagnostics`. `PiRuntime::plugin_diagnostics` includes that sink together
-with the independent Provider driver's diagnostics. There is no separate Session driver or dispatch wrapper.
+with the independent Provider driver's diagnostics. Generation-local subscriptions observe the same
+records outside the diagnostic mutex; sessions bind before startup and release subscriptions on shutdown.
+Typed callback failures retain their actual adapter source path and raw error message separately from
+the contextual diagnostic display string. RPC projects the raw message, not nested `Display` wrappers.
+This does not change hook classification: Pi's `tool_call` propagates without an extra diagnostic,
+whereas `user_bash` reports once and fails closed; ordinary observer failures allow later hooks to run.
+There is no separate Session driver or dispatch wrapper.
 `AgentSessionOptions` configures session policy, not plugin sources.
 The complete replacement generation is prepared before the old generation receives
 `session_shutdown(reload)`. Preparation failure leaves the old generation running; successful

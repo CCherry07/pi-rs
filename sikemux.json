@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "worktree": {
+    "onCreate": [
+      {
+        "id": "node-dependencies",
+        "label": "Install locked Node host dependencies",
+        "command": "npm ci --prefix packages/pi --ignore-scripts --no-audit --no-fund"
+      }
+    ]
+  },
+  "check": "npm --prefix packages/pi run check && cargo check -p pi-rpc --locked",
+  "heavy": [
+    { "command": "cargo test --workspace", "final": true },
+    { "command": "cargo clippy --workspace --all-targets -- -D warnings", "final": true },
+    { "command": "npm --prefix packages/pi test", "final": true },
+    { "command": "npm --prefix packages/pi run build:native", "final": true },
+    { "command": "npm --prefix packages/pi run test:native", "final": true }
+  ]
+}
