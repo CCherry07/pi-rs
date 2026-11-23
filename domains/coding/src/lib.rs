@@ -17,6 +17,7 @@ mod runtime_inventory;
 pub mod skills;
 #[cfg(test)]
 mod test_support;
+mod tool_result_images;
 
 pub use auth_check::{AuthCheckOptions, AuthCheckResult, AuthCheckStatus, check_auth};
 pub use credentials::{

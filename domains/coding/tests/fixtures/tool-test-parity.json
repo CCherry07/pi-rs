@@ -1,0 +1,4349 @@
+{
+  "schemaVersion": 1,
+  "oracleRevision": "69a6993486acee850d14a4a1547daa4a167228ad",
+  "files": [
+    {
+      "file": "tools.test.ts",
+      "sha256": "92ad301cf114dc3027dcc0e071fb5f175ce301ae01203fc6546a8c08adf7294e"
+    },
+    {
+      "file": "read-streaming.test.ts",
+      "sha256": "cd54cf1599f45e767fb60f62cd196b08abda5fa43275662cf36f07336773eb33"
+    },
+    {
+      "file": "path-utils.test.ts",
+      "sha256": "08bb88574596a43e2364ee3b2655e071593822417ef8937693744174e9615f3e"
+    },
+    {
+      "file": "truncate-surrogates.test.ts",
+      "sha256": "c165767efbc7af1221714cf6098fbc8d722e78afbd606640a6a9b258bfce477b"
+    },
+    {
+      "file": "edit-tool-legacy-input.test.ts",
+      "sha256": "f712f13612e85507ba14813e3d0843ada5fae374cf08488db80a778e4cc322a8"
+    },
+    {
+      "file": "edit-tool-diff-before-write.test.ts",
+      "sha256": "a6b90da624e7ddae6bff8593b597264f27427321f708a4642e3acad76c775c17"
+    },
+    {
+      "file": "edit-diff-window.test.ts",
+      "sha256": "ace73451ee80dc7d71d64e3e1d0b3203d9ad433869069ad335d0001d20c6ff53"
+    },
+    {
+      "file": "file-mutation-queue.test.ts",
+      "sha256": "d65f903a056b4cbfd33850986b5a5ffec394b8340a1db491737f892d0e2d4462"
+    },
+    {
+      "file": "grep-operations.test.ts",
+      "sha256": "1de83e88c03775b8adecafcd7278bf9bdbd9ddc3f5674cc756a1cb042e3e1c63"
+    },
+    {
+      "file": "find-abort-before-spawn.test.ts",
+      "sha256": "f2925681665f816a98a8f6d4079eaa08e5ea8718c830410e7ac5072e4f9781d8"
+    },
+    {
+      "file": "bash-executor-truncation.test.ts",
+      "sha256": "3af2e5be5a16db20e6d08cc692b2e979c883a43ab932a29f482f07e6e17876a3"
+    },
+    {
+      "file": "exec-utf8-chunks.test.ts",
+      "sha256": "e108541bc5a28ebc229a1cd8ccf39d59caac765313af8ef09a275acda5af2b68"
+    },
+    {
+      "file": "exec-runtime-limit.test.ts",
+      "sha256": "22400117e18112d9246c74b543d6759a9815ff8810b21bd57a91896400ad23ec"
+    },
+    {
+      "file": "exec.test.ts",
+      "sha256": "81b280ba8de112d865d18319119083bb95aac3c50bf06337ac6693b38dd4c3e6"
+    },
+    {
+      "file": "shell-kill-process-tree.test.ts",
+      "sha256": "b379cec4c021d373faa2ec3f0c1f54d778c9a50d28a6425484134d12152df6ae"
+    },
+    {
+      "file": "shell-path-exists.test.ts",
+      "sha256": "fc6c6a21cbded0df578509953649ae3491d0e99129b3414e170df2c681ffe5db"
+    },
+    {
+      "file": "powershell-tool.test.ts",
+      "sha256": "656774d3402cff510da1bf78679819c063adaaacb2084602aa03cbb75b3240cd"
+    },
+    {
+      "file": "powershell-config.test.ts",
+      "sha256": "0c225b44e782266296c027badd9b8197d99b70b16dc71333c890c87fdaf8737a"
+    },
+    {
+      "file": "windows-shell-config.test.ts",
+      "sha256": "1c0041edebd6d601504a1febada1bed9b8dfbdc6af6257079fdd24de8876065e"
+    },
+    {
+      "file": "bash-close-hang-windows.test.ts",
+      "sha256": "1d2230b25129a365cbae417269b65c1724772104328f584ee521cb5c255b49fb"
+    },
+    {
+      "file": "builtin-tool-strict-mode.test.ts",
+      "sha256": "e7b6c9145a3957a02f9eb22f04766ae46c33f938e060569439b6df925a5139f5"
+    },
+    {
+      "file": "tool-result-images.test.ts",
+      "sha256": "ea6be817dd453b2c3c35051b829b5c9df890a4a9dfeb77ea20ff3abe3036cd11"
+    },
+    {
+      "file": "image-resize-callers.test.ts",
+      "sha256": "13600b9196501b506940c18c2c55dcb415f0e5de6aa82f70e8809280173d9b53"
+    },
+    {
+      "file": "image-process.test.ts",
+      "sha256": "5519a74fccb82fdfbef288c4f40613059addcbf49c50c44999df04fe6f53f0f7"
+    },
+    {
+      "file": "image-processing.test.ts",
+      "sha256": "31012e506feb87b60a12c9d7888ab82fe0f0875544f431b8bd5985338a5cbada"
+    },
+    {
+      "file": "image-resize-worker-teardown.test.ts",
+      "sha256": "10455714557bd1f8f83782a2bbe32eb65c807b5d3004521cad5d7f24b28a20e8"
+    }
+  ],
+  "cases": [
+    {
+      "id": "tools.test.ts::Coding Agent Tools > read tool > should read file contents that fit within limits",
+      "file": "tools.test.ts",
+      "line": 91,
+      "title": "should read file contents that fit within limits",
+      "suites": [
+        "Coding Agent Tools",
+        "read tool"
+      ],
+      "definitionHash": "32056fff7a7639385bd7e85436a461aeecf95e2dbbfedb1f7d6b26c50542a8b1",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-read/src/lib.rs",
+          "name": "hashline_is_explicitly_enabled_and_plain_reads_return_structured_text"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > read tool > should handle non-existent files",
+      "file": "tools.test.ts",
+      "line": 105,
+      "title": "should handle non-existent files",
+      "suites": [
+        "Coding Agent Tools",
+        "read tool"
+      ],
+      "definitionHash": "2134610e301a621b957e543c0c8b716a73625d990087a8029767ef961195e06c",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-read/src/lib.rs",
+          "name": "nonexistent_and_out_of_range_files_report_legacy_errors"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > read tool > should truncate files exceeding line limit",
+      "file": "tools.test.ts",
+      "line": 111,
+      "title": "should truncate files exceeding line limit",
+      "suites": [
+        "Coding Agent Tools",
+        "read tool"
+      ],
+      "definitionHash": "e1b97a22e1b34f9f4a30b0fdc68d20f6a6de1fb393e4739926dfc07073bd1ffb",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-read/src/lib.rs",
+          "name": "truncates_at_legacy_line_limit_and_reports_details"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > read tool > should truncate when byte limit exceeded",
+      "file": "tools.test.ts",
+      "line": 125,
+      "title": "should truncate when byte limit exceeded",
+      "suites": [
+        "Coding Agent Tools",
+        "read tool"
+      ],
+      "definitionHash": "65a433791128447f3e1854f36c4752b6e13c0db676cd26615f38846e79ad8d95",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-read/src/lib.rs",
+          "name": "byte_limit_keeps_complete_utf8_lines_and_reports_exact_details"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > read tool > should handle offset parameter",
+      "file": "tools.test.ts",
+      "line": 139,
+      "title": "should handle offset parameter",
+      "suites": [
+        "Coding Agent Tools",
+        "read tool"
+      ],
+      "definitionHash": "60e468de8ef0b915446625b833b52612005f785a2fcc70482fcced7046f29b05",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-read/src/lib.rs",
+          "name": "offset_and_limit_windows_match_legacy_continuation_notices"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > read tool > should handle limit parameter",
+      "file": "tools.test.ts",
+      "line": 154,
+      "title": "should handle limit parameter",
+      "suites": [
+        "Coding Agent Tools",
+        "read tool"
+      ],
+      "definitionHash": "8e66f9894afbc419f9215394915b80de2eb6118c4bff324d0dfa53947a5b8483",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-read/src/lib.rs",
+          "name": "offset_and_limit_windows_match_legacy_continuation_notices"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > read tool > should handle offset + limit together",
+      "file": "tools.test.ts",
+      "line": 168,
+      "title": "should handle offset + limit together",
+      "suites": [
+        "Coding Agent Tools",
+        "read tool"
+      ],
+      "definitionHash": "2da35295312b8826f7e88948003f96c6b0387435b181158badc7c479dcfdd789",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-read/src/lib.rs",
+          "name": "offset_and_limit_windows_match_legacy_continuation_notices"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > read tool > should show error when offset is beyond file length",
+      "file": "tools.test.ts",
+      "line": 187,
+      "title": "should show error when offset is beyond file length",
+      "suites": [
+        "Coding Agent Tools",
+        "read tool"
+      ],
+      "definitionHash": "4b8f2ee84e4f370cfff91f70e92a1bc80463ad230d0eab6942bcb26209621cbb",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-read/src/lib.rs",
+          "name": "nonexistent_and_out_of_range_files_report_legacy_errors"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > read tool > should include truncation details when truncated",
+      "file": "tools.test.ts",
+      "line": 196,
+      "title": "should include truncation details when truncated",
+      "suites": [
+        "Coding Agent Tools",
+        "read tool"
+      ],
+      "definitionHash": "8f00f87c84f9750777a158dc3da24fa548d9b68572f1c1b8678148e1ff2a2c41",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-read/src/lib.rs",
+          "name": "truncates_at_legacy_line_limit_and_reports_details"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > read tool > should detect image MIME type from file magic (not extension)",
+      "file": "tools.test.ts",
+      "line": 211,
+      "title": "should detect image MIME type from file magic (not extension)",
+      "suites": [
+        "Coding Agent Tools",
+        "read tool"
+      ],
+      "definitionHash": "b3c60cd11ec3be4279e5b20e825248dd95f3c99197c32a0fc006a4f9d1b40ec7",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-read/src/lib.rs",
+          "name": "image_detection_uses_magic_not_the_filename_suffix"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > read tool > should keep a text-only model's image warning out of what the model gets",
+      "file": "tools.test.ts",
+      "line": 240,
+      "title": "should keep a text-only model's image warning out of what the model gets",
+      "suites": [
+        "Coding Agent Tools",
+        "read tool"
+      ],
+      "definitionHash": "bdb0f23a00a1323b88bdccf4db7cfdbc3f1f9a414fcac37311b52509cd78b309",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-read/tests/images.rs",
+          "name": "resize_disabled_preserves_bytes_and_reports_text_only_model_without_dropping_image"
+        }
+      ],
+      "reason": "The Rust test asserts the stored/model-facing content keeps the image and clean note while the user-only warning remains in details. The legacy ToolExecutionComponent pixel/render assertion is a separate UI concern, not a read-tool media contract."
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > read tool > should read BMP files from disk as PNG image attachments",
+      "file": "tools.test.ts",
+      "line": 279,
+      "title": "should read BMP files from disk as PNG image attachments",
+      "suites": [
+        "Coding Agent Tools",
+        "read tool"
+      ],
+      "definitionHash": "d99d8da5fffbe0c8742d635ab9731a8f72dc6c0dd3cfd5e4f21627c5a0505807",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-read/src/lib.rs",
+          "name": "converts_bmp_to_png"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > read tool > should treat files with image extension but non-image content as text",
+      "file": "tools.test.ts",
+      "line": 297,
+      "title": "should treat files with image extension but non-image content as text",
+      "suites": [
+        "Coding Agent Tools",
+        "read tool"
+      ],
+      "definitionHash": "8a60ee3fee5549cc0752af01b66bcb1bfcd125dab922f2dc97395f9c75f52a12",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-read/src/lib.rs",
+          "name": "image_detection_uses_magic_not_the_filename_suffix"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > write tool > should write file contents",
+      "file": "tools.test.ts",
+      "line": 310,
+      "title": "should write file contents",
+      "suites": [
+        "Coding Agent Tools",
+        "write tool"
+      ],
+      "definitionHash": "f0efbbc397fb56f57c5e5b07942ef03372ca34a55c3357ea69397ca4c95ce384",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "write_overwrites_and_creates_parents_from_context_cwd"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > write tool > should create parent directories",
+      "file": "tools.test.ts",
+      "line": 320,
+      "title": "should create parent directories",
+      "suites": [
+        "Coding Agent Tools",
+        "write tool"
+      ],
+      "definitionHash": "06f29d21e9a7b728e0a125fe52a54c5876de565a2e54194e167cff3949a6d2fe",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "write_overwrites_and_creates_parents_from_context_cwd"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > edit tool > should replace text in file",
+      "file": "tools.test.ts",
+      "line": 331,
+      "title": "should replace text in file",
+      "suites": [
+        "Coding Agent Tools",
+        "edit tool"
+      ],
+      "definitionHash": "85dc9cb3a27b25e1f1c79a8a8e427863270fc404829308a0eb2af754ef50b247",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "single_edit_uses_context_cwd_and_returns_an_applicable_patch"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > edit tool > should fail if text not found",
+      "file": "tools.test.ts",
+      "line": 354,
+      "title": "should fail if text not found",
+      "suites": [
+        "Coding Agent Tools",
+        "edit tool"
+      ],
+      "definitionHash": "05313d1a4dcd6cb94f4f0da0f11788b8835f93a690f81809bd7571d0ed896073",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "missing_duplicate_empty_and_overlapping_edits_are_rejected_atomically"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > edit tool > should include ENOENT when the edit target does not exist",
+      "file": "tools.test.ts",
+      "line": 367,
+      "title": "should include ENOENT when the edit target does not exist",
+      "suites": [
+        "Coding Agent Tools",
+        "edit tool"
+      ],
+      "definitionHash": "b6853d263b3b2fd5b9cf16949437c0a39b48886270ed7d95f308649009b3ae80",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "missing_edit_target_reports_pi_enoent_wording"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > edit tool > should fail if text appears multiple times",
+      "file": "tools.test.ts",
+      "line": 378,
+      "title": "should fail if text appears multiple times",
+      "suites": [
+        "Coding Agent Tools",
+        "edit tool"
+      ],
+      "definitionHash": "5d37f01555ffa8aa03f5fa44eedaebc68712087d2af627e20f8513aadcb0cef7",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "missing_duplicate_empty_and_overlapping_edits_are_rejected_atomically"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > edit tool > should replace multiple disjoint regions in one call",
+      "file": "tools.test.ts",
+      "line": 391,
+      "title": "should replace multiple disjoint regions in one call",
+      "suites": [
+        "Coding Agent Tools",
+        "edit tool"
+      ],
+      "definitionHash": "458036edd008dc7b29baedb3be451f5c127d1e434c509612f1a5e0e0b7d39bfd",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "multi_edit_matches_original_regions_and_collapses_distant_diff_context"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > edit tool > should collapse large unchanged gaps in multi-edit diffs",
+      "file": "tools.test.ts",
+      "line": 409,
+      "title": "should collapse large unchanged gaps in multi-edit diffs",
+      "suites": [
+        "Coding Agent Tools",
+        "edit tool"
+      ],
+      "definitionHash": "3d4e51b323fc82a1b301060337ba5463e442560b2c67382a2347cbf3033708d1",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "multi_edit_matches_original_regions_and_collapses_distant_diff_context"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > edit tool > should match edits against the original file, not incrementally",
+      "file": "tools.test.ts",
+      "line": 432,
+      "title": "should match edits against the original file, not incrementally",
+      "suites": [
+        "Coding Agent Tools",
+        "edit tool"
+      ],
+      "definitionHash": "dc245b2c0bbd51608a71b7249cd797ce418ac81fc4f1880581b063b1a7c71fef",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "multi_edit_matches_original_regions_and_collapses_distant_diff_context"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > edit tool > should fail when edits is empty",
+      "file": "tools.test.ts",
+      "line": 447,
+      "title": "should fail when edits is empty",
+      "suites": [
+        "Coding Agent Tools",
+        "edit tool"
+      ],
+      "definitionHash": "68db437223fdec18c945bec019e9b5395f800654c8598bc21f0e11d5fc241bdf",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "missing_duplicate_empty_and_overlapping_edits_are_rejected_atomically"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > edit tool > should fail when multi-edit regions overlap",
+      "file": "tools.test.ts",
+      "line": 459,
+      "title": "should fail when multi-edit regions overlap",
+      "suites": [
+        "Coding Agent Tools",
+        "edit tool"
+      ],
+      "definitionHash": "135877415294a3f6cdde1e76df058c1b78d5e04bdab4488408cefec2cfea1254",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "missing_duplicate_empty_and_overlapping_edits_are_rejected_atomically"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > edit tool > should not partially apply edits when one edit fails",
+      "file": "tools.test.ts",
+      "line": 474,
+      "title": "should not partially apply edits when one edit fails",
+      "suites": [
+        "Coding Agent Tools",
+        "edit tool"
+      ],
+      "definitionHash": "3b5aa664e53b94ba04a2abf28568f4548cc3845a6004ee38adaf2959362171c7",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "missing_duplicate_empty_and_overlapping_edits_are_rejected_atomically"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > edit tool > should include EACCES for read-only files",
+      "file": "tools.test.ts",
+      "line": 492,
+      "title": "should include EACCES for read-only files",
+      "suites": [
+        "Coding Agent Tools",
+        "edit tool"
+      ],
+      "definitionHash": "9dd83e9b2ecb251a98d13f4c3bcc42079e68fdc7cdb47765d7a6a5b05e8b5441",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "read_only_edit_target_reports_pi_eacces_wording_without_mutation"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > edit tool > should include the original error message for unknown edit access errors",
+      "file": "tools.test.ts",
+      "line": 505,
+      "title": "should include the original error message for unknown edit access errors",
+      "suites": [
+        "Coding Agent Tools",
+        "edit tool"
+      ],
+      "definitionHash": "4132f56a21b2c3ff0b127bb7cf34d8a94aed21296018e409a63031b39648651b",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "unknown_edit_access_errors_preserve_original_os_message"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > edit tool > should include ENOENT in diff preview for missing files",
+      "file": "tools.test.ts",
+      "line": 524,
+      "title": "should include ENOENT in diff preview for missing files",
+      "suites": [
+        "Coding Agent Tools",
+        "edit tool"
+      ],
+      "definitionHash": "030c59be06e48cad58a58c76b0f959795c2ee34d55dc9af95c2ebf9a470b9d42",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "Rust exposes edit execution through Tool but has no computeEditsDiff preview API or preview result contract. Execution-path ENOENT wording is covered separately."
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > edit tool > should include EACCES in diff preview for unreadable files",
+      "file": "tools.test.ts",
+      "line": 531,
+      "title": "should include EACCES in diff preview for unreadable files",
+      "suites": [
+        "Coding Agent Tools",
+        "edit tool"
+      ],
+      "definitionHash": "4739a48652e403e5b8e581381d5810387410bd9716c020270a1af93a0a1c7896",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "Rust exposes edit execution through Tool but has no computeEditsDiff preview API or preview result contract. Execution-path EACCES wording is covered separately."
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > bash tool > should execute simple commands",
+      "file": "tools.test.ts",
+      "line": 543,
+      "title": "should execute simple commands",
+      "suites": [
+        "Coding Agent Tools",
+        "bash tool"
+      ],
+      "definitionHash": "454ff7b0e52aeb96367d502cfaabbaafd7e82b0df21788e789fcefa069aca89c",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-bash/src/lib.rs",
+          "name": "executes_simple_commands"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > bash tool > should report non-zero exit codes as error results with structured content",
+      "file": "tools.test.ts",
+      "line": 550,
+      "title": "should report non-zero exit codes as error results with structured content",
+      "suites": [
+        "Coding Agent Tools",
+        "bash tool"
+      ],
+      "definitionHash": "8607ad8a733b497e0b05770f61054815404c72af111eb8096f84585854830303",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-bash/src/lib.rs",
+          "name": "nonzero_and_empty_results_match_the_shell_tool_contract"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > bash tool > should return up to 1 MiB of output in structured content",
+      "file": "tools.test.ts",
+      "line": 570,
+      "title": "should return up to 1 MiB of output in structured content",
+      "suites": [
+        "Coding Agent Tools",
+        "bash tool"
+      ],
+      "definitionHash": "27596dc9ca9009257f391b410657b504a24c1078849f622fab55e9eec0792297",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-bash/src/lib.rs",
+          "name": "large_output_is_bounded_and_keeps_tail"
+        },
+        {
+          "path": "plugins/tools/pi-plugin-bash/src/lib.rs",
+          "name": "programmatic_output_links_complete_file_above_one_mebibyte"
+        },
+        {
+          "path": "crates/pi-shell/src/lib.rs",
+          "name": "programmatic_output_retains_both_ends_with_utf8_boundaries"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > bash tool > should map signal-killed commands to 128 plus the signal number",
+      "file": "tools.test.ts",
+      "line": 596,
+      "title": "should map signal-killed commands to 128 plus the signal number",
+      "suites": [
+        "Coding Agent Tools",
+        "bash tool"
+      ],
+      "definitionHash": "e62d6a6fd1ae468b47a0178db24d1eda8b4efb56023d5a7150e4490862fe79a6",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-bash/src/lib.rs",
+          "name": "signal_exit_remains_a_structured_failed_result"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > bash tool > should report signal-killed commands as errors while preserving partial output",
+      "file": "tools.test.ts",
+      "line": 610,
+      "title": "should report signal-killed commands as errors while preserving partial output",
+      "suites": [
+        "Coding Agent Tools",
+        "bash tool"
+      ],
+      "definitionHash": "1ad0d93b8cedfc770ef1ed7244043153a06bec3ea39d2190feda5dbc091d2735",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-bash/src/lib.rs",
+          "name": "signal_exit_remains_a_structured_failed_result"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > bash tool > should reject a null exit code from custom operations",
+      "file": "tools.test.ts",
+      "line": 628,
+      "title": "should reject a null exit code from custom operations",
+      "suites": [
+        "Coding Agent Tools",
+        "bash tool"
+      ],
+      "definitionHash": "e3d0c5c75302ee560885b7553adb4f58537ee3530ff678c3bc9091b17b7a9ea0",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "Legacy exposes per-tool JavaScript BashOperations injection. Rust BashTool deliberately has no such per-tool operations surface; injected user-shell operations live at the session plugin boundary, so adding a fake BashTool-only interface would violate the task constraint."
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > bash tool > should respect timeout",
+      "file": "tools.test.ts",
+      "line": 642,
+      "title": "should respect timeout",
+      "suites": [
+        "Coding Agent Tools",
+        "bash tool"
+      ],
+      "definitionHash": "1105d302747545dd63c65870378f0cb78cd4f4b7c6e64eb32a33456b2dc9808a",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-bash/src/lib.rs",
+          "name": "supports_fractional_timeouts"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > bash tool > should include full output path for truncated timeout and abort errors",
+      "file": "tools.test.ts",
+      "line": 647,
+      "title": "should include full output path for truncated timeout and abort errors",
+      "suites": [
+        "Coding Agent Tools",
+        "bash tool"
+      ],
+      "definitionHash": "ac6587ef53b41cf4f8a3ce82eeb49edeb02fa19155b945150b1e2bab4ec990e8",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-bash/src/lib.rs",
+          "name": "truncated_timeout_and_abort_errors_link_complete_output"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > bash tool > should throw error when cwd does not exist",
+      "file": "tools.test.ts",
+      "line": 683,
+      "title": "should throw error when cwd does not exist",
+      "suites": [
+        "Coding Agent Tools",
+        "bash tool"
+      ],
+      "definitionHash": "94a4d7c9a3720511d0edbaa1aee92b21a60e65e7aebd7e9caa1b4fa9c52b022f",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-bash/src/lib.rs",
+          "name": "missing_cwd_and_shell_path_report_actionable_errors"
+        },
+        {
+          "path": "crates/pi-shell/src/lib.rs",
+          "name": "missing_working_directory_reports_actionable_failure"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > bash tool > should handle process spawn errors",
+      "file": "tools.test.ts",
+      "line": 693,
+      "title": "should handle process spawn errors",
+      "suites": [
+        "Coding Agent Tools",
+        "bash tool"
+      ],
+      "definitionHash": "ade6cb91949cae55a9820f76a34422a6a2c3906c50de59c5b82626b992580fa8",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/lib.rs",
+          "name": "configured_spawn_error_includes_errno_name"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > bash tool > should pass shellPath through to shell resolution",
+      "file": "tools.test.ts",
+      "line": 704,
+      "title": "should pass shellPath through to shell resolution",
+      "suites": [
+        "Coding Agent Tools",
+        "bash tool"
+      ],
+      "definitionHash": "f0bb62b1b984e5483993b0207d65323590603f46289502dbaa2b9922655ae32d",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-bash/src/lib.rs",
+          "name": "configured_tool_uses_the_selected_shell_path"
+        },
+        {
+          "path": "plugins/tools/pi-plugin-bash/src/lib.rs",
+          "name": "missing_cwd_and_shell_path_report_actionable_errors"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > bash tool > should send commands over stdin when shell resolution requires it",
+      "file": "tools.test.ts",
+      "line": 726,
+      "title": "should send commands over stdin when shell resolution requires it",
+      "suites": [
+        "Coding Agent Tools",
+        "bash tool"
+      ],
+      "definitionHash": "1fd75cc38638c4298aa7294fb53f0e509574af1a82251daf157566a400a13de3",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/lib.rs",
+          "name": "stdin_transport_writes_the_complete_command"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > bash tool > should resolve legacy WSL bash.exe to stdin command transport",
+      "file": "tools.test.ts",
+      "line": 750,
+      "title": "should resolve legacy WSL bash.exe to stdin command transport",
+      "suites": [
+        "Coding Agent Tools",
+        "bash tool"
+      ],
+      "definitionHash": "862d68cd85d541caae5a3215cd5ff8f0ec2f9b538e1598bb37e16606df866a89",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/lib.rs",
+          "name": "legacy_wsl_shell_uses_stdin_transport_for_actual_system_root_only"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > bash tool > should prepend command prefix when configured",
+      "file": "tools.test.ts",
+      "line": 776,
+      "title": "should prepend command prefix when configured",
+      "suites": [
+        "Coding Agent Tools",
+        "bash tool"
+      ],
+      "definitionHash": "c3a75cd22704abb4ffc52e8cdaceae5b1e9e869c0c61a3cfaadcef2c0002faa8",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-bash/src/lib.rs",
+          "name": "configured_tool_prepends_the_command_prefix"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > bash tool > should include output from both prefix and command",
+      "file": "tools.test.ts",
+      "line": 785,
+      "title": "should include output from both prefix and command",
+      "suites": [
+        "Coding Agent Tools",
+        "bash tool"
+      ],
+      "definitionHash": "e495e7e1d9c9c9be3d2bdab2e2ed9de111e771af2afbaf48233132d2e793baf7",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-bash/src/lib.rs",
+          "name": "configured_tool_includes_prefix_and_command_output"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > bash tool > should work without command prefix",
+      "file": "tools.test.ts",
+      "line": 794,
+      "title": "should work without command prefix",
+      "suites": [
+        "Coding Agent Tools",
+        "bash tool"
+      ],
+      "definitionHash": "223b7a12e570585f2f0dd755c12465676ab3c73422c0064ed30ec95f831e845a",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-bash/src/lib.rs",
+          "name": "executes_simple_commands"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > bash tool > should coalesce streaming updates for chatty output",
+      "file": "tools.test.ts",
+      "line": 801,
+      "title": "should coalesce streaming updates for chatty output",
+      "suites": [
+        "Coding Agent Tools",
+        "bash tool"
+      ],
+      "definitionHash": "5fa1ec7aa7c4d7b22f3f6ebb6fc477b19576b51ade5566f6dbdc421632fa136a",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-bash/src/lib.rs",
+          "name": "chatty_output_updates_are_coalesced_and_keep_the_tail"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > bash tool > should not count a trailing newline as an extra truncated bash output line",
+      "file": "tools.test.ts",
+      "line": 821,
+      "title": "should not count a trailing newline as an extra truncated bash output line",
+      "suites": [
+        "Coding Agent Tools",
+        "bash tool"
+      ],
+      "definitionHash": "eb7992e43781e70fb3b5ff16684bf561c5f0d0a233701bbdbe504e25b0058c06",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/lib.rs",
+          "name": "line_count_ignores_one_trailing_newline"
+        },
+        {
+          "path": "crates/pi-shell/src/lib.rs",
+          "name": "persists_full_output_and_reports_exact_line_truncation"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > bash tool > should show the end of an over-long last line after a short line",
+      "file": "tools.test.ts",
+      "line": 844,
+      "title": "should show the end of an over-long last line after a short line",
+      "suites": [
+        "Coding Agent Tools",
+        "bash tool"
+      ],
+      "definitionHash": "65af094e1eadc001387a061a7ae8a19dcd03d63ae6f5bbf29728a325dbb24a31",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/lib.rs",
+          "name": "overlong_line_before_blank_lines_keeps_its_tail"
+        },
+        {
+          "path": "plugins/tools/pi-plugin-bash/src/lib.rs",
+          "name": "partial_long_line_notice_uses_the_first_retained_line"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > bash tool > should show the end of an over-long line followed by a blank line (%i bytes, %j)",
+      "file": "tools.test.ts",
+      "line": 864,
+      "title": "should show the end of an over-long line followed by a blank line (%i bytes, %j)",
+      "suites": [
+        "Coding Agent Tools",
+        "bash tool"
+      ],
+      "definitionHash": "1b2792943296b1a63308e58bf4de2ff44a687c9be3dfdd6554abf9c120a722a2",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/lib.rs",
+          "name": "overlong_line_before_blank_lines_keeps_its_tail"
+        },
+        {
+          "path": "plugins/tools/pi-plugin-bash/src/lib.rs",
+          "name": "partial_long_line_notice_uses_the_first_retained_line"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > bash tool > should decode UTF-8 characters split across output chunks",
+      "file": "tools.test.ts",
+      "line": 887,
+      "title": "should decode UTF-8 characters split across output chunks",
+      "suites": [
+        "Coding Agent Tools",
+        "bash tool"
+      ],
+      "definitionHash": "ccc9c62c1e52f2d5b2ced0c82b1811d9ce23c9e077563b543ad2652631e3a5c3",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/operations.rs",
+          "name": "custom_operations_decode_utf8_split_across_chunks"
+        },
+        {
+          "path": "crates/pi-shell/src/lib.rs",
+          "name": "streaming_decoder_joins_split_utf8_and_flushes_incomplete_eof"
+        },
+        {
+          "path": "crates/pi-shell/src/lib.rs",
+          "name": "streaming_decoders_keep_interleaved_stdout_and_stderr_independent"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > bash tool > should expose local bash operations for extension reuse",
+      "file": "tools.test.ts",
+      "line": 903,
+      "title": "should expose local bash operations for extension reuse",
+      "suites": [
+        "Coding Agent Tools",
+        "bash tool"
+      ],
+      "definitionHash": "c85bb7574a1e2ccb6e41dc006eb7494b0b47767d2dcc7d32dde56f4cc20f866d",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/lib.rs",
+          "name": "environment_overrides_set_and_remove_only_child_values"
+        },
+        {
+          "path": "crates/pi-shell/src/operations.rs",
+          "name": "custom_operations_capture_full_output_and_return_the_limited_tail"
+        }
+      ],
+      "reason": "Rust exposes the reusable pi-shell executor and a real session-level ShellOperations adapter rather than a JavaScript createLocalBashOperations object."
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > bash tool > should preserve executeBash sanitization when using local bash operations",
+      "file": "tools.test.ts",
+      "line": 916,
+      "title": "should preserve executeBash sanitization when using local bash operations",
+      "suites": [
+        "Coding Agent Tools",
+        "bash tool"
+      ],
+      "definitionHash": "485467fd4927945b8bab3273f4d2b7ba879284c18c8bf7806607f480e07b1ad5",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "domains/coding/src/session/shell.rs",
+          "name": "user_shell_sanitizes_streams_while_bash_tool_preserves_raw_output"
+        },
+        {
+          "path": "crates/pi-shell/src/operations.rs",
+          "name": "custom_operations_sanitize_user_output_before_capture_and_callbacks"
+        },
+        {
+          "path": "crates/pi-shell/tests/user_output.rs",
+          "name": "sanitizes_split_terminal_sequences_and_utf8"
+        },
+        {
+          "path": "crates/pi-shell/tests/user_output.rs",
+          "name": "holds_only_a_bounded_ansi_suffix_measured_in_utf16_units"
+        },
+        {
+          "path": "crates/pi-shell/tests/user_output.rs",
+          "name": "raw_byte_spill_threshold_persists_only_sanitized_user_text"
+        },
+        {
+          "path": "crates/pi-shell/tests/user_output.rs",
+          "name": "local_user_cancellation_keeps_sanitized_output_without_an_exit_code"
+        },
+        {
+          "path": "crates/pi-shell/tests/user_output.rs",
+          "name": "user_rolling_buffer_counts_utf16_units_without_dropping_retained_unicode"
+        }
+      ],
+      "reason": "CodingShellExecutor selects the user-shell capture policy; local and injected user execution sanitize callbacks, retained output and full-output files, while the real BashTool keeps raw output. Generic request/session/plugin contracts are unchanged."
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > bash tool > should persist full output when truncation happens by line count only",
+      "file": "tools.test.ts",
+      "line": 927,
+      "title": "should persist full output when truncation happens by line count only",
+      "suites": [
+        "Coding Agent Tools",
+        "bash tool"
+      ],
+      "definitionHash": "8cef54c266262e3dbe626419349ccb6e3bf52c847b59d922a5b7608d51690f57",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-bash/src/lib.rs",
+          "name": "large_output_is_bounded_and_keeps_tail"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > bash tool > executeBash should persist full output when truncation happens by line count only",
+      "file": "tools.test.ts",
+      "line": 950,
+      "title": "executeBash should persist full output when truncation happens by line count only",
+      "suites": [
+        "Coding Agent Tools",
+        "bash tool"
+      ],
+      "definitionHash": "267175fbfa5b8ef314a05f6927bec223d60ea6110dca0093d1ffc01d5d81c8ff",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/operations.rs",
+          "name": "custom_operations_capture_full_output_and_return_the_limited_tail"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > grep tool > should include filename when searching a single file",
+      "file": "tools.test.ts",
+      "line": 970,
+      "title": "should include filename when searching a single file",
+      "suites": [
+        "Coding Agent Tools",
+        "grep tool"
+      ],
+      "definitionHash": "d996e8c692c28d570c9ae1e7a7b556acfba8986607227b2a99d98987922dcd93",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-grep/src/lib.rs",
+          "name": "single_file_search_includes_basename_and_accepts_flag_like_literals"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > grep tool > should respect global limit and include context lines",
+      "file": "tools.test.ts",
+      "line": 983,
+      "title": "should respect global limit and include context lines",
+      "suites": [
+        "Coding Agent Tools",
+        "grep tool"
+      ],
+      "definitionHash": "f690a24aabaf28b658c7dd372c65c7fdb5340d7ee1f3754744f52adbfb798782",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-grep/src/lib.rs",
+          "name": "respects_global_match_limit_and_includes_context_lines"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > grep tool > should keep context line numbers aligned with ripgrep when a file contains a lone CR",
+      "file": "tools.test.ts",
+      "line": 1005,
+      "title": "should keep context line numbers aligned with ripgrep when a file contains a lone CR",
+      "suites": [
+        "Coding Agent Tools",
+        "grep tool"
+      ],
+      "definitionHash": "b23b6c85d40714eb814a63c2b90c05e5ed7e965e5db21fdec7a38b93d4231690",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-grep/src/lib.rs",
+          "name": "keeps_lone_cr_context_line_numbers_and_strips_only_terminators"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > grep tool > should print overlapping context once and keep the last match's trailing context",
+      "file": "tools.test.ts",
+      "line": 1023,
+      "title": "should print overlapping context once and keep the last match's trailing context",
+      "suites": [
+        "Coding Agent Tools",
+        "grep tool"
+      ],
+      "definitionHash": "df785f4a2364a5ed3b36be06412caa5e051de6867b1bec6514465d155e79b126",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-grep/src/lib.rs",
+          "name": "prints_overlapping_context_once_and_keeps_last_match_trailing_context"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > grep tool > should keep counting matches past the byte cap",
+      "file": "tools.test.ts",
+      "line": 1046,
+      "title": "should keep counting matches past the byte cap",
+      "suites": [
+        "Coding Agent Tools",
+        "grep tool"
+      ],
+      "definitionHash": "d86b9382234953eac411159cd946e9d7be556eb6342fa09059a320e4b837990f",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-grep/src/lib.rs",
+          "name": "counts_allowed_matches_past_byte_cap_for_limit_and_continuation_details"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > grep tool > should report truncation when stored output ends exactly at the byte cap",
+      "file": "tools.test.ts",
+      "line": 1065,
+      "title": "should report truncation when stored output ends exactly at the byte cap",
+      "suites": [
+        "Coding Agent Tools",
+        "grep tool"
+      ],
+      "definitionHash": "81d3c7e3b8aee1116221ecb5c9a29a96088380dbaf0640f83bafba2dc4972e26",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-grep/src/lib.rs",
+          "name": "reports_truncation_when_stored_output_ends_exactly_at_byte_cap"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > grep tool > should accept a huge context value",
+      "file": "tools.test.ts",
+      "line": 1081,
+      "title": "should accept a huge context value",
+      "suites": [
+        "Coding Agent Tools",
+        "grep tool"
+      ],
+      "definitionHash": "27324ab8ba1b92b50c32a3eebed3ea3ea147e5969e568ad49fb0ca6324d837cf",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-grep/src/lib.rs",
+          "name": "accepts_huge_context_without_exponent_or_allocation_failures"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > grep tool > should decode UTF-16 files with context",
+      "file": "tools.test.ts",
+      "line": 1097,
+      "title": "should decode UTF-16 files with context",
+      "suites": [
+        "Coding Agent Tools",
+        "grep tool"
+      ],
+      "definitionHash": "fe325f83facf8739ac5bc28caf323ac737f4340dcc32af6067286f499189707e",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-grep/src/lib.rs",
+          "name": "decodes_utf16_context_and_lossy_utf8_search_rows"
+        }
+      ],
+      "reason": "The Rust regression also covers ripgrep-compatible lossy UTF-8 decoding for non-UTF-8 rows."
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > grep tool > should keep a lone CR inside a line and strip CRLF terminators",
+      "file": "tools.test.ts",
+      "line": 1112,
+      "title": "should keep a lone CR inside a line and strip CRLF terminators",
+      "suites": [
+        "Coding Agent Tools",
+        "grep tool"
+      ],
+      "definitionHash": "5a485c0340f47a08a27e703e3a11a571f8a24f4e3d96397dc69bb120f067e6c3",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-grep/src/lib.rs",
+          "name": "keeps_lone_cr_context_line_numbers_and_strips_only_terminators"
+        },
+        {
+          "path": "plugins/tools/pi-plugin-grep/src/lib.rs",
+          "name": "preserves_embedded_cr_and_truncates_at_utf16_boundaries"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > grep tool > should not report the match limit when exactly limit matches exist",
+      "file": "tools.test.ts",
+      "line": 1129,
+      "title": "should not report the match limit when exactly limit matches exist",
+      "suites": [
+        "Coding Agent Tools",
+        "grep tool"
+      ],
+      "definitionHash": "834094aa7f55f552d0c9b4809b3f828c7407ca59cbe88d6790d31e75aeda624f",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-grep/src/lib.rs",
+          "name": "exact_match_limit_has_no_notice_and_fractional_limit_is_floored"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > grep tool > should ignore RIPGREP_CONFIG_PATH",
+      "file": "tools.test.ts",
+      "line": 1164,
+      "title": "should ignore RIPGREP_CONFIG_PATH",
+      "suites": [
+        "Coding Agent Tools",
+        "grep tool"
+      ],
+      "definitionHash": "105bc3da58d5dc8be959040609b5fc13ed20d4cf95430adf1c0312a6168bcf44",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-grep/src/lib.rs",
+          "name": "ignores_ripgrep_configuration_and_external_binary_state"
+        }
+      ],
+      "reason": "Rust deliberately searches in-process, and the test proves ambient ripgrep configuration cannot change regex semantics."
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > grep tool > should resolve folder globs relative to path",
+      "file": "tools.test.ts",
+      "line": 1189,
+      "title": "should resolve folder globs relative to path",
+      "suites": [
+        "Coding Agent Tools",
+        "grep tool"
+      ],
+      "definitionHash": "2ba5eb86626e0353ebeaa740057a52d0f338e744d448788901d96eef4acb400f",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-grep/src/lib.rs",
+          "name": "roots_folder_globs_at_real_and_symlinked_search_paths"
+        },
+        {
+          "path": "plugins/tools/pi-plugin-grep/src/lib.rs",
+          "name": "globs_are_root_relative_and_strip_dot_slash_prefixes"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > grep tool > should treat flag-like patterns as search text",
+      "file": "tools.test.ts",
+      "line": 1235,
+      "title": "should treat flag-like patterns as search text",
+      "suites": [
+        "Coding Agent Tools",
+        "grep tool"
+      ],
+      "definitionHash": "8ad81c4cc3d52ae277fed660b177e02556718028f95f3f2cacce70b59eef979a",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-grep/src/lib.rs",
+          "name": "treats_flag_like_pattern_as_text_without_executing_it"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > find tool > should include hidden files that are not gitignored",
+      "file": "tools.test.ts",
+      "line": 1254,
+      "title": "should include hidden files that are not gitignored",
+      "suites": [
+        "Coding Agent Tools",
+        "find tool"
+      ],
+      "definitionHash": "1b8f5dd141beb28f3cc50812af6b0c5442bc6f50239936a0b067cf255fd654b2",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-find/src/lib.rs",
+          "name": "includes_hidden_files_and_respects_gitignore_outside_a_repository"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > find tool > should respect .gitignore",
+      "file": "tools.test.ts",
+      "line": 1274,
+      "title": "should respect .gitignore",
+      "suites": [
+        "Coding Agent Tools",
+        "find tool"
+      ],
+      "definitionHash": "bacd3570492d6a2e50501aa07db6f44896c19e94b0d4a76e74332d77d273bb05",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-find/src/lib.rs",
+          "name": "respects_gitignore"
+        },
+        {
+          "path": "plugins/tools/pi-plugin-find/src/lib.rs",
+          "name": "includes_hidden_files_and_respects_gitignore_outside_a_repository"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > find tool > should surface fd glob parse errors",
+      "file": "tools.test.ts",
+      "line": 1289,
+      "title": "should surface fd glob parse errors",
+      "suites": [
+        "Coding Agent Tools",
+        "find tool"
+      ],
+      "definitionHash": "ab86e4d7e5acb69dfe62284be4fcc824ba67f272d42a6a2b37e22a4fdd5e2589",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-find/src/lib.rs",
+          "name": "surfaces_invalid_glob_patterns"
+        }
+      ],
+      "reason": "The in-process glob parser reports InvalidArguments instead of fd stderr, while preserving the observable invalid-pattern failure."
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > find tool > should treat flag-like patterns as search text",
+      "file": "tools.test.ts",
+      "line": 1298,
+      "title": "should treat flag-like patterns as search text",
+      "suites": [
+        "Coding Agent Tools",
+        "find tool"
+      ],
+      "definitionHash": "c1e5bd76bbe1109b53078d859e5378a9191fa887d08e93996156c5a02ec5abd4",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-find/src/lib.rs",
+          "name": "reports_empty_and_limited_results_like_pi"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > find tool > should ignore a leading ./ in the pattern",
+      "file": "tools.test.ts",
+      "line": 1308,
+      "title": "should ignore a leading ./ in the pattern",
+      "suites": [
+        "Coding Agent Tools",
+        "find tool"
+      ],
+      "definitionHash": "2adf76c85628f365f18bef715adc711b74e5b5403c73b7bb3bef2b2f434b528c",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-find/src/lib.rs",
+          "name": "anchors_path_globs_at_the_search_root_and_strips_dot_slash"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > find tool > should report the result limit only when more results exist",
+      "file": "tools.test.ts",
+      "line": 1324,
+      "title": "should report the result limit only when more results exist",
+      "suites": [
+        "Coding Agent Tools",
+        "find tool"
+      ],
+      "definitionHash": "490fa293b719d734282d47e1f4cc14c8371f22e36ff94f8f1e32540daa18f81b",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-find/src/lib.rs",
+          "name": "does_not_report_a_limit_when_the_result_count_is_exact"
+        },
+        {
+          "path": "plugins/tools/pi-plugin-find/src/lib.rs",
+          "name": "reports_empty_and_limited_results_like_pi"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > find tool > should treat limits below 1 as 1 and floor fractional limits",
+      "file": "tools.test.ts",
+      "line": 1346,
+      "title": "should treat limits below 1 as 1 and floor fractional limits",
+      "suites": [
+        "Coding Agent Tools",
+        "find tool"
+      ],
+      "definitionHash": "c36b0fe26cfdf50f11b19fcef1eec4e98b15612d79dd7d3ccf06e93053e115e5",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-find/src/lib.rs",
+          "name": "floors_numeric_result_limits_like_pi"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > find tool > should report full output totals past the byte cap",
+      "file": "tools.test.ts",
+      "line": 1362,
+      "title": "should report full output totals past the byte cap",
+      "suites": [
+        "Coding Agent Tools",
+        "find tool"
+      ],
+      "definitionHash": "a216cb39d0568f43050e0bec085ce2f61bca882ebb2587414623ca04c37e7ecc",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-find/src/lib.rs",
+          "name": "reports_full_output_totals_past_the_byte_cap"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > find tool > should ask custom glob operations for one result past the limit",
+      "file": "tools.test.ts",
+      "line": 1375,
+      "title": "should ask custom glob operations for one result past the limit",
+      "suites": [
+        "Coding Agent Tools",
+        "find tool"
+      ],
+      "definitionHash": "f047638d1da31f9a8d6c163b8af0515b635680d7784f15cd527c84302e3bbe08",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "The built-in Rust find tool intentionally has no JavaScript FindOperations adapter. Its in-process walker itself reads one result beyond the limit; the listed tests prove the equivalent exact-N versus N+1 observable behavior without adding a fake adapter API. Related Rust regressions (not substitutes for this absent adapter API): plugins/tools/pi-plugin-find/src/lib.rs::does_not_report_a_limit_when_the_result_count_is_exact, plugins/tools/pi-plugin-find/src/lib.rs::reports_empty_and_limited_results_like_pi."
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > ls tool > should list dotfiles and directories",
+      "file": "tools.test.ts",
+      "line": 1412,
+      "title": "should list dotfiles and directories",
+      "suites": [
+        "Coding Agent Tools",
+        "ls tool"
+      ],
+      "definitionHash": "b8670b58268f6762c906384d4f48fb01792737a09c6775b109c46971bfa96f6c",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-ls/src/lib.rs",
+          "name": "lists_hidden_files_and_hidden_directories_with_suffixes"
+        },
+        {
+          "path": "plugins/tools/pi-plugin-ls/src/lib.rs",
+          "name": "sorts_and_marks_directories"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > ls tool > should treat limits below 1 as 1 and floor fractional limits",
+      "file": "tools.test.ts",
+      "line": 1423,
+      "title": "should treat limits below 1 as 1 and floor fractional limits",
+      "suites": [
+        "Coding Agent Tools",
+        "ls tool"
+      ],
+      "definitionHash": "06fc62f121a9c31ad4264c89b0da6db1d33b239089159e5fd5104bf844fbd3c2",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-ls/src/lib.rs",
+          "name": "floors_numeric_entry_limits_like_pi"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::Coding Agent Tools > ls tool > should report the entry limit only when more entries exist",
+      "file": "tools.test.ts",
+      "line": 1433,
+      "title": "should report the entry limit only when more entries exist",
+      "suites": [
+        "Coding Agent Tools",
+        "ls tool"
+      ],
+      "definitionHash": "90ff453b15c78b1e2f4eb744ea7ae7a2e6dbdde7228043b61c8e756b8f81216f",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-ls/src/lib.rs",
+          "name": "exact_entry_limit_has_no_notice_or_details"
+        },
+        {
+          "path": "plugins/tools/pi-plugin-ls/src/lib.rs",
+          "name": "reports_entry_limit_with_an_actionable_notice"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::tool cwd resolution > read uses ctx.cwd when provided",
+      "file": "tools.test.ts",
+      "line": 1459,
+      "title": "read uses ctx.cwd when provided",
+      "suites": [
+        "tool cwd resolution"
+      ],
+      "definitionHash": "af4db9a7287e24f8db7b2b54185d8c168b2d73310ace5b029a1c262d64725ca5",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-read/src/lib.rs",
+          "name": "relative_reads_use_the_tool_context_cwd"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::tool cwd resolution > write uses ctx.cwd when provided",
+      "file": "tools.test.ts",
+      "line": 1474,
+      "title": "write uses ctx.cwd when provided",
+      "suites": [
+        "tool cwd resolution"
+      ],
+      "definitionHash": "4ec761364923a1e7ad51af668fd8c3026d84db98d7b78f0e1716dc092323632c",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "write_overwrites_and_creates_parents_from_context_cwd"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::tool cwd resolution > edit uses ctx.cwd when provided",
+      "file": "tools.test.ts",
+      "line": 1487,
+      "title": "edit uses ctx.cwd when provided",
+      "suites": [
+        "tool cwd resolution"
+      ],
+      "definitionHash": "4c6c5d872d5e98f9e121766e85a6c8df67cfa6b6071f2acbb1033a38d5e5a9e3",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "single_edit_uses_context_cwd_and_returns_an_applicable_patch"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::tool cwd resolution > grep uses ctx.cwd when provided",
+      "file": "tools.test.ts",
+      "line": 1502,
+      "title": "grep uses ctx.cwd when provided",
+      "suites": [
+        "tool cwd resolution"
+      ],
+      "definitionHash": "e8bd518e374a81a4ca3901308c6ff42824f36dc1a15d8d5caa7758fe4f97b6f6",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-grep/src/lib.rs",
+          "name": "uses_tool_context_cwd_for_relative_search_paths"
+        }
+      ],
+      "reason": "Rust tools receive the generation-bound ToolContext directly rather than retaining a separate construction-time cwd."
+    },
+    {
+      "id": "tools.test.ts::tool cwd resolution > find uses ctx.cwd when provided",
+      "file": "tools.test.ts",
+      "line": 1517,
+      "title": "find uses ctx.cwd when provided",
+      "suites": [
+        "tool cwd resolution"
+      ],
+      "definitionHash": "d3cee4b714aec95de3410e1e4448599c70bab1b326df2690483ce4ce6b01a468",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-find/src/lib.rs",
+          "name": "uses_tool_context_cwd_for_relative_search_paths"
+        }
+      ],
+      "reason": "Rust tools receive the generation-bound ToolContext directly rather than retaining a separate construction-time cwd."
+    },
+    {
+      "id": "tools.test.ts::tool cwd resolution > ls uses ctx.cwd when provided",
+      "file": "tools.test.ts",
+      "line": 1531,
+      "title": "ls uses ctx.cwd when provided",
+      "suites": [
+        "tool cwd resolution"
+      ],
+      "definitionHash": "41c92df7d5eef11e7c3ac14e8cb233a94622e55ba3fa620582604ea7f7558f7f",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-ls/src/lib.rs",
+          "name": "uses_tool_context_cwd_for_default_listing_path"
+        }
+      ],
+      "reason": "Rust tools receive the generation-bound ToolContext directly rather than retaining a separate construction-time cwd."
+    },
+    {
+      "id": "tools.test.ts::tool cwd resolution > bash uses ctx.cwd when provided",
+      "file": "tools.test.ts",
+      "line": 1539,
+      "title": "bash uses ctx.cwd when provided",
+      "suites": [
+        "tool cwd resolution"
+      ],
+      "definitionHash": "2257c79892c2527ddcc84868c7ef9607a02e4bd33b969245b8e14a42b67faafe",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-bash/src/lib.rs",
+          "name": "tool_uses_the_context_cwd"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool fuzzy matching > should match text with trailing whitespace stripped",
+      "file": "tools.test.ts",
+      "line": 1565,
+      "title": "should match text with trailing whitespace stripped",
+      "suites": [
+        "edit tool fuzzy matching"
+      ],
+      "definitionHash": "89bfd0e23666e975e003333b4617ea556e4c781d7c20d33e6a40ed186336f62b",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "fuzzy_unicode_equivalence_matches_legacy_cases"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool fuzzy matching > should match fullwidth punctuation in Chinese text",
+      "file": "tools.test.ts",
+      "line": 1581,
+      "title": "should match fullwidth punctuation in Chinese text",
+      "suites": [
+        "edit tool fuzzy matching"
+      ],
+      "definitionHash": "7dba5dd2893535226e4233480747bf8c3cf08268cce6cc0d05eadbc9cfb7adfb",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "fuzzy_unicode_equivalence_matches_legacy_cases"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool fuzzy matching > should match compatibility-equivalent Unicode forms",
+      "file": "tools.test.ts",
+      "line": 1595,
+      "title": "should match compatibility-equivalent Unicode forms",
+      "suites": [
+        "edit tool fuzzy matching"
+      ],
+      "definitionHash": "217671f89e37940fa36b7f7ac97143546ddd73ffd9567e11b69039f7b84856d7",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "fuzzy_unicode_equivalence_matches_legacy_cases"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool fuzzy matching > should match smart single quotes to ASCII quotes",
+      "file": "tools.test.ts",
+      "line": 1609,
+      "title": "should match smart single quotes to ASCII quotes",
+      "suites": [
+        "edit tool fuzzy matching"
+      ],
+      "definitionHash": "cfaef887343335b85f77a3bde0c6590c64955ee559ea045cb85dfb4bcf8f3b56",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "fuzzy_unicode_equivalence_matches_legacy_cases"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool fuzzy matching > should match smart double quotes to ASCII quotes",
+      "file": "tools.test.ts",
+      "line": 1625,
+      "title": "should match smart double quotes to ASCII quotes",
+      "suites": [
+        "edit tool fuzzy matching"
+      ],
+      "definitionHash": "a49eb51bd507b38c7c0733bf2ec66f953777e070a68617f8d96b617fab005a95",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "fuzzy_unicode_equivalence_matches_legacy_cases"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool fuzzy matching > should match Unicode dashes to ASCII hyphen",
+      "file": "tools.test.ts",
+      "line": 1641,
+      "title": "should match Unicode dashes to ASCII hyphen",
+      "suites": [
+        "edit tool fuzzy matching"
+      ],
+      "definitionHash": "bff1076fab98153b3598a1ea252b76558f45696a2dfbbe56f46f385466782412",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "fuzzy_unicode_equivalence_matches_legacy_cases"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool fuzzy matching > should match non-breaking space to regular space",
+      "file": "tools.test.ts",
+      "line": 1657,
+      "title": "should match non-breaking space to regular space",
+      "suites": [
+        "edit tool fuzzy matching"
+      ],
+      "definitionHash": "d386f1c0a3ec49eda1e04d632b6d259db63f85ede26a58ad9a093a6468de196c",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "fuzzy_unicode_equivalence_matches_legacy_cases"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool fuzzy matching > should prefer exact match over fuzzy match",
+      "file": "tools.test.ts",
+      "line": 1673,
+      "title": "should prefer exact match over fuzzy match",
+      "suites": [
+        "edit tool fuzzy matching"
+      ],
+      "definitionHash": "8f600c6649c26b18a5452107157e455932a9fd686ccde72ca3a1bcb844658570",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "fuzzy_matching_prefers_exact_but_counts_fuzzy_equivalent_duplicates"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool fuzzy matching > should still fail when text is not found even with fuzzy matching",
+      "file": "tools.test.ts",
+      "line": 1688,
+      "title": "should still fail when text is not found even with fuzzy matching",
+      "suites": [
+        "edit tool fuzzy matching"
+      ],
+      "definitionHash": "4b5e28b62d7b141d110eb0b0b312e6ecb8ffe216ae10d4b6354283eddc9ed57f",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "missing_duplicate_empty_and_overlapping_edits_are_rejected_atomically"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool fuzzy matching > should detect duplicates after fuzzy normalization",
+      "file": "tools.test.ts",
+      "line": 1700,
+      "title": "should detect duplicates after fuzzy normalization",
+      "suites": [
+        "edit tool fuzzy matching"
+      ],
+      "definitionHash": "d334624912a15f70173fd4d0bd8d89fb375d3d41b07082816b8687ad4d08b485",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "fuzzy_matching_prefers_exact_but_counts_fuzzy_equivalent_duplicates"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool fuzzy matching > should support fuzzy matching in multi-edit mode",
+      "file": "tools.test.ts",
+      "line": 1713,
+      "title": "should support fuzzy matching in multi-edit mode",
+      "suites": [
+        "edit tool fuzzy matching"
+      ],
+      "definitionHash": "3f607939bdc5ffe2a3616e4f996e3e45e0aca3cfa17cd9e22464b9ae73841057",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "fuzzy_multi_edit_preserves_untouched_bytes_and_patch_target_occurrences"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool fuzzy matching > should preserve the correct occurrence when fuzzy replacement equals a nearby line",
+      "file": "tools.test.ts",
+      "line": 1728,
+      "title": "should preserve the correct occurrence when fuzzy replacement equals a nearby line",
+      "suites": [
+        "edit tool fuzzy matching"
+      ],
+      "definitionHash": "c9fb25222b7f0f56f7552bfcaa8d1de91a076e7e5e9321f29ff548df162f99d8",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "fuzzy_multi_edit_preserves_untouched_bytes_and_patch_target_occurrences"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool fuzzy matching > should preserve untouched lines and produce an applicable patch for fuzzy multi-edits",
+      "file": "tools.test.ts",
+      "line": 1743,
+      "title": "should preserve untouched lines and produce an applicable patch for fuzzy multi-edits",
+      "suites": [
+        "edit tool fuzzy matching"
+      ],
+      "definitionHash": "7edd6befd1660ceaab73021caeb110659206e4926e083fc678db0cb357e6f7c9",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "fuzzy_multi_edit_preserves_untouched_bytes_and_patch_target_occurrences"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool CRLF handling > should match LF oldText against CRLF file content",
+      "file": "tools.test.ts",
+      "line": 1792,
+      "title": "should match LF oldText against CRLF file content",
+      "suites": [
+        "edit tool CRLF handling"
+      ],
+      "definitionHash": "e1287e1f4b5bc51451413df501b4e21c0b821d003e20455f46b9d14e52d29739",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "crlf_lf_bom_and_mixed_endings_follow_the_replaced_line"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool CRLF handling > should preserve CRLF line endings after edit",
+      "file": "tools.test.ts",
+      "line": 1805,
+      "title": "should preserve CRLF line endings after edit",
+      "suites": [
+        "edit tool CRLF handling"
+      ],
+      "definitionHash": "0526f8e6f75a6c3c773dec3b8aec067b18b7c3b91a1b0d5683679a9c69d1df0f",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "crlf_lf_bom_and_mixed_endings_follow_the_replaced_line"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool CRLF handling > should preserve LF line endings for LF files",
+      "file": "tools.test.ts",
+      "line": 1818,
+      "title": "should preserve LF line endings for LF files",
+      "suites": [
+        "edit tool CRLF handling"
+      ],
+      "definitionHash": "29b0388f182dc6ad318854911af2e411e536d8c146d132a1e1287d6db1456cb3",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "crlf_lf_bom_and_mixed_endings_follow_the_replaced_line"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool CRLF handling > should detect duplicates across CRLF/LF variants",
+      "file": "tools.test.ts",
+      "line": 1831,
+      "title": "should detect duplicates across CRLF/LF variants",
+      "suites": [
+        "edit tool CRLF handling"
+      ],
+      "definitionHash": "cab871e7fd7aebe3c0522eab4889f241ecb8d4642243eeb67e1fb1beafee1423",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "crlf_and_lf_variants_count_as_fuzzy_duplicates"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool CRLF handling > should preserve UTF-8 BOM after edit",
+      "file": "tools.test.ts",
+      "line": 1844,
+      "title": "should preserve UTF-8 BOM after edit",
+      "suites": [
+        "edit tool CRLF handling"
+      ],
+      "definitionHash": "e8614ec12262c904bb06b19ae4ee02497392fccff8de994f93da803af65b6c2d",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "crlf_lf_bom_and_mixed_endings_follow_the_replaced_line"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool CRLF handling > should preserve CRLF line endings and BOM in multi-edit mode",
+      "file": "tools.test.ts",
+      "line": 1857,
+      "title": "should preserve CRLF line endings and BOM in multi-edit mode",
+      "suites": [
+        "edit tool CRLF handling"
+      ],
+      "definitionHash": "6eb469c89a147b633e366cdd57dbc7baec535c62691df823a0aed0aa03c0793a",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "crlf_lf_bom_and_mixed_endings_follow_the_replaced_line"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool CRLF handling > should write CRLF for inserted lines in CRLF files",
+      "file": "tools.test.ts",
+      "line": 1873,
+      "title": "should write CRLF for inserted lines in CRLF files",
+      "suites": [
+        "edit tool CRLF handling"
+      ],
+      "definitionHash": "982f74c0b82afe8099cdfccf53934f066fa4fe96d3b7b4fef0395d4c5d4c5697",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "crlf_lf_bom_and_mixed_endings_follow_the_replaced_line"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool CRLF handling > should write LF for inserted lines in LF files",
+      "file": "tools.test.ts",
+      "line": 1885,
+      "title": "should write LF for inserted lines in LF files",
+      "suites": [
+        "edit tool CRLF handling"
+      ],
+      "definitionHash": "9d3ccded21ba9662bd19ff76390d0f963510f4c7d3e4150340c1718aac7d1b5d",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "crlf_lf_bom_and_mixed_endings_follow_the_replaced_line"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool CRLF handling > should keep CRLF lines when the first line ends with LF",
+      "file": "tools.test.ts",
+      "line": 1898,
+      "title": "should keep CRLF lines when the first line ends with LF",
+      "suites": [
+        "edit tool CRLF handling"
+      ],
+      "definitionHash": "27c530ad5296e78169bdbbe1ee1c24ad9ac913aa79838a12b512be31f73e4c13",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "crlf_lf_bom_and_mixed_endings_follow_the_replaced_line"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool CRLF handling > should keep LF lines when the first line ends with CRLF",
+      "file": "tools.test.ts",
+      "line": 1911,
+      "title": "should keep LF lines when the first line ends with CRLF",
+      "suites": [
+        "edit tool CRLF handling"
+      ],
+      "definitionHash": "6443492794a5880de8b660863d3ed74de645343199cb03b820d6d85ce2d4f99c",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "crlf_lf_bom_and_mixed_endings_follow_the_replaced_line"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool CRLF handling > should keep a lone CR in an untouched line",
+      "file": "tools.test.ts",
+      "line": 1921,
+      "title": "should keep a lone CR in an untouched line",
+      "suites": [
+        "edit tool CRLF handling"
+      ],
+      "definitionHash": "55384b2913a80d54faea0104f222a64c4c7e6af219cefa5599e83d86f134493d",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "crlf_lf_bom_and_mixed_endings_follow_the_replaced_line"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool CRLF handling > should give inserted lines the line ending of the line they replace in multi-edit mode",
+      "file": "tools.test.ts",
+      "line": 1931,
+      "title": "should give inserted lines the line ending of the line they replace in multi-edit mode",
+      "suites": [
+        "edit tool CRLF handling"
+      ],
+      "definitionHash": "517713c2db26652567c82a09e74c86d849cc195af057ca8f5b142db1e6d09a50",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "crlf_lf_bom_and_mixed_endings_follow_the_replaced_line"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool CRLF handling > should keep untouched line endings when fuzzy matching widens the edit to whole lines",
+      "file": "tools.test.ts",
+      "line": 1947,
+      "title": "should keep untouched line endings when fuzzy matching widens the edit to whole lines",
+      "suites": [
+        "edit tool CRLF handling"
+      ],
+      "definitionHash": "da4c47e87d5b20a8f004c2ee8a3d6e85415a5dbf3f1aa310d8b8d4ea4827823c",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "crlf_lf_bom_and_mixed_endings_follow_the_replaced_line"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool CRLF handling > should not merge a kept lone CR with a line feed after it",
+      "file": "tools.test.ts",
+      "line": 1957,
+      "title": "should not merge a kept lone CR with a line feed after it",
+      "suites": [
+        "edit tool CRLF handling"
+      ],
+      "definitionHash": "a641a22eebbec86cd6e3b67f521aeb00ff910ef86b66b5c87e6c703c12ff38b4",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "cr_lf_splice_seams_remain_two_logical_line_breaks_and_patch_applies"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool CRLF handling > should not merge an inserted CR line ending with a kept line feed after it",
+      "file": "tools.test.ts",
+      "line": 1975,
+      "title": "should not merge an inserted CR line ending with a kept line feed after it",
+      "suites": [
+        "edit tool CRLF handling"
+      ],
+      "definitionHash": "80375d143dc7f6bf6ad09b6344a32ddfcf2a9f27a58c6fbbd12cac2f12d3e3d6",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/src/lib.rs",
+          "name": "inserted_cr_and_kept_lf_remain_two_breaks_at_splice_seam"
+        }
+      ]
+    },
+    {
+      "id": "tools.test.ts::edit tool CRLF handling > should write content that normalizes to the diffed content for random mixed line endings",
+      "file": "tools.test.ts",
+      "line": 1982,
+      "title": "should write content that normalizes to the diffed content for random mixed line endings",
+      "suites": [
+        "edit tool CRLF handling"
+      ],
+      "definitionHash": "6eb26e1f37ec6d637c848eb8038d9928ec07f523794b1332b7eba1971c807bea",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "deterministic_random_mixed_endings_normalize_to_patch_result"
+        }
+      ]
+    },
+    {
+      "id": "read-streaming.test.ts::read tool streaming > gives the same output as the whole-file algorithm",
+      "file": "read-streaming.test.ts",
+      "line": 161,
+      "title": "gives the same output as the whole-file algorithm",
+      "suites": [
+        "read tool streaming"
+      ],
+      "definitionHash": "7ae1e638a2c31f288169909ff423319964f1d3097f8c472377fc6eba6a954c04",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-read/src/lib.rs",
+          "name": "streaming_matches_whole_file_output_ranges_bytes_and_utf8"
+        }
+      ]
+    },
+    {
+      "id": "read-streaming.test.ts::read tool streaming > keeps details key order, which session files serialize",
+      "file": "read-streaming.test.ts",
+      "line": 177,
+      "title": "keeps details key order, which session files serialize",
+      "suites": [
+        "read tool streaming"
+      ],
+      "definitionHash": "b5e4d796d297a32bb6313cec8f077e5e1df91054228615dc636b27185ab6150c",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-read/src/lib.rs",
+          "name": "streaming_details_keep_legacy_serialization_order"
+        }
+      ]
+    },
+    {
+      "id": "read-streaming.test.ts::read tool streaming > decodes multi-byte characters split across chunks and invalid UTF-8 like Buffer.toString",
+      "file": "read-streaming.test.ts",
+      "line": 184,
+      "title": "decodes multi-byte characters split across chunks and invalid UTF-8 like Buffer.toString",
+      "suites": [
+        "read tool streaming"
+      ],
+      "definitionHash": "24d0dd809e25aed7ed7cf6712d8086278460911713ec0aad9c12129b5a0a350c",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-read/src/lib.rs",
+          "name": "streaming_decoder_matches_lossy_whole_file_for_split_and_invalid_utf8"
+        }
+      ]
+    },
+    {
+      "id": "read-streaming.test.ts::read tool streaming > uses readFile for operations without createReadStream and for fractional or negative ranges",
+      "file": "read-streaming.test.ts",
+      "line": 196,
+      "title": "uses readFile for operations without createReadStream and for fractional or negative ranges",
+      "suites": [
+        "read tool streaming"
+      ],
+      "definitionHash": "b098ec686ca508afcfe596a9fe779beb870ba3ff7bac1a92cf7126ac6909f6bc",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-read/src/lib.rs",
+          "name": "numeric_ranges_follow_pi_line_slicing"
+        }
+      ],
+      "reason": "Rust has no pluggable JS ReadOperations branch; the test exercises the same observable fractional/negative Array.slice-compatible fallback on a real file."
+    },
+    {
+      "id": "read-streaming.test.ts::read tool streaming > reads local files through the default stream",
+      "file": "read-streaming.test.ts",
+      "line": 217,
+      "title": "reads local files through the default stream",
+      "suites": [
+        "read tool streaming"
+      ],
+      "definitionHash": "73d837ba49a1818a878965ca477f0880504fcd650314c2a3074d43685ca9220d",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-read/src/lib.rs",
+          "name": "relative_reads_use_the_tool_context_cwd"
+        },
+        {
+          "path": "plugins/tools/pi-plugin-read/src/lib.rs",
+          "name": "nonexistent_and_out_of_range_files_report_legacy_errors"
+        }
+      ],
+      "reason": "Together these execute the production local stream for text and assert directory reads fail rather than being treated as text."
+    },
+    {
+      "id": "read-streaming.test.ts::read tool streaming > reads a local file up to its size when opened, like fs.readFile",
+      "file": "read-streaming.test.ts",
+      "line": 236,
+      "title": "reads a local file up to its size when opened, like fs.readFile",
+      "suites": [
+        "read tool streaming"
+      ],
+      "definitionHash": "01fa7513139349cc84cfd56f197fe54b31a945440783eb8983c1831c8feca2b1",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-read/src/lib.rs",
+          "name": "snapshot_length_excludes_bytes_appended_after_open"
+        }
+      ]
+    },
+    {
+      "id": "read-streaming.test.ts::read tool streaming > rejects without an unhandled stream error when aborted while opening a local file",
+      "file": "read-streaming.test.ts",
+      "line": 253,
+      "title": "rejects without an unhandled stream error when aborted while opening a local file",
+      "suites": [
+        "read tool streaming"
+      ],
+      "definitionHash": "be34fcfa3d932d95704b301d24e122e97f2ab63914241ca0aae7069d3c61a85a",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-read/src/lib.rs",
+          "name": "abort_before_open_wins_over_filesystem_errors"
+        },
+        {
+          "path": "plugins/tools/pi-plugin-read/src/lib.rs",
+          "name": "abort_during_open_cancels_and_drops_the_open_operation"
+        }
+      ],
+      "reason": "Rust has no Node EventEmitter unhandled-error channel; the equivalent regression deterministically proves abort wins and the in-flight open future/resource guard is dropped."
+    },
+    {
+      "id": "read-streaming.test.ts::read tool streaming > stops reading a local file when aborted mid-read",
+      "file": "read-streaming.test.ts",
+      "line": 278,
+      "title": "stops reading a local file when aborted mid-read",
+      "suites": [
+        "read tool streaming"
+      ],
+      "definitionHash": "563c98cbfb04817b479f619d460a0207265eeffa94e53643fd5f728be7362c08",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-read/src/lib.rs",
+          "name": "abort_midstream_stops_consumption_and_drops_the_reader"
+        }
+      ]
+    },
+    {
+      "id": "read-streaming.test.ts::read tool streaming > reads a 200 MB line with a 64 MB heap",
+      "file": "read-streaming.test.ts",
+      "line": 300,
+      "title": "reads a 200 MB line with a 64 MB heap",
+      "suites": [
+        "read tool streaming"
+      ],
+      "definitionHash": "3c92666feb261c1cc8ba434a7af0ee2c2419ad9220a8e17407de68f4ad7b1757",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-read/tests/streaming_resource.rs",
+          "name": "reads_sparse_200mb_single_line_in_a_memory_capped_child"
+        }
+      ],
+      "reason": "A child allocator cap makes a whole-file 200 MiB allocation fail deterministically; the sparse-file read must return exact 200.0MB/truncation metadata within 32 MiB of its post-start baseline."
+    },
+    {
+      "id": "read-streaming.test.ts::read tool streaming > stops consuming the stream when aborted",
+      "file": "read-streaming.test.ts",
+      "line": 324,
+      "title": "stops consuming the stream when aborted",
+      "suites": [
+        "read tool streaming"
+      ],
+      "definitionHash": "b0f2aec9cd047f59b95932f6fadc7eabb2a0dc196dc545861f1f194bce15a507",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-read/src/lib.rs",
+          "name": "abort_midstream_stops_consumption_and_drops_the_reader"
+        }
+      ]
+    },
+    {
+      "id": "path-utils.test.ts::path-utils > expandPath > should expand ~ to home directory",
+      "file": "path-utils.test.ts",
+      "line": 9,
+      "title": "should expand ~ to home directory",
+      "suites": [
+        "path-utils",
+        "expandPath"
+      ],
+      "definitionHash": "585fef69461d9130b6fb80ceb7d7df5a0ade57f8052bfd2c5742363fa5edf287",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-tool-support/src/lib.rs",
+          "name": "leading_tilde_expands_to_the_user_home"
+        }
+      ]
+    },
+    {
+      "id": "path-utils.test.ts::path-utils > expandPath > should expand ~/path to home directory",
+      "file": "path-utils.test.ts",
+      "line": 14,
+      "title": "should expand ~/path to home directory",
+      "suites": [
+        "path-utils",
+        "expandPath"
+      ],
+      "definitionHash": "c3f1637d78ee6a427209a9fbd5353a77b91314bf05902ae68370e08e12c5adb2",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-tool-support/src/lib.rs",
+          "name": "leading_tilde_expands_to_the_user_home"
+        }
+      ]
+    },
+    {
+      "id": "path-utils.test.ts::path-utils > expandPath > should keep tilde-prefixed filenames literal",
+      "file": "path-utils.test.ts",
+      "line": 19,
+      "title": "should keep tilde-prefixed filenames literal",
+      "suites": [
+        "path-utils",
+        "expandPath"
+      ],
+      "definitionHash": "b3b2cf7dc4eed7c782754bb51da20673688f0f11a8fec11d2418424e9d08f70a",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-tool-support/src/lib.rs",
+          "name": "tilde_prefixed_filenames_stay_literal_and_resolve_from_cwd"
+        }
+      ]
+    },
+    {
+      "id": "path-utils.test.ts::path-utils > expandPath > should normalize Unicode spaces",
+      "file": "path-utils.test.ts",
+      "line": 24,
+      "title": "should normalize Unicode spaces",
+      "suites": [
+        "path-utils",
+        "expandPath"
+      ],
+      "definitionHash": "7b666d1e2fec120d5a9741c7ca70d2dca8b01605fc85d06b53b40645f94bc799",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-tool-support/src/lib.rs",
+          "name": "tool_path_input_strips_at_and_normalizes_unicode_spaces"
+        }
+      ]
+    },
+    {
+      "id": "path-utils.test.ts::path-utils > resolveToCwd > should resolve absolute paths as-is",
+      "file": "path-utils.test.ts",
+      "line": 33,
+      "title": "should resolve absolute paths as-is",
+      "suites": [
+        "path-utils",
+        "resolveToCwd"
+      ],
+      "definitionHash": "069ceb07f34ccfa22b802d7fe9916b9e5cd38ccd0de4dea9f6f2010974de50dd",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-tool-support/src/lib.rs",
+          "name": "absolute_paths_are_not_confined_to_the_working_directory"
+        }
+      ]
+    },
+    {
+      "id": "path-utils.test.ts::path-utils > resolveToCwd > should resolve relative paths against cwd",
+      "file": "path-utils.test.ts",
+      "line": 39,
+      "title": "should resolve relative paths against cwd",
+      "suites": [
+        "path-utils",
+        "resolveToCwd"
+      ],
+      "definitionHash": "458f215de23ab99f6f03b38bf7878f0690749c289e61aa87212c56ff236ecb63",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-tool-support/src/lib.rs",
+          "name": "relative_paths_resolve_from_cwd"
+        }
+      ]
+    },
+    {
+      "id": "path-utils.test.ts::path-utils > resolveToCwd > should resolve tilde-prefixed filenames against cwd",
+      "file": "path-utils.test.ts",
+      "line": 44,
+      "title": "should resolve tilde-prefixed filenames against cwd",
+      "suites": [
+        "path-utils",
+        "resolveToCwd"
+      ],
+      "definitionHash": "c4d1fef032481d018806b793377d2bd2b05bff9c2a20305cfc1d6472c1c242b4",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-tool-support/src/lib.rs",
+          "name": "tilde_prefixed_filenames_stay_literal_and_resolve_from_cwd"
+        }
+      ]
+    },
+    {
+      "id": "path-utils.test.ts::path-utils > resolveReadPath > should resolve existing file path",
+      "file": "path-utils.test.ts",
+      "line": 71,
+      "title": "should resolve existing file path",
+      "suites": [
+        "path-utils",
+        "resolveReadPath"
+      ],
+      "definitionHash": "cddab8f185bbf411f951658ae4fb316d0a6d5324f4bf9bef9e4387e02ee45d25",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-tool-support/src/lib.rs",
+          "name": "read_path_prefers_an_existing_path"
+        }
+      ]
+    },
+    {
+      "id": "path-utils.test.ts::path-utils > resolveReadPath > should handle NFC vs NFD Unicode normalization (macOS filenames with accents)",
+      "file": "path-utils.test.ts",
+      "line": 79,
+      "title": "should handle NFC vs NFD Unicode normalization (macOS filenames with accents)",
+      "suites": [
+        "path-utils",
+        "resolveReadPath"
+      ],
+      "definitionHash": "0700b9d9ccf0749472cfd8f066db808f300758635f41544ec61fe20ea785f518",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-tool-support/src/lib.rs",
+          "name": "read_path_resolves_nfc_input_to_an_nfd_filename"
+        }
+      ]
+    },
+    {
+      "id": "path-utils.test.ts::path-utils > resolveReadPath > should handle curly quotes vs straight quotes (macOS filenames)",
+      "file": "path-utils.test.ts",
+      "line": 107,
+      "title": "should handle curly quotes vs straight quotes (macOS filenames)",
+      "suites": [
+        "path-utils",
+        "resolveReadPath"
+      ],
+      "definitionHash": "5a64a5796e546eca6b7d85bb8e410ffc57733b8da2b8c3ecc7b79cadf91cc759",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-tool-support/src/lib.rs",
+          "name": "read_path_resolves_straight_quote_to_a_curly_quote_filename"
+        }
+      ]
+    },
+    {
+      "id": "path-utils.test.ts::path-utils > resolveReadPath > should handle combined NFC + curly quote (French macOS screenshots)",
+      "file": "path-utils.test.ts",
+      "line": 127,
+      "title": "should handle combined NFC + curly quote (French macOS screenshots)",
+      "suites": [
+        "path-utils",
+        "resolveReadPath"
+      ],
+      "definitionHash": "7ce5646ba16a0e7c78d45cdb7e93e0632a488759f908ba116f621f67cb1edef1",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-tool-support/src/lib.rs",
+          "name": "read_path_resolves_combined_nfd_and_curly_quote_filename"
+        }
+      ]
+    },
+    {
+      "id": "path-utils.test.ts::path-utils > resolveReadPath > should handle macOS screenshot AM/PM variant with narrow no-break space",
+      "file": "path-utils.test.ts",
+      "line": 144,
+      "title": "should handle macOS screenshot AM/PM variant with narrow no-break space",
+      "suites": [
+        "path-utils",
+        "resolveReadPath"
+      ],
+      "definitionHash": "e7b8087f0d0641ed60b3033363200311a439054bafa1db2003be877094fa1a28",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-tool-support/src/lib.rs",
+          "name": "read_path_uses_macos_screenshot_space_variants_case_insensitively"
+        }
+      ]
+    },
+    {
+      "id": "path-utils.test.ts::path-utils > resolveReadPath > should handle macOS screenshot lowercase am/pm variant (en_AU locale)",
+      "file": "path-utils.test.ts",
+      "line": 159,
+      "title": "should handle macOS screenshot lowercase am/pm variant (en_AU locale)",
+      "suites": [
+        "path-utils",
+        "resolveReadPath"
+      ],
+      "definitionHash": "c0add01c319d05b347c3a9bf30599a60be25f504ce59e6dc88fdd2667339ad44",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-tool-support/src/lib.rs",
+          "name": "read_path_uses_macos_screenshot_space_variants_case_insensitively"
+        }
+      ]
+    },
+    {
+      "id": "truncate-surrogates.test.ts::surrogate-safe slicing > truncateLine does not cut an emoji in half at the limit",
+      "file": "truncate-surrogates.test.ts",
+      "line": 12,
+      "title": "truncateLine does not cut an emoji in half at the limit",
+      "suites": [
+        "surrogate-safe slicing"
+      ],
+      "definitionHash": "1ee805631300b0ca5afab2ab8b436aee3a7a5873cb3f34ec1e6676140d03b19b",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-grep/src/lib.rs",
+          "name": "public_grep_truncation_drops_or_keeps_complete_surrogate_pairs_at_utf16_boundary"
+        }
+      ],
+      "reason": "Covered through public grep output: 499 ASCII UTF-16 units before an emoji drops the whole pair and appends the truncation suffix."
+    },
+    {
+      "id": "truncate-surrogates.test.ts::surrogate-safe slicing > truncateLine keeps an emoji that ends exactly at the limit",
+      "file": "truncate-surrogates.test.ts",
+      "line": 20,
+      "title": "truncateLine keeps an emoji that ends exactly at the limit",
+      "suites": [
+        "surrogate-safe slicing"
+      ],
+      "definitionHash": "34ef5b9f425526db3086a510df433aa0e74a61c3ebd71afc86c5a3e727c8147b",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-grep/src/lib.rs",
+          "name": "public_grep_truncation_drops_or_keeps_complete_surrogate_pairs_at_utf16_boundary"
+        }
+      ],
+      "reason": "Covered through public grep output: 498 ASCII UTF-16 units plus the two-unit emoji are retained exactly before the truncation suffix."
+    },
+    {
+      "id": "truncate-surrogates.test.ts::surrogate-safe slicing > sliceHead and sliceTail never split a pair",
+      "file": "truncate-surrogates.test.ts",
+      "line": 25,
+      "title": "sliceHead and sliceTail never split a pair",
+      "suites": [
+        "surrogate-safe slicing"
+      ],
+      "definitionHash": "54281f172beb029a3d7501ffbdc4416b55879e654f5c267305751316ce4963f3",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "This directly tests a JavaScript helper that indexes valid emoji text by UTF-16 code units. Rust str is indexed only at UTF-8 character boundaries and exposes no sliceHead/sliceTail code-unit API; observable tool Unicode behavior is covered by the mapped streaming/truncation tests."
+    },
+    {
+      "id": "truncate-surrogates.test.ts::surrogate-safe slicing > sliceHead and sliceTail match slice on text without surrogates",
+      "file": "truncate-surrogates.test.ts",
+      "line": 39,
+      "title": "sliceHead and sliceTail match slice on text without surrogates",
+      "suites": [
+        "surrogate-safe slicing"
+      ],
+      "definitionHash": "46cb95fad9a1a8beff212e2458bc4b18a08bcc30639e6f54d4b61156f0996003",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "This is a unit contract for JavaScript's UTF-16 sliceHead/sliceTail compatibility with String.slice on ordinary text. Rust exposes no corresponding UTF-16 code-unit helper API; tool-level valid-Unicode behavior is exercised above."
+    },
+    {
+      "id": "edit-tool-legacy-input.test.ts::edit tool prepareArguments > keeps legacy fields out of the public schema",
+      "file": "edit-tool-legacy-input.test.ts",
+      "line": 21,
+      "title": "keeps legacy fields out of the public schema",
+      "suites": [
+        "edit tool prepareArguments"
+      ],
+      "definitionHash": "1228026e16511cca49f27ac2a3e91c07fe770bd4f25958846b136eb57e824ba9",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/src/lib.rs",
+          "name": "schema_exposes_only_the_current_edits_shape"
+        }
+      ]
+    },
+    {
+      "id": "edit-tool-legacy-input.test.ts::edit tool prepareArguments > folds top-level oldText/newText into edits",
+      "file": "edit-tool-legacy-input.test.ts",
+      "line": 27,
+      "title": "folds top-level oldText/newText into edits",
+      "suites": [
+        "edit tool prepareArguments"
+      ],
+      "definitionHash": "be0c894a27e860e4c886dc82b9dfefde6699f39f7f959d3a3bb4e6664c13e341",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/src/lib.rs",
+          "name": "legacy_fields_are_converted_when_edits_are_absent"
+        }
+      ]
+    },
+    {
+      "id": "edit-tool-legacy-input.test.ts::edit tool prepareArguments > appends legacy replacement to existing edits",
+      "file": "edit-tool-legacy-input.test.ts",
+      "line": 40,
+      "title": "appends legacy replacement to existing edits",
+      "suites": [
+        "edit tool prepareArguments"
+      ],
+      "definitionHash": "e6cf9d033296d2e5b480a5631e13ca43a353cf0f499b40d07a588b810b5a4fd1",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/src/lib.rs",
+          "name": "legacy_fields_are_appended_to_explicit_edits_like_pi"
+        }
+      ]
+    },
+    {
+      "id": "edit-tool-legacy-input.test.ts::edit tool prepareArguments > passes through valid input unchanged",
+      "file": "edit-tool-legacy-input.test.ts",
+      "line": 57,
+      "title": "passes through valid input unchanged",
+      "suites": [
+        "edit tool prepareArguments"
+      ],
+      "definitionHash": "ce46cc3bd839f2160f1f5aa4e7cc37b1e0f66e8362777e904157c25945a4e209",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "prepare_arguments_matches_legacy_and_stringified_input_contract"
+        }
+      ]
+    },
+    {
+      "id": "edit-tool-legacy-input.test.ts::edit tool prepareArguments > passes through non-object input unchanged",
+      "file": "edit-tool-legacy-input.test.ts",
+      "line": 67,
+      "title": "passes through non-object input unchanged",
+      "suites": [
+        "edit tool prepareArguments"
+      ],
+      "definitionHash": "7d968f6d57ca786b6487f990438bfb99b6cc2ce0d20172511b076a2b8b8de3ea",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "prepare_arguments_matches_legacy_and_stringified_input_contract"
+        }
+      ]
+    },
+    {
+      "id": "edit-tool-legacy-input.test.ts::edit tool prepareArguments > prepared args execute correctly",
+      "file": "edit-tool-legacy-input.test.ts",
+      "line": 74,
+      "title": "prepared args execute correctly",
+      "suites": [
+        "edit tool prepareArguments"
+      ],
+      "definitionHash": "3278233ed0aa144063f04d689a4cae6d33dfdd145a258336a3968569bcc22c92",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "prepare_arguments_matches_legacy_and_stringified_input_contract"
+        }
+      ]
+    },
+    {
+      "id": "edit-tool-legacy-input.test.ts::edit tool stringified edits > parses edits from a JSON string",
+      "file": "edit-tool-legacy-input.test.ts",
+      "line": 93,
+      "title": "parses edits from a JSON string",
+      "suites": [
+        "edit tool stringified edits"
+      ],
+      "definitionHash": "f2f2e60a91e2d1b174cf3352a7e928fa493842ad6de5b0af89d6eb2531f20681",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "prepare_arguments_matches_legacy_and_stringified_input_contract"
+        }
+      ]
+    },
+    {
+      "id": "edit-tool-legacy-input.test.ts::edit tool stringified edits > leaves edits alone when the string is not valid JSON",
+      "file": "edit-tool-legacy-input.test.ts",
+      "line": 105,
+      "title": "leaves edits alone when the string is not valid JSON",
+      "suites": [
+        "edit tool stringified edits"
+      ],
+      "definitionHash": "f7fd07bc865b50cefc5e80dd9f0f30c89f6ac368fbab439da560fa77a1815d63",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "prepare_arguments_matches_legacy_and_stringified_input_contract"
+        }
+      ]
+    },
+    {
+      "id": "edit-tool-diff-before-write.test.ts::edit tool diff before write > should compute the diff before writing, so a diff failure leaves the file unchanged",
+      "file": "edit-tool-diff-before-write.test.ts",
+      "line": 15,
+      "title": "should compute the diff before writing, so a diff failure leaves the file unchanged",
+      "suites": [
+        "edit tool diff before write"
+      ],
+      "definitionHash": "a2f02f6688e63bb329eb07c0a084f30f1cca5d37154afbdb4d552dd309064d6c",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/src/lib.rs",
+          "name": "diff_planning_failure_does_not_call_the_writer_or_mutate_the_file"
+        }
+      ]
+    },
+    {
+      "id": "edit-diff-window.test.ts::generateEditDiff > matches the whole-file diff and patch when lines are distinct",
+      "file": "edit-diff-window.test.ts",
+      "line": 55,
+      "title": "matches the whole-file diff and patch when lines are distinct",
+      "suites": [
+        "generateEditDiff"
+      ],
+      "definitionHash": "b71b9766694040e85ec3bd5e7a900994d4a0f4fd94ad4e6a33c58cca7fba8d86",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/src/lib.rs",
+          "name": "windowed_diff_matches_whole_file_for_two_thousand_distinct_line_cases"
+        }
+      ]
+    },
+    {
+      "id": "edit-diff-window.test.ts::generateEditDiff > produces a patch that applies when lines repeat",
+      "file": "edit-diff-window.test.ts",
+      "line": 70,
+      "title": "produces a patch that applies when lines repeat",
+      "suites": [
+        "generateEditDiff"
+      ],
+      "definitionHash": "72d4238cd96b96d9457993c519d1f3b7e4229a5df93488767dc68ce1ac233787",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/src/lib.rs",
+          "name": "windowed_patch_applies_for_two_thousand_repeated_line_cases"
+        }
+      ]
+    },
+    {
+      "id": "edit-diff-window.test.ts::generateEditDiff > handles a replacement of many lines",
+      "file": "edit-diff-window.test.ts",
+      "line": 80,
+      "title": "handles a replacement of many lines",
+      "suites": [
+        "generateEditDiff"
+      ],
+      "definitionHash": "899ec6e1a6237c76668478f7c17a95e99edf65f5ba09f6725d2764b4b614865e",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/src/lib.rs",
+          "name": "windowed_diff_handles_a_replacement_of_one_hundred_fifty_thousand_lines"
+        }
+      ]
+    },
+    {
+      "id": "edit-diff-window.test.ts::generateEditDiff > diffs a small change in a 20 MB file with a 96 MB heap",
+      "file": "edit-diff-window.test.ts",
+      "line": 87,
+      "title": "diffs a small change in a 20 MB file with a 96 MB heap",
+      "suites": [
+        "generateEditDiff"
+      ],
+      "definitionHash": "f2fb897d97181a8e99da26b58cf271f42c214a40cb7ad4c411128de0247c9aaa",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/resource_limit.rs",
+          "name": "edits_twenty_megabyte_file_under_ninety_six_mib_live_allocation_budget"
+        }
+      ]
+    },
+    {
+      "id": "file-mutation-queue.test.ts::withFileMutationQueue > serializes operations for the same file",
+      "file": "file-mutation-queue.test.ts",
+      "line": 38,
+      "title": "serializes operations for the same file",
+      "suites": [
+        "withFileMutationQueue"
+      ],
+      "definitionHash": "2f0bb13696ca228668bf62cf0b6e5f3d42a7ea29ea4f50bfe666c4941bd3fe8c",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-tool-support/src/file_mutation.rs",
+          "name": "same_file_operations_run_in_registration_order"
+        }
+      ]
+    },
+    {
+      "id": "file-mutation-queue.test.ts::withFileMutationQueue > allows different files to proceed in parallel",
+      "file": "file-mutation-queue.test.ts",
+      "line": 56,
+      "title": "allows different files to proceed in parallel",
+      "suites": [
+        "withFileMutationQueue"
+      ],
+      "definitionHash": "260bd658d3c68a0edfeb055d7d93a6766be339ae25729ab0e70376c6c721d3df",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-tool-support/src/file_mutation.rs",
+          "name": "same_file_waits_through_caller_cancellation_and_other_files_do_not"
+        }
+      ]
+    },
+    {
+      "id": "file-mutation-queue.test.ts::withFileMutationQueue > uses the same queue for symlink aliases",
+      "file": "file-mutation-queue.test.ts",
+      "line": 77,
+      "title": "uses the same queue for symlink aliases",
+      "suites": [
+        "withFileMutationQueue"
+      ],
+      "definitionHash": "90402d8d548c91686a9572237321a64275c0aebb3acecbaaa61c51dc5e1f6bb1",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-tool-support/src/file_mutation.rs",
+          "name": "symlink_aliases_share_the_mutation_queue"
+        }
+      ]
+    },
+    {
+      "id": "file-mutation-queue.test.ts::built-in edit and write tools > preserves both parallel edits on the same file",
+      "file": "file-mutation-queue.test.ts",
+      "line": 102,
+      "title": "preserves both parallel edits on the same file",
+      "suites": [
+        "built-in edit and write tools"
+      ],
+      "definitionHash": "dce4f3abeb0de93755e915ca17c16873a6e8a912e80bad951ea70c0226e05b2f",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "parallel_real_edits_on_one_file_preserve_both_changes"
+        }
+      ]
+    },
+    {
+      "id": "file-mutation-queue.test.ts::built-in edit and write tools > shares the queue between edit and write",
+      "file": "file-mutation-queue.test.ts",
+      "line": 131,
+      "title": "shares the queue between edit and write",
+      "suites": [
+        "built-in edit and write tools"
+      ],
+      "definitionHash": "166d98224c72ed2bce579f342e2a622d3b03759225d02688a8a546dee033a993",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "real_write_then_edit_share_one_ordered_mutation_queue"
+        }
+      ]
+    },
+    {
+      "id": "file-mutation-queue.test.ts::built-in edit and write tools > keeps write queue locked while an aborted write is still in flight",
+      "file": "file-mutation-queue.test.ts",
+      "line": 176,
+      "title": "keeps write queue locked while an aborted write is still in flight",
+      "suites": [
+        "built-in edit and write tools"
+      ],
+      "definitionHash": "0b43cc4d9f79faf1f290e1c7f990289cff28dabf4755728fb47ad8419728268d",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-tool-support/src/file_mutation.rs",
+          "name": "same_file_waits_through_caller_cancellation_and_other_files_do_not"
+        },
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "cancelled_real_write_keeps_its_queue_position_before_following_edit"
+        }
+      ]
+    },
+    {
+      "id": "file-mutation-queue.test.ts::built-in edit and write tools > keeps edit queue locked while an aborted edit write is still in flight",
+      "file": "file-mutation-queue.test.ts",
+      "line": 221,
+      "title": "keeps edit queue locked while an aborted edit write is still in flight",
+      "suites": [
+        "built-in edit and write tools"
+      ],
+      "definitionHash": "252730eb9d1da68acb7218188dd62063ce98ae1a728f6629f61e73eec716adf0",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-tool-support/src/file_mutation.rs",
+          "name": "same_file_waits_through_caller_cancellation_and_other_files_do_not"
+        },
+        {
+          "path": "plugins/tools/pi-plugin-edit/tests/legacy_parity.rs",
+          "name": "cancelled_real_edit_keeps_its_queue_position_before_following_write"
+        }
+      ]
+    },
+    {
+      "id": "grep-operations.test.ts::GrepOperations > accepts a deprecated $name readFile hook without calling it",
+      "file": "grep-operations.test.ts",
+      "line": 16,
+      "title": "accepts a deprecated $name readFile hook without calling it",
+      "suites": [
+        "GrepOperations"
+      ],
+      "definitionHash": "e25fce9cdf8cec0a98f0c0e2f02b59d8dc98c8111a08687bc2e9ca6baab15a29",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "Rust deliberately exposes no JavaScript GrepOperations or deprecated readFile hook. grep-searcher emits matches and context from the same decoded search stream; the listed public-result regressions cover the equivalent context behavior without inventing an adapter API. Related Rust regressions (not substitutes for this absent adapter API): plugins/tools/pi-plugin-grep/src/lib.rs::prints_overlapping_context_once_and_keeps_last_match_trailing_context, plugins/tools/pi-plugin-grep/src/lib.rs::decodes_utf16_context_and_lossy_utf8_search_rows."
+    },
+    {
+      "id": "grep-operations.test.ts::GrepOperations > allows custom operations without a readFile hook",
+      "file": "grep-operations.test.ts",
+      "line": 30,
+      "title": "allows custom operations without a readFile hook",
+      "suites": [
+        "GrepOperations"
+      ],
+      "definitionHash": "ec422b861e41bdc67601dcf166406943a9c6023f338ead04bb0276d3228108f2",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "Rust's built-in grep is intentionally an in-process implementation with no JavaScript custom-operations seam. Context works without any readFile callback or external rg process, as covered by the listed tests. Related Rust regressions (not substitutes for this absent adapter API): plugins/tools/pi-plugin-grep/src/lib.rs::prints_overlapping_context_once_and_keeps_last_match_trailing_context, plugins/tools/pi-plugin-grep/src/lib.rs::ignores_ripgrep_configuration_and_external_binary_state."
+    },
+    {
+      "id": "find-abort-before-spawn.test.ts::find abort before fd starts > does not start fd after an abort during the .git lookup",
+      "file": "find-abort-before-spawn.test.ts",
+      "line": 38,
+      "title": "does not start fd after an abort during the .git lookup",
+      "suites": [
+        "find abort before fd starts"
+      ],
+      "definitionHash": "aa5e28c19400b79888ec569ef0d0e657496c6df3d7ebdb2661222f5cdbb6c0eb",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "Rust intentionally has no fd child process or asynchronous JavaScript pathExists hook to observe during .git lookup. The equivalent cancellation boundary rejects before glob/filesystem traversal, ancestor lookup checks the signal on every step, and the external-fd independence test proves no fd executable is started. Related Rust regressions (not substitutes for this absent adapter API): plugins/tools/pi-plugin-find/src/lib.rs::pre_aborted_find_returns_before_glob_or_filesystem_work, plugins/tools/pi-plugin-find/src/lib.rs::is_independent_of_external_fd_binary_configuration."
+    },
+    {
+      "id": "bash-executor-truncation.test.ts::user bash output truncation (#10164) > reports discarded chunks when cancelled=%s",
+      "file": "bash-executor-truncation.test.ts",
+      "line": 14,
+      "title": "reports discarded chunks when cancelled=%s",
+      "suites": [
+        "user bash output truncation (#10164)"
+      ],
+      "definitionHash": "d00866b996d1f519dd07147496d000056fdf6f938bbeb90b4f4caf715806efbe",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/operations.rs",
+          "name": "discarded_chunks_are_persisted_for_success_and_cancellation"
+        }
+      ],
+      "reason": "Covers the executor result, retained chunk tail, cancellation flag, and complete persisted bytes. The separate bashExecution-to-text marker is owned by pi-session and already exists outside the permitted edit scope."
+    },
+    {
+      "id": "bash-executor-truncation.test.ts::user bash output truncation (#10164) > does not mark short output as truncated",
+      "file": "bash-executor-truncation.test.ts",
+      "line": 48,
+      "title": "does not mark short output as truncated",
+      "suites": [
+        "user bash output truncation (#10164)"
+      ],
+      "definitionHash": "c49bca85cb7018c0c45dd39e9db927ec842c9dcfb0cdec1008e73b6ba1d2edb6",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/operations.rs",
+          "name": "short_custom_output_is_not_truncated_or_persisted"
+        }
+      ]
+    },
+    {
+      "id": "exec-utf8-chunks.test.ts::discards pending %s UTF-8 bytes when either stream exceeds the cap",
+      "file": "exec-utf8-chunks.test.ts",
+      "line": 15,
+      "title": "discards pending %s UTF-8 bytes when either stream exceeds the cap",
+      "suites": [],
+      "definitionHash": "c775faaff3c271ce5ba640bda0d27c7d28f74e2b467f0c345681ed9d6622f185",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "Targets legacy core/exec.ts: a generic extension helper with separate stdout/stderr decoders and a caller-selected combined maxBuffer hard cap. Built-in pi-shell uses a merged stream, fixed model-tail limit, and complete-output file instead of this API."
+    },
+    {
+      "id": "exec-runtime-limit.test.ts::executes with the default cap when the runtime string limit is below 256 MiB",
+      "file": "exec-runtime-limit.test.ts",
+      "line": 15,
+      "title": "executes with the default cap when the runtime string limit is below 256 MiB",
+      "suites": [],
+      "definitionHash": "c5b72470c286460e7b50b69da90b74088c267beb20d706870f3d0e9fe27527b2",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "Node runtime MAX_STRING_LENGTH and execCommand's 256 MiB extension-helper cap have no Rust built-in shell analogue."
+    },
+    {
+      "id": "exec-runtime-limit.test.ts::still rejects an explicit cap above the runtime string limit",
+      "file": "exec-runtime-limit.test.ts",
+      "line": 21,
+      "title": "still rejects an explicit cap above the runtime string limit",
+      "suites": [],
+      "definitionHash": "5e240c6d0f28674ff5ad1051eaf8f32c305cb24d31664575bd281fab80ca6b6c",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "Rust built-in shell has no caller-supplied maxBuffer or Node MAX_STRING_LENGTH constraint."
+    },
+    {
+      "id": "exec.test.ts::execCommand > reports spawn errors in stderr",
+      "file": "exec.test.ts",
+      "line": 7,
+      "title": "reports spawn errors in stderr",
+      "suites": [
+        "execCommand"
+      ],
+      "definitionHash": "644b78391b192e8a880332a7a4bfd5449f57976259090b68dc1154f0f1ab19a2",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "Legacy execCommand resolves spawn failure as an ExecResult stderr string; built-in Rust shell correctly returns ShellError/ToolError instead. Its error contract is tested separately by configured_spawn_error_includes_errno_name."
+    },
+    {
+      "id": "exec.test.ts::execCommand > keeps stderr empty when a command exits silently",
+      "file": "exec.test.ts",
+      "line": 19,
+      "title": "keeps stderr empty when a command exits silently",
+      "suites": [
+        "execCommand"
+      ],
+      "definitionHash": "559ae9a37761abd68682c03d70de73ff1ad35fb1f4e6137060ffa5183a413407",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/lib.rs",
+          "name": "silent_exit_one_has_no_synthetic_output_or_failure_flags"
+        }
+      ],
+      "reason": "A real shell exit 1 produces empty combined output and no callback chunks on either stream; cancelled, timed_out and truncated are all false."
+    },
+    {
+      "id": "exec.test.ts::execCommand > rejects invalid maxBuffer %s instead of attempting execution",
+      "file": "exec.test.ts",
+      "line": 26,
+      "title": "rejects invalid maxBuffer %s instead of attempting execution",
+      "suites": [
+        "execCommand"
+      ],
+      "definitionHash": "2038d0a36752e1c7103f13ae975b356ad09a0fcc0d25ea45d731ab8d198c5a93",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "Built-in pi-shell exposes fixed tail/full-file limits, not generic execCommand maxBuffer."
+    },
+    {
+      "id": "exec.test.ts::execCommand > accepts maxBuffer boundary %s",
+      "file": "exec.test.ts",
+      "line": 40,
+      "title": "accepts maxBuffer boundary %s",
+      "suites": [
+        "execCommand"
+      ],
+      "definitionHash": "47538b77c86202075e4ca5c8c6a26f9aee07f6167a8be64668855ae29ab53690",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "Built-in pi-shell exposes fixed tail/full-file limits, not generic execCommand maxBuffer."
+    },
+    {
+      "id": "exec.test.ts::execCommand > truncates all output when maxBuffer is zero",
+      "file": "exec.test.ts",
+      "line": 46,
+      "title": "truncates all output when maxBuffer is zero",
+      "suites": [
+        "execCommand"
+      ],
+      "definitionHash": "cf329af7430c348cbdea4cc0ecaa7d4ea50d3dd8c36e54cc1f6c2b40ad2e53b9",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "Built-in pi-shell never has a zero-byte hard-kill cap; it persists complete output and retains a bounded model tail."
+    },
+    {
+      "id": "exec.test.ts::execCommand > caps combined output at maxBuffer, terminates the command, and reports truncation",
+      "file": "exec.test.ts",
+      "line": 55,
+      "title": "caps combined output at maxBuffer, terminates the command, and reports truncation",
+      "suites": [
+        "execCommand"
+      ],
+      "definitionHash": "d2b6e111aaa21e395f33fba0b87c1fa6e46075f098dc0a51a956ca23054ab5a6",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "Generic execCommand terminates on a caller cap; built-in pi-shell does not kill for output volume and instead streams complete output to a file."
+    },
+    {
+      "id": "exec.test.ts::execCommand > keeps complete UTF-8 characters from %s output %s capped at %i bytes",
+      "file": "exec.test.ts",
+      "line": 66,
+      "title": "keeps complete UTF-8 characters from %s output %s capped at %i bytes",
+      "suites": [
+        "execCommand"
+      ],
+      "definitionHash": "73492975a27358d9b81087499010ef7b13c840d14bcdcdb935dfcdee2d63376b",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "This assertion is tied to generic execCommand's separate streams and hard maxBuffer truncation. Rust shell UTF-8 streaming/full-output boundaries are covered by dedicated pi-shell tests instead."
+    },
+    {
+      "id": "exec.test.ts::execCommand > still flushes incomplete UTF-8 at normal EOF when output was not truncated",
+      "file": "exec.test.ts",
+      "line": 83,
+      "title": "still flushes incomplete UTF-8 at normal EOF when output was not truncated",
+      "suites": [
+        "execCommand"
+      ],
+      "definitionHash": "d14d8c79545b459350606629363b07ae9fec07356551bce921bb9760b5f2e5fa",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/lib.rs",
+          "name": "normal_eof_flushes_incomplete_utf8_independently_on_both_streams"
+        },
+        {
+          "path": "crates/pi-shell/tests/user_output.rs",
+          "name": "flushes_incomplete_utf8_and_ansi_on_success_and_cancellation"
+        }
+      ],
+      "reason": "Real stdout/stderr each end with an incomplete UTF-8 prefix: the final capture has two replacements, and independently labelled callback streams each receive their own replacement with no truncation/cancellation/timeout."
+    },
+    {
+      "id": "exec.test.ts::execCommand > leaves output up to maxBuffer unchanged",
+      "file": "exec.test.ts",
+      "line": 90,
+      "title": "leaves output up to maxBuffer unchanged",
+      "suites": [
+        "execCommand"
+      ],
+      "definitionHash": "8cb572ad3cd47e0ea9014c52d6e68ef2fa173ad1ccd1e9f8eaee3a4ef7f08620",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "Caller-selected maxBuffer belongs to the distinct generic execCommand API."
+    },
+    {
+      "id": "exec.test.ts::execCommand > returns when a shell's child keeps writing after the shell is terminated",
+      "file": "exec.test.ts",
+      "line": 103,
+      "title": "returns when a shell's child keeps writing after the shell is terminated",
+      "suites": [
+        "execCommand"
+      ],
+      "definitionHash": "a7869e4c3d4454f14f56a90af29f140baf95196ebf9a3cdbc19def3500768bca",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "The legacy case is specifically execCommand overflow closing both pipes after a hard cap. Built-in pi-shell instead waits while inherited writers remain active and only releases quiet pipes; that separate contract is tested by quiet_inherited_pipes_release_after_the_shell_exits."
+    },
+    {
+      "id": "exec.test.ts::execCommand > signal-terminated commands > reports 128 + SIGTERM for a timeout",
+      "file": "exec.test.ts",
+      "line": 119,
+      "title": "reports 128 + SIGTERM for a timeout",
+      "suites": [
+        "execCommand",
+        "signal-terminated commands"
+      ],
+      "definitionHash": "1da01e726e921013dcf9a5c34f2aa5214b2cf452401c8fda19a04d672c6be88e",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "Generic execCommand reports a killed ExecResult; built-in shell exposes timed_out plus the shell status and the Bash tool throws a timeout error."
+    },
+    {
+      "id": "exec.test.ts::execCommand > signal-terminated commands > reports 128 + SIGTERM for an abort",
+      "file": "exec.test.ts",
+      "line": 125,
+      "title": "reports 128 + SIGTERM for an abort",
+      "suites": [
+        "execCommand",
+        "signal-terminated commands"
+      ],
+      "definitionHash": "0a87f2cdfe6099864218c778197c77e7211c8cace4f6ba3509114077cb4f5cf7",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "Generic execCommand's killed/code result differs from built-in shell's cancelled result and Bash Tool execution error."
+    },
+    {
+      "id": "exec.test.ts::execCommand > signal-terminated commands > reports 128 + the signal number for a command killed by someone else",
+      "file": "exec.test.ts",
+      "line": 133,
+      "title": "reports 128 + the signal number for a command killed by someone else",
+      "suites": [
+        "execCommand",
+        "signal-terminated commands"
+      ],
+      "definitionHash": "7664263e7a79ad164efaa1ca68bde522b55614c0ebb8e1187768e8e029b7f9a0",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/lib.rs",
+          "name": "external_sigkill_reports_137_without_cancellation_or_truncation"
+        },
+        {
+          "path": "plugins/tools/pi-plugin-bash/src/lib.rs",
+          "name": "signal_exit_remains_a_structured_failed_result"
+        }
+      ],
+      "reason": "A command-sent SIGKILL, independent of the executor's abort/timeout path, yields 137 with cancelled, timed_out and truncated false. The tool separately checks SIGKILL and SIGTERM with preserved partial output."
+    },
+    {
+      "id": "exec.test.ts::execCommand > force-kills a command that ignores SIGTERM",
+      "file": "exec.test.ts",
+      "line": 142,
+      "title": "force-kills a command that ignores SIGTERM",
+      "suites": [
+        "execCommand"
+      ],
+      "definitionHash": "16f30fc82b75718a9b33a1036b08bea6d3def4bac5010d38d54c0fb89b055b14",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "Generic execCommand deliberately attempts SIGTERM then waits five seconds before SIGKILL. Built-in pi-shell intentionally kills the entire shell process group/tree immediately, so the lifecycle is semantically distinct."
+    },
+    {
+      "id": "shell-kill-process-tree.test.ts::killProcessTree > stops the macOS process group before killing it without resuming it",
+      "file": "shell-kill-process-tree.test.ts",
+      "line": 30,
+      "title": "stops the macOS process group before killing it without resuming it",
+      "suites": [
+        "killProcessTree"
+      ],
+      "definitionHash": "962b577b09e78278cd6c6d38bcdf8e93959dfbfb47f0161f4b5fd0109ea1d766",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/process_tree.rs",
+          "name": "macos_stops_the_group_before_killing_it"
+        }
+      ]
+    },
+    {
+      "id": "shell-kill-process-tree.test.ts::killProcessTree > still kills the group when stopping fails",
+      "file": "shell-kill-process-tree.test.ts",
+      "line": 39,
+      "title": "still kills the group when stopping fails",
+      "suites": [
+        "killProcessTree"
+      ],
+      "definitionHash": "06233455f4c16ab819db1c98774185d3f277a6794744f561daa035a5338de217",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/process_tree.rs",
+          "name": "macos_still_kills_the_group_when_stopping_fails"
+        }
+      ]
+    },
+    {
+      "id": "shell-kill-process-tree.test.ts::killProcessTree > falls back to killing the shell when the group kill fails",
+      "file": "shell-kill-process-tree.test.ts",
+      "line": 52,
+      "title": "falls back to killing the shell when the group kill fails",
+      "suites": [
+        "killProcessTree"
+      ],
+      "definitionHash": "1983b9192e700469764c19b7d1d61d74dcbc51a56b40fd6dbb4aa8056cf5ad65",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/process_tree.rs",
+          "name": "failed_group_kill_falls_back_to_the_shell"
+        }
+      ]
+    },
+    {
+      "id": "shell-kill-process-tree.test.ts::killProcessTree > tolerates failure of both group signals and the fallback",
+      "file": "shell-kill-process-tree.test.ts",
+      "line": 67,
+      "title": "tolerates failure of both group signals and the fallback",
+      "suites": [
+        "killProcessTree"
+      ],
+      "definitionHash": "a1f03ce7e463a151d9b77ce1efaf5836f2d9a171ecdd30e75769a40fc71decaa",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/process_tree.rs",
+          "name": "failures_of_every_signal_are_tolerated"
+        }
+      ]
+    },
+    {
+      "id": "shell-kill-process-tree.test.ts::killProcessTree > keeps Linux group termination unchanged",
+      "file": "shell-kill-process-tree.test.ts",
+      "line": 80,
+      "title": "keeps Linux group termination unchanged",
+      "suites": [
+        "killProcessTree"
+      ],
+      "definitionHash": "fb602ddf7354fbb2f71a816a9a25aeb2fa92357ba2f4baeb0b0ecd60a021bbfb",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/process_tree.rs",
+          "name": "linux_kills_the_group_without_a_stop"
+        }
+      ]
+    },
+    {
+      "id": "shell-kill-process-tree.test.ts::killTrackedDetachedChildren > waits for one taskkill of all tracked trees on Windows",
+      "file": "shell-kill-process-tree.test.ts",
+      "line": 99,
+      "title": "waits for one taskkill of all tracked trees on Windows",
+      "suites": [
+        "killTrackedDetachedChildren"
+      ],
+      "definitionHash": "e3cfda9b8aa9744997fd913cfaae151c94b2d85a4e0a80db2b6a5ce261eab992",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "Rust has no process-global detached PID registry: every live shell future owns an RAII ProcessTree, and session shutdown cancels/awaits each invocation. Windows ProcessTree now synchronously waits for taskkill /T; the real tree outcome is gated by windows_abort_kills_descendant_processes."
+    },
+    {
+      "id": "shell-kill-process-tree.test.ts::killTrackedDetachedChildren > kills each tracked process group on POSIX",
+      "file": "shell-kill-process-tree.test.ts",
+      "line": 118,
+      "title": "kills each tracked process group on POSIX",
+      "suites": [
+        "killTrackedDetachedChildren"
+      ],
+      "definitionHash": "19435cecf82c9f12d17d6a7b5dee07756db20d1680a4ef61537c1fec21409be6",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "The legacy assertion is about its process-global shutdown registry. Rust uses one RAII process-group guard per invocation; its cancellation outcome is covered by abort_kills_the_shell_process_group."
+    },
+    {
+      "id": "shell-path-exists.test.ts::Windows Store shell aliases > accepts %s found on PATH",
+      "file": "shell-path-exists.test.ts",
+      "line": 50,
+      "title": "accepts %s found on PATH",
+      "suites": [
+        "Windows Store shell aliases"
+      ],
+      "definitionHash": "a380b6c734ebcecba667c6ccbdc85061856856b97a30e307b80e3f844e919a11",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/lib.rs",
+          "name": "windows_shell_resolution_prefers_git_and_accepts_path_aliases"
+        },
+        {
+          "path": "plugins/tools/pi-plugin-powershell/src/lib.rs",
+          "name": "powershell_path_lookup_may_return_a_windows_store_alias"
+        }
+      ]
+    },
+    {
+      "id": "shell-path-exists.test.ts::Windows Store shell aliases > accepts an explicitly configured shell alias",
+      "file": "shell-path-exists.test.ts",
+      "line": 59,
+      "title": "accepts an explicitly configured shell alias",
+      "suites": [
+        "Windows Store shell aliases"
+      ],
+      "definitionHash": "d81e635f9da68301e08a4f3a3f6c89ddfc5ece6c106ecfb0e35f3567d83ed3d9",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/lib.rs",
+          "name": "windows_shell_resolution_prefers_git_and_accepts_path_aliases"
+        }
+      ]
+    },
+    {
+      "id": "shell-path-exists.test.ts::Windows Store shell aliases > still rejects PATH results that fail the existence check",
+      "file": "shell-path-exists.test.ts",
+      "line": 65,
+      "title": "still rejects PATH results that fail the existence check",
+      "suites": [
+        "Windows Store shell aliases"
+      ],
+      "definitionHash": "a9f92e5ef4edc991874fbdac6bf40c3ae453fb6638e6c5fd7b74a853aec3b000",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/lib.rs",
+          "name": "windows_shell_resolution_prefers_git_and_accepts_path_aliases"
+        },
+        {
+          "path": "plugins/tools/pi-plugin-powershell/src/lib.rs",
+          "name": "powershell_resolution_matches_path_and_known_location_precedence"
+        }
+      ]
+    },
+    {
+      "id": "shell-path-exists.test.ts::Unix shell existence checks > accepts /bin/bash when access(F_OK) succeeds",
+      "file": "shell-path-exists.test.ts",
+      "line": 86,
+      "title": "accepts /bin/bash when access(F_OK) succeeds",
+      "suites": [
+        "Unix shell existence checks"
+      ],
+      "definitionHash": "734f260061e6ec450c18e5951e8faf411ca24f8ba0735c1b9b423a3b02bf1fa2",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/lib.rs",
+          "name": "unix_shell_resolution_prefers_bin_then_path_and_rejects_missing_custom_path"
+        }
+      ]
+    },
+    {
+      "id": "shell-path-exists.test.ts::Unix shell existence checks > falls back to bash on PATH when /bin/bash fails access(F_OK)",
+      "file": "shell-path-exists.test.ts",
+      "line": 90,
+      "title": "falls back to bash on PATH when /bin/bash fails access(F_OK)",
+      "suites": [
+        "Unix shell existence checks"
+      ],
+      "definitionHash": "a4b607cac53418140aa7171a06fb5cea76b376e0286eebd3d7bccebcdc28191a",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/lib.rs",
+          "name": "unix_shell_resolution_prefers_bin_then_path_and_rejects_missing_custom_path"
+        }
+      ]
+    },
+    {
+      "id": "shell-path-exists.test.ts::Unix shell existence checks > rejects an explicitly configured shell path that fails access(F_OK)",
+      "file": "shell-path-exists.test.ts",
+      "line": 99,
+      "title": "rejects an explicitly configured shell path that fails access(F_OK)",
+      "suites": [
+        "Unix shell existence checks"
+      ],
+      "definitionHash": "cb51a442914a80acfc57cc61f16ee710172d84b3f2c81f8a05aa07b3a96b48f5",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/lib.rs",
+          "name": "unix_shell_resolution_prefers_bin_then_path_and_rejects_missing_custom_path"
+        },
+        {
+          "path": "crates/pi-shell/src/lib.rs",
+          "name": "unix_shell_existence_rejects_a_dangling_symlink"
+        }
+      ]
+    },
+    {
+      "id": "powershell-tool.test.ts::powershell tool > uses process-local execution policy bypass",
+      "file": "powershell-tool.test.ts",
+      "line": 44,
+      "title": "uses process-local execution policy bypass",
+      "suites": [
+        "powershell tool"
+      ],
+      "definitionHash": "729d49882f897bac5bf8d4133ddf3d06351ea626414751c0bd6321360c0ffe3b",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-powershell/src/lib.rs",
+          "name": "process_arguments_match_current_pi"
+        }
+      ]
+    },
+    {
+      "id": "powershell-tool.test.ts::powershell tool > executes PowerShell commands with UTF-8 output",
+      "file": "powershell-tool.test.ts",
+      "line": 48,
+      "title": "executes PowerShell commands with UTF-8 output",
+      "suites": [
+        "powershell tool"
+      ],
+      "definitionHash": "eb7d88ed3a2ef453b4e8d0e0304382789e8d5f3bd7bdae2b967989f3428630b7",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-powershell/src/lib.rs",
+          "name": "executes_powershell_commands_with_utf8_output"
+        }
+      ],
+      "reason": "Meaningful #[cfg(windows)] execution test; unavailable on the current macOS host."
+    },
+    {
+      "id": "powershell-tool.test.ts::powershell exit codes > reports PowerShell 7 exit codes with ${fileName}",
+      "file": "powershell-tool.test.ts",
+      "line": 101,
+      "title": "reports PowerShell 7 exit codes with ${fileName}",
+      "suites": [
+        "powershell exit codes"
+      ],
+      "definitionHash": "bd409192edd878d9dfb47700b08630db5f78f2addcb56e25ff843327c1c1610c",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-powershell/src/lib.rs",
+          "name": "powershell_exit_codes_match_powershell_seven"
+        }
+      ],
+      "reason": "The gated test runs the full command and unfinished-command tables against every installed powershell.exe/pwsh.exe."
+    },
+    {
+      "id": "powershell-config.test.ts::getPowerShellConfig > prefers PowerShell 7 on PATH over known installation locations",
+      "file": "powershell-config.test.ts",
+      "line": 42,
+      "title": "prefers PowerShell 7 on PATH over known installation locations",
+      "suites": [
+        "getPowerShellConfig"
+      ],
+      "definitionHash": "4e88bd70ff5386a507b8b7d24f3782925b21466673d0a9acc6a043dac9ac4936",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-powershell/src/lib.rs",
+          "name": "powershell_resolution_matches_path_and_known_location_precedence"
+        }
+      ]
+    },
+    {
+      "id": "powershell-config.test.ts::getPowerShellConfig > finds PowerShell 7 under ProgramFiles before Windows PowerShell on PATH",
+      "file": "powershell-config.test.ts",
+      "line": 50,
+      "title": "finds PowerShell 7 under ProgramFiles before Windows PowerShell on PATH",
+      "suites": [
+        "getPowerShellConfig"
+      ],
+      "definitionHash": "ae718f0960d94a77215de49e5aa01670f4920249d5c444d2f058bf378d66920f",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-powershell/src/lib.rs",
+          "name": "powershell_resolution_matches_path_and_known_location_precedence"
+        }
+      ]
+    },
+    {
+      "id": "powershell-config.test.ts::getPowerShellConfig > prefers Windows PowerShell on PATH over its system installation",
+      "file": "powershell-config.test.ts",
+      "line": 64,
+      "title": "prefers Windows PowerShell on PATH over its system installation",
+      "suites": [
+        "getPowerShellConfig"
+      ],
+      "definitionHash": "7060c48fd70765c3b6efed9dacfc87879664072963d4ba1d4a60abb78c31ed62",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-powershell/src/lib.rs",
+          "name": "powershell_resolution_matches_path_and_known_location_precedence"
+        }
+      ]
+    },
+    {
+      "id": "powershell-config.test.ts::getPowerShellConfig > finds Windows PowerShell under SystemRoot when PATH lookup is unavailable",
+      "file": "powershell-config.test.ts",
+      "line": 76,
+      "title": "finds Windows PowerShell under SystemRoot when PATH lookup is unavailable",
+      "suites": [
+        "getPowerShellConfig"
+      ],
+      "definitionHash": "14d99f7a7dd1b36d0458834ee8e7977c3d32cd846695e86a458833606e929093",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-powershell/src/lib.rs",
+          "name": "powershell_resolution_matches_path_and_known_location_precedence"
+        }
+      ]
+    },
+    {
+      "id": "powershell-config.test.ts::getPowerShellConfig > reports an error when no PowerShell installation exists",
+      "file": "powershell-config.test.ts",
+      "line": 87,
+      "title": "reports an error when no PowerShell installation exists",
+      "suites": [
+        "getPowerShellConfig"
+      ],
+      "definitionHash": "7c47de9954cdd8b9663dfaa7ba6eb22d7c0041f111c3bc6277c638e7a56af810",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-powershell/src/lib.rs",
+          "name": "powershell_resolution_matches_path_and_known_location_precedence"
+        },
+        {
+          "path": "plugins/tools/pi-plugin-powershell/src/lib.rs",
+          "name": "execution_reports_windows_requirement"
+        }
+      ]
+    },
+    {
+      "id": "windows-shell-config.test.ts::legacy WSL bash detection > resolves %j / %j to stdin=%j",
+      "file": "windows-shell-config.test.ts",
+      "line": 23,
+      "title": "resolves %j / %j to stdin=%j",
+      "suites": [
+        "legacy WSL bash detection"
+      ],
+      "definitionHash": "4880eaf1b1e187ea5109c062c75ceea12caf4ffd111ac531637d4632ca942c14",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/lib.rs",
+          "name": "legacy_wsl_shell_uses_stdin_transport_for_actual_system_root_only"
+        }
+      ]
+    },
+    {
+      "id": "bash-close-hang-windows.test.ts::Windows child-process close handling > executeBash resolves after the shell exits even if inherited stdio handles stay open",
+      "file": "bash-close-hang-windows.test.ts",
+      "line": 84,
+      "title": "executeBash resolves after the shell exits even if inherited stdio handles stay open",
+      "suites": [
+        "Windows child-process close handling"
+      ],
+      "definitionHash": "d1e585dd9cf8955aedd4e59923381b76ab22b2c7ba3c10709d26f899621cb16c",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-shell/src/lib.rs",
+          "name": "windows_quiet_inherited_pipes_release_after_the_shell_exits"
+        }
+      ],
+      "reason": "Meaningful #[cfg(windows)] process test; unavailable on the current macOS host."
+    },
+    {
+      "id": "bash-close-hang-windows.test.ts::Windows child-process close handling > bash tool resolves after the shell exits even if inherited stdio handles stay open",
+      "file": "bash-close-hang-windows.test.ts",
+      "line": 109,
+      "title": "bash tool resolves after the shell exits even if inherited stdio handles stay open",
+      "suites": [
+        "Windows child-process close handling"
+      ],
+      "definitionHash": "b6fb7f9b0a024d1fa10cf5d1d7b7eeb494d4b51552a90ec278f81dfa8352d003",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-bash/src/lib.rs",
+          "name": "windows_bash_tool_releases_quiet_inherited_handles"
+        }
+      ],
+      "reason": "Meaningful #[cfg(windows)] tool-level process test; unavailable on the current macOS host."
+    },
+    {
+      "id": "builtin-tool-strict-mode.test.ts::strict built-in tools > prefers strict sampling with PI_EXPERIMENTAL=%s",
+      "file": "builtin-tool-strict-mode.test.ts",
+      "line": 18,
+      "title": "prefers strict sampling with PI_EXPERIMENTAL=%s",
+      "suites": [
+        "strict built-in tools"
+      ],
+      "definitionHash": "dc831c2e121cf92d65240cac70e555852604505434d4dd483662f219c367bd3f",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "domains/coding/tests/builtin_tool_contracts.rs",
+          "name": "builtin_strict_sampling_is_independent_of_the_experimental_environment"
+        }
+      ],
+      "reason": "Native typed Tool declarations, registration/loadout and provider projection replace JS function-object wrapper identity; tests preserve sampling overrides, argument preparation, execution, active selection and the system prompt."
+    },
+    {
+      "id": "builtin-tool-strict-mode.test.ts::strict built-in tools > preserves explicit opt-outs when wrapping definitions for execution",
+      "file": "builtin-tool-strict-mode.test.ts",
+      "line": 34,
+      "title": "preserves explicit opt-outs when wrapping definitions for execution",
+      "suites": [
+        "strict built-in tools"
+      ],
+      "definitionHash": "491051134d8c86a13c874e5b2449e19a3560c685e82372983dc32a3cfd07edaa",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "domains/coding/tests/builtin_tool_contracts.rs",
+          "name": "explicit_sampling_opt_out_preserves_tool_contract_and_execution"
+        }
+      ],
+      "reason": "Native typed Tool declarations, registration/loadout and provider projection replace JS function-object wrapper identity; tests preserve sampling overrides, argument preparation, execution, active selection and the system prompt."
+    },
+    {
+      "id": "builtin-tool-strict-mode.test.ts::strict built-in tools > allows extensions to re-register tools without strict sampling: $activeTools",
+      "file": "builtin-tool-strict-mode.test.ts",
+      "line": 49,
+      "title": "allows extensions to re-register tools without strict sampling: $activeTools",
+      "suites": [
+        "strict built-in tools"
+      ],
+      "definitionHash": "7746e935772a5cd279eeb20e55d910b82f52ac2a42ad23785d2bdacef157f1e9",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "domains/coding/tests/builtin_tool_contracts.rs",
+          "name": "registered_sampling_overrides_survive_active_loadout_and_provider_projection"
+        }
+      ],
+      "reason": "Native typed Tool declarations, registration/loadout and provider projection replace JS function-object wrapper identity; tests preserve sampling overrides, argument preparation, execution, active selection and the system prompt."
+    },
+    {
+      "id": "tool-result-images.test.ts::normalizeToolResultImages > returns the original array when there are no image blocks",
+      "file": "tool-result-images.test.ts",
+      "line": 63,
+      "title": "returns the original array when there are no image blocks",
+      "suites": [
+        "normalizeToolResultImages"
+      ],
+      "definitionHash": "08be93f3ebb9ec89db17cb6f7cd1d288d3ab2fe4f5446c2d9863e2f4f4aaa7f6",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-media/tests/images.rs",
+          "name": "tool_result_normalizer_returns_none_without_images_or_for_images_within_limits"
+        },
+        {
+          "path": "domains/coding/tests/integration/tool_result_images.rs",
+          "name": "product_normalizes_after_overlay_with_current_model_profile_before_history_and_reload"
+        }
+      ]
+    },
+    {
+      "id": "tool-result-images.test.ts::normalizeToolResultImages > returns the original array when images are already within limits",
+      "file": "tool-result-images.test.ts",
+      "line": 69,
+      "title": "returns the original array when images are already within limits",
+      "suites": [
+        "normalizeToolResultImages"
+      ],
+      "definitionHash": "e89b9400c8f8614416320e0d4dd43d24ed615ac085e6e7b825f82f9e4afc01ec",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-media/tests/images.rs",
+          "name": "tool_result_normalizer_returns_none_without_images_or_for_images_within_limits"
+        },
+        {
+          "path": "domains/coding/tests/integration/tool_result_images.rs",
+          "name": "product_normalizes_after_overlay_with_current_model_profile_before_history_and_reload"
+        }
+      ]
+    },
+    {
+      "id": "tool-result-images.test.ts::normalizeToolResultImages > resizes oversized images and reports the original dimensions",
+      "file": "tool-result-images.test.ts",
+      "line": 78,
+      "title": "resizes oversized images and reports the original dimensions",
+      "suites": [
+        "normalizeToolResultImages"
+      ],
+      "definitionHash": "70b814493f1f6ef9b11649719b547646fc99f4b8767e8c4e074fe0dcac7d5951",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-media/tests/images.rs",
+          "name": "tool_result_normalizer_resizes_and_preserves_surrounding_block_order"
+        },
+        {
+          "path": "domains/coding/tests/integration/tool_result_images.rs",
+          "name": "product_normalizes_after_overlay_with_current_model_profile_before_history_and_reload"
+        }
+      ]
+    },
+    {
+      "id": "tool-result-images.test.ts::normalizeToolResultImages > leaves oversized images alone when auto-resize is disabled",
+      "file": "tool-result-images.test.ts",
+      "line": 97,
+      "title": "leaves oversized images alone when auto-resize is disabled",
+      "suites": [
+        "normalizeToolResultImages"
+      ],
+      "definitionHash": "0862fb5368f37db349a2b2874792c797de4016785faf2f35ea90f85fb4a7f157",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-media/tests/images.rs",
+          "name": "tool_result_normalizer_honors_disabled_resize"
+        },
+        {
+          "path": "domains/coding/tests/integration/tool_result_images.rs",
+          "name": "product_normalizes_after_overlay_with_current_model_profile_before_history_and_reload"
+        }
+      ]
+    },
+    {
+      "id": "tool-result-images.test.ts::normalizeToolResultImages > converts unsupported image formats even when auto-resize is disabled",
+      "file": "tool-result-images.test.ts",
+      "line": 105,
+      "title": "converts unsupported image formats even when auto-resize is disabled",
+      "suites": [
+        "normalizeToolResultImages"
+      ],
+      "definitionHash": "564409b828d032a59e831d4b1a2bde5293878f33648928bad695bb35fb593a5b",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-media/tests/images.rs",
+          "name": "tool_result_normalizer_converts_bmp_and_inserts_hint_when_resize_is_disabled"
+        },
+        {
+          "path": "domains/coding/tests/integration/tool_result_images.rs",
+          "name": "product_disabled_resize_still_converts_bmp_and_preserves_failed_images"
+        }
+      ]
+    },
+    {
+      "id": "tool-result-images.test.ts::normalizeToolResultImages > keeps undecodable images instead of dropping tool output",
+      "file": "tool-result-images.test.ts",
+      "line": 118,
+      "title": "keeps undecodable images instead of dropping tool output",
+      "suites": [
+        "normalizeToolResultImages"
+      ],
+      "definitionHash": "decbbad8589f4c8384e1a26516ddc567dfc25ac36fd9c644419b1a6f2259c810",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-media/tests/images.rs",
+          "name": "tool_result_normalizer_keeps_invalid_base64_and_undecodable_images"
+        },
+        {
+          "path": "domains/coding/tests/integration/tool_result_images.rs",
+          "name": "product_disabled_resize_still_converts_bmp_and_preserves_failed_images"
+        }
+      ]
+    },
+    {
+      "id": "tool-result-images.test.ts::normalizeToolResultImages > preserves surrounding text blocks and their order",
+      "file": "tool-result-images.test.ts",
+      "line": 124,
+      "title": "preserves surrounding text blocks and their order",
+      "suites": [
+        "normalizeToolResultImages"
+      ],
+      "definitionHash": "92cc1b48d629da005a331cb36a69f5406171328e259e0d05b2bd56e0c63bff76",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-media/tests/images.rs",
+          "name": "tool_result_normalizer_resizes_and_preserves_surrounding_block_order"
+        },
+        {
+          "path": "domains/coding/tests/integration/tool_result_images.rs",
+          "name": "product_normalizes_after_overlay_with_current_model_profile_before_history_and_reload"
+        }
+      ]
+    },
+    {
+      "id": "image-resize-callers.test.ts::image resize callers > read tool returns text-only output when auto-resize cannot produce a safe image",
+      "file": "image-resize-callers.test.ts",
+      "line": 34,
+      "title": "read tool returns text-only output when auto-resize cannot produce a safe image",
+      "suites": [
+        "image resize callers"
+      ],
+      "definitionHash": "9632bfd39c94abb6feb691da8c3781f0a3e7dfac098fcdc2654ba750a123acc7",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-read/tests/images.rs",
+          "name": "conversion_and_resize_failures_are_successful_structured_text_omissions"
+        },
+        {
+          "path": "plugins/tools/pi-plugin-read/tests/images.rs",
+          "name": "model_encoded_size_limit_produces_omission_instead_of_a_tool_error"
+        }
+      ]
+    },
+    {
+      "id": "image-resize-callers.test.ts::image resize callers > file processor omits image attachments when auto-resize cannot produce a safe image",
+      "file": "image-resize-callers.test.ts",
+      "line": 46,
+      "title": "file processor omits image attachments when auto-resize cannot produce a safe image",
+      "suites": [
+        "image resize callers"
+      ],
+      "definitionHash": "a5afdd66e0029385236a2348c729a795e98ffc27fd26d6435acfb223d10ef52c",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "apps/pi-cli/src/input.rs",
+          "name": "unsafe_image_attachment_is_omitted_but_deferred_resize_preserves_its_bytes"
+        }
+      ]
+    },
+    {
+      "id": "image-resize-callers.test.ts::image resize callers > passes the current model resize profile to the read tool",
+      "file": "image-resize-callers.test.ts",
+      "line": 56,
+      "title": "passes the current model resize profile to the read tool",
+      "suites": [
+        "image resize callers"
+      ],
+      "definitionHash": "04925d80cfd7462aecc0c0898ff12b0ed5d2ed641c4e1f054ae925596b26e831",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "plugins/tools/pi-plugin-read/tests/images.rs",
+          "name": "registered_tool_reads_current_model_profile_and_falls_back_only_when_absent"
+        }
+      ]
+    },
+    {
+      "id": "image-resize-callers.test.ts::image resize callers > can defer resizing file attachments until prompt dispatch",
+      "file": "image-resize-callers.test.ts",
+      "line": 86,
+      "title": "can defer resizing file attachments until prompt dispatch",
+      "suites": [
+        "image resize callers"
+      ],
+      "definitionHash": "2905be0cc9e6a99d6e0d1fcd66343b0d2c161fa2cb1a3186fa7bc10327752bb8",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "apps/pi-cli/src/input.rs",
+          "name": "unsafe_image_attachment_is_omitted_but_deferred_resize_preserves_its_bytes"
+        }
+      ]
+    },
+    {
+      "id": "image-process.test.ts::image processing pipeline > detects the complete %s signature",
+      "file": "image-process.test.ts",
+      "line": 30,
+      "title": "detects the complete %s signature",
+      "suites": [
+        "image processing pipeline"
+      ],
+      "definitionHash": "0a3cf5f9cf17c6e489936b5c057c3fca9ebe3b74d70db4cae30b673c261d66fd",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-media/tests/images.rs",
+          "name": "detects_complete_gif_signatures_and_bmp_magic"
+        }
+      ]
+    },
+    {
+      "id": "image-process.test.ts::image processing pipeline > detects BMP files from magic bytes",
+      "file": "image-process.test.ts",
+      "line": 34,
+      "title": "detects BMP files from magic bytes",
+      "suites": [
+        "image processing pipeline"
+      ],
+      "definitionHash": "b7b1c9366f62d975565a9047ffefa360a91373c965787df595d842ffeb5cd8dd",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-media/tests/images.rs",
+          "name": "detects_complete_gif_signatures_and_bmp_magic"
+        }
+      ]
+    },
+    {
+      "id": "image-process.test.ts::image processing pipeline > converts BMP files to PNG attachments when auto-resize is disabled",
+      "file": "image-process.test.ts",
+      "line": 38,
+      "title": "converts BMP files to PNG attachments when auto-resize is disabled",
+      "suites": [
+        "image processing pipeline"
+      ],
+      "definitionHash": "ec2d8b69ea9d8b2405237684b9379eca6c48d17554d767487947fdb11fd16562",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-media/tests/images.rs",
+          "name": "bmp_conversion_honors_disabled_resize"
+        }
+      ]
+    },
+    {
+      "id": "image-process.test.ts::image processing pipeline > converts BMP files before auto-resizing",
+      "file": "image-process.test.ts",
+      "line": 48,
+      "title": "converts BMP files before auto-resizing",
+      "suites": [
+        "image processing pipeline"
+      ],
+      "definitionHash": "fc6eb25973d2ca35f348c75f9adcb91837d49c0aa77a83b5ac4037f059766a8b",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-media/tests/images.rs",
+          "name": "bmp_conversion_honors_disabled_resize"
+        }
+      ]
+    },
+    {
+      "id": "image-processing.test.ts::convertToPng > should return original data for PNG input",
+      "file": "image-processing.test.ts",
+      "line": 81,
+      "title": "should return original data for PNG input",
+      "suites": [
+        "convertToPng"
+      ],
+      "definitionHash": "d44b04b72ee300d8d0bcbd77786ed49adaadb27cbbf598e47bac47570d2a20f9",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-media/tests/images.rs",
+          "name": "preserves_supported_small_images_without_reencoding"
+        }
+      ]
+    },
+    {
+      "id": "image-processing.test.ts::convertToPng > should convert JPEG to PNG",
+      "file": "image-processing.test.ts",
+      "line": 88,
+      "title": "should convert JPEG to PNG",
+      "suites": [
+        "convertToPng"
+      ],
+      "definitionHash": "23d6ba48a548e15215f4cd1f5e6ec30777decc4a8e64a047d34ad2ed273289d7",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "This definition exercises convertToPng, the always-PNG transcoder for terminal image protocols. Rust built-in tools intentionally preserve supported JPEG input; they do not expose that terminal-only conversion API. BMP normalization and resize-time format selection are covered separately."
+    },
+    {
+      "id": "image-processing.test.ts::convertToPng > should apply EXIF orientation after an XMP APP1 segment",
+      "file": "image-processing.test.ts",
+      "line": 102,
+      "title": "should apply EXIF orientation after an XMP APP1 segment",
+      "suites": [
+        "convertToPng"
+      ],
+      "definitionHash": "92bfc7d984a0aff63c89d43ac91287d267e515cdf448b7de604a24b15d986bfe",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "This case asserts the terminal-only convertToPng result. Rust tools have no always-PNG transcoder and may preserve supported JPEG bytes. Shared XMP-before-EXIF orientation and physical resized dimensions are separately asserted by crates/pi-media/tests/images.rs::exif_orientation_is_applied_before_limits_and_coordinate_notes; terminal transcoding is outside this inventory."
+    },
+    {
+      "id": "image-processing.test.ts::loadPngTranscoder converts synchronously to oriented PNG data",
+      "file": "image-processing.test.ts",
+      "line": 113,
+      "title": "loadPngTranscoder converts synchronously to oriented PNG data",
+      "suites": [],
+      "definitionHash": "a714d6c0872cec1f99a7fa10561f578f20f027f701faef43359e457b87939ae9",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "The synchronous Photon/Kitty transcoder is a pi-tui-only JavaScript API, not a Rust built-in-tool contract. No unused equivalent API is added; shared media orientation and malformed-image behavior have separate executable regressions."
+    },
+    {
+      "id": "image-processing.test.ts::resizeImage > should keep caller input bytes intact",
+      "file": "image-processing.test.ts",
+      "line": 121,
+      "title": "should keep caller input bytes intact",
+      "suites": [
+        "resizeImage"
+      ],
+      "definitionHash": "17e54bea32baf0140917842efc18f0fe81dc2a22f15a6f11cc9e83e45e579dc8",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-media/tests/images.rs",
+          "name": "process_image_keeps_caller_input_bytes_intact"
+        }
+      ]
+    },
+    {
+      "id": "image-processing.test.ts::resizeImage > should return original image if within limits",
+      "file": "image-processing.test.ts",
+      "line": 137,
+      "title": "should return original image if within limits",
+      "suites": [
+        "resizeImage"
+      ],
+      "definitionHash": "69f4febc35bae4a0209aa68062505f7220d61eed1d3d8034cf4749f3ca67c65f",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-media/tests/images.rs",
+          "name": "preserves_supported_small_images_without_reencoding"
+        }
+      ]
+    },
+    {
+      "id": "image-processing.test.ts::resizeImage > should resize image exceeding dimension limits",
+      "file": "image-processing.test.ts",
+      "line": 153,
+      "title": "should resize image exceeding dimension limits",
+      "suites": [
+        "resizeImage"
+      ],
+      "definitionHash": "5f4f4fd06a02160ee5d3fd458ad84b508e274fd9c3f8aa213d40cc482167f20b",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-media/tests/images.rs",
+          "name": "scales_dimensions_and_reports_coordinate_mapping"
+        }
+      ]
+    },
+    {
+      "id": "image-processing.test.ts::resizeImage > should resize image exceeding byte limit",
+      "file": "image-processing.test.ts",
+      "line": 168,
+      "title": "should resize image exceeding byte limit",
+      "suites": [
+        "resizeImage"
+      ],
+      "definitionHash": "02f6493cb8a80292ed0bcbb42b933968b887affa3ec469ea0354615426a9a1ed",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-media/tests/images.rs",
+          "name": "enforces_encoded_limit_and_rejects_impossible_limits"
+        }
+      ]
+    },
+    {
+      "id": "image-processing.test.ts::resizeImage > should return null when image cannot be resized below maxBytes",
+      "file": "image-processing.test.ts",
+      "line": 186,
+      "title": "should return null when image cannot be resized below maxBytes",
+      "suites": [
+        "resizeImage"
+      ],
+      "definitionHash": "e5432ec218ea2e3b2ee81c93dbf34c55d23c3c240b94c9569b0c68c8c2d05585",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-media/tests/images.rs",
+          "name": "enforces_encoded_limit_and_rejects_impossible_limits"
+        }
+      ]
+    },
+    {
+      "id": "image-processing.test.ts::resizeImage > should pick JPEG over a larger PNG when resizing a photo",
+      "file": "image-processing.test.ts",
+      "line": 197,
+      "title": "should pick JPEG over a larger PNG when resizing a photo",
+      "suites": [
+        "resizeImage"
+      ],
+      "definitionHash": "06b8f0534eb0484477c5360a7793c7c6f3f5ab8eb431da3b77ce0e6177309db2",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-media/tests/images.rs",
+          "name": "resized_photo_jpeg_remains_jpeg_instead_of_a_larger_png"
+        }
+      ]
+    },
+    {
+      "id": "image-processing.test.ts::resizeImage > should handle JPEG input",
+      "file": "image-processing.test.ts",
+      "line": 208,
+      "title": "should handle JPEG input",
+      "suites": [
+        "resizeImage"
+      ],
+      "definitionHash": "e851c05a9d6e4d5d6654ce9d7fff8d5638bc63a73b77afb4b356d8deeca45442",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-media/tests/images.rs",
+          "name": "preserves_supported_small_images_without_reencoding"
+        }
+      ]
+    },
+    {
+      "id": "image-processing.test.ts::formatDimensionNote > should return undefined for non-resized images",
+      "file": "image-processing.test.ts",
+      "line": 223,
+      "title": "should return undefined for non-resized images",
+      "suites": [
+        "formatDimensionNote"
+      ],
+      "definitionHash": "e799f0073faa9f2d360168c61cc3c23fd70077f6ad3a0837857b9ad548881cae",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "crates/pi-media/tests/images.rs",
+          "name": "preserves_supported_small_images_without_reencoding"
+        }
+      ]
+    },
+    {
+      "id": "image-processing.test.ts::formatDimensionNote > should return formatted note for resized images",
+      "file": "image-processing.test.ts",
+      "line": 236,
+      "title": "should return formatted note for resized images",
+      "suites": [
+        "formatDimensionNote"
+      ],
+      "definitionHash": "cf8f41529861e082444ec96e8c2756d6402d9e92497891c51bd0ed478fab1735",
+      "disposition": "covered",
+      "rustTests": [
+        {
+          "path": "domains/coding/tests/integration/tool_result_images.rs",
+          "name": "product_normalizes_after_overlay_with_current_model_profile_before_history_and_reload"
+        }
+      ]
+    },
+    {
+      "id": "image-resize-worker-teardown.test.ts::image resize worker teardown > does not resolve until the resize worker has finished terminating",
+      "file": "image-resize-worker-teardown.test.ts",
+      "line": 18,
+      "title": "does not resolve until the resize worker has finished terminating",
+      "suites": [
+        "image resize worker teardown"
+      ],
+      "definitionHash": "49a71502c878eaadf105cb68ce0e7d1cbfde78b4e48259e5060cb464aa4fbd32",
+      "disposition": "not-applicable",
+      "rustTests": [],
+      "reason": "Legacy creates a dedicated Node Worker per image and asserts that Worker.terminate finishes before resolution. Rust uses runtime-owned Tokio blocking-pool tasks, with no per-image thread termination API. Coding awaits the processing task before emitting ToolExecutionEnd, recording history, and making the next provider request; those handoffs are asserted in the product integration tests."
+    }
+  ]
+}

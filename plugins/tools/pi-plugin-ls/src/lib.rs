@@ -51,14 +51,12 @@ impl Tool for LsTool {
             input.get("path").and_then(Value::as_str).unwrap_or("."),
         )?;
         let limit = optional_result_limit(&input, "limit", DEFAULT_LIMIT)?;
+        // Pi probes existence first and turns every failed probe (including an
+        // inaccessible parent) into the same path-not-found result.
         let metadata = tokio::fs::metadata(&path)
             .await
-            .map_err(|error| match error.kind() {
-                std::io::ErrorKind::NotFound => {
-                    execution(format!("Path not found: {}", path.display()))
-                }
-                _ => execution(error.to_string()),
-            })?;
+            .map_err(|_| execution(format!("Path not found: {}", path.display())))?;
+        context.signal().check().map_err(|_| ToolError::Aborted)?;
         if !metadata.is_dir() {
             return Err(execution(format!("Not a directory: {}", path.display())));
         }
@@ -290,5 +288,102 @@ mod tests {
             result.details.as_ref().unwrap()["truncation"]["truncated"],
             true
         );
+    }
+
+    #[tokio::test]
+    async fn lists_hidden_files_and_hidden_directories_with_suffixes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".hidden-file"), "secret").unwrap();
+        std::fs::create_dir(dir.path().join(".hidden-dir")).unwrap();
+
+        let result = run_ls(dir.path(), json!({})).await.unwrap();
+        let lines = result_text(&result).lines().collect::<Vec<_>>();
+
+        assert!(lines.contains(&".hidden-file"));
+        assert!(lines.contains(&".hidden-dir/"));
+    }
+
+    #[tokio::test]
+    async fn exact_entry_limit_has_no_notice_or_details() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(dir.path().join(name), name).unwrap();
+        }
+
+        let result = run_ls(dir.path(), json!({"limit":3})).await.unwrap();
+
+        assert_eq!(result_text(&result), "a.txt\nb.txt\nc.txt");
+        assert!(result.details.is_none());
+    }
+
+    #[tokio::test]
+    async fn uses_tool_context_cwd_for_default_listing_path() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("ctx-cwd-ls.txt"), "list me").unwrap();
+
+        let result = run_ls(dir.path(), json!({})).await.unwrap();
+
+        assert_eq!(result_text(&result), "ctx-cwd-ls.txt");
+    }
+
+    #[tokio::test]
+    async fn pre_aborted_listing_does_no_filesystem_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let (abort, signal) = AbortHandle::new();
+        abort.abort();
+        let (updates, _) = ToolUpdateSink::channel();
+
+        let result = LsTool
+            .execute(
+                ToolContext::standalone(dir.path().to_path_buf(), signal),
+                ToolCallId::new("test"),
+                json!({"path":"missing"}),
+                updates,
+            )
+            .await;
+
+        assert!(matches!(result, Err(ToolError::Aborted)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reports_root_access_and_directory_read_failures_like_pi() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let blocked_parent = dir.path().join("blocked-parent");
+        let child = blocked_parent.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::set_permissions(&blocked_parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let inaccessible = run_ls(dir.path(), json!({"path":child})).await;
+        std::fs::set_permissions(&blocked_parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let inaccessible = inaccessible.unwrap_err();
+        assert!(inaccessible.to_string().contains("Path not found:"));
+
+        let unreadable = dir.path().join("unreadable");
+        std::fs::create_dir(&unreadable).unwrap();
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let read_failure = run_ls(dir.path(), json!({"path":unreadable})).await;
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let read_failure = read_failure.unwrap_err();
+        assert!(read_failure.to_string().contains("Cannot read directory:"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn skips_entries_that_disappear_or_cannot_be_statted() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        symlink(
+            dir.path().join("missing-target"),
+            dir.path().join("dangling"),
+        )
+        .unwrap();
+
+        let result = run_ls(dir.path(), json!({})).await.unwrap();
+
+        assert_eq!(result_text(&result), "(empty directory)");
+        assert!(result.details.is_none());
     }
 }

@@ -292,7 +292,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn applies_bottom_up_and_rejects_stale() {
+    async fn applies_bottom_up() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("a");
         std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
@@ -313,5 +313,31 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "ONE\ntwo\nthree\nfour\n"
         );
+    }
+
+    #[tokio::test]
+    async fn rejects_a_stale_anchor_without_mutating_the_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("stale.txt");
+        std::fs::write(&path, "one\ntwo\n").unwrap();
+        let stale = hashline_tag(0, "one", false);
+        let changed = "changed elsewhere\ntwo\n";
+        std::fs::write(&path, changed).unwrap();
+
+        let (_, signal) = AbortHandle::new();
+        let (updates, _) = ToolUpdateSink::channel();
+        let error = HashlineEditTool
+            .execute(
+                ToolContext::standalone(directory.path().into(), signal),
+                ToolCallId::new("stale"),
+                json!({"path":"stale.txt","edits":[{"op":"replace","pos":stale,"lines":"ONE"}]}),
+                updates,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("hash mismatch at line 1"));
+        assert!(error.to_string().contains("Re-read the file"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), changed);
     }
 }

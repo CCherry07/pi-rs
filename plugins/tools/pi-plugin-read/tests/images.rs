@@ -151,7 +151,7 @@ async fn conversion_and_resize_failures_are_successful_structured_text_omissions
         ),
         (
             "broken.gif",
-            b"GIF broken".to_vec(),
+            b"GIF89a broken".to_vec(),
             "image/gif",
             "resized below the inline image size limit",
         ),

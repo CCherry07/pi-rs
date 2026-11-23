@@ -46,6 +46,42 @@ jobs:
       - name: Check patch whitespace
         run: git diff --check
 
+  tool-platforms:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+          cache: npm
+          cache-dependency-path: packages/pi/package-lock.json
+
+      - name: Install release tooling
+        working-directory: packages/pi
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Synchronize inherited workspace versions in Cargo.lock
+        working-directory: packages/pi
+        run: npm run --silent release:sync-lock
+
+      - name: Test real filesystem and shell behavior
+        run: >-
+          cargo test --locked
+          -p pi-plugin-read -p pi-plugin-write -p pi-plugin-edit
+          -p pi-plugin-hashline-edit -p pi-plugin-bash -p pi-plugin-powershell
+          -p pi-plugin-grep -p pi-plugin-find -p pi-plugin-ls
+          -p pi-tool-support -p pi-shell -p pi-media
+
   node-host:
     runs-on: ubuntu-24.04
     defaults:
@@ -68,6 +104,12 @@ jobs:
 
       - name: Test Node host and release Module
         run: npm test
+
+      - name: Test tool parity inventory checker
+        run: node --test ../../scripts/check-tool-test-parity.test.mjs
+
+      - name: Check frozen tool test references
+        run: node ../../scripts/check-tool-test-parity.mjs
 
       - name: Validate release configuration
         run: npm run release:check

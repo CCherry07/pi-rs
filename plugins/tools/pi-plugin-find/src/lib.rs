@@ -49,6 +49,7 @@ impl Tool for FindTool {
         input: Value,
         _updates: ToolUpdateSink,
     ) -> Result<ToolResult, ToolError> {
+        context.signal().check().map_err(|_| ToolError::Aborted)?;
         let pattern = require_str(&input, "pattern")?;
         let matcher = build_glob(pattern)?;
         let root = resolve_to_cwd(
@@ -57,11 +58,12 @@ impl Tool for FindTool {
         )?;
         let metadata = std::fs::metadata(&root)
             .map_err(|_| execution(format!("Path not found: {}", root.display())))?;
+        context.signal().check().map_err(|_| ToolError::Aborted)?;
         if !metadata.is_dir() {
             return Err(execution(format!("Not a directory: {}", root.display())));
         }
         let limit = optional_result_limit(&input, "limit", DEFAULT_LIMIT)?;
-        let require_git = is_inside_git_repository(&root);
+        let require_git = is_inside_git_repository(&root, context.signal())?;
         let signal = context.signal().clone();
         let mut entries = tokio::task::spawn_blocking(move || {
             let mut entries = Vec::new();
@@ -166,9 +168,14 @@ fn build_glob(pattern: &str) -> Result<FindMatcher, ToolError> {
     })
 }
 
-fn is_inside_git_repository(path: &Path) -> bool {
-    path.ancestors()
-        .any(|ancestor| ancestor.join(".git").exists())
+fn is_inside_git_repository(path: &Path, signal: &pi_core::AbortSignal) -> Result<bool, ToolError> {
+    for ancestor in path.ancestors() {
+        signal.check().map_err(|_| ToolError::Aborted)?;
+        if ancestor.join(".git").exists() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -176,8 +183,11 @@ mod tests {
     use super::*;
     use pi_core::AbortHandle;
 
-    async fn run_find(cwd: &std::path::Path, input: Value) -> Result<ToolResult, ToolError> {
-        let (_, signal) = AbortHandle::new();
+    async fn execute_find(
+        cwd: &std::path::Path,
+        input: Value,
+        signal: pi_core::AbortSignal,
+    ) -> Result<ToolResult, ToolError> {
         let (updates, _) = ToolUpdateSink::channel();
         FindTool
             .execute(
@@ -187,6 +197,11 @@ mod tests {
                 updates,
             )
             .await
+    }
+
+    async fn run_find(cwd: &std::path::Path, input: Value) -> Result<ToolResult, ToolError> {
+        let (_, signal) = AbortHandle::new();
+        execute_find(cwd, input, signal).await
     }
 
     fn result_text(result: &ToolResult) -> &str {
@@ -393,5 +408,125 @@ mod tests {
             result.details.as_ref().unwrap()["truncation"]["truncated"],
             true
         );
+    }
+
+    #[tokio::test]
+    async fn surfaces_invalid_glob_patterns() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let error = run_find(dir.path(), json!({"pattern":"["}))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ToolError::InvalidArguments(_)));
+        assert!(error.to_string().contains("invalid glob"));
+    }
+
+    #[tokio::test]
+    async fn reports_full_output_totals_past_the_byte_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..300 {
+            let name = format!("{index:03}{}.txt", "x".repeat(193));
+            assert_eq!(name.len(), 200);
+            std::fs::write(dir.path().join(name), "").unwrap();
+        }
+
+        let result = run_find(dir.path(), json!({"pattern":"*.txt"}))
+            .await
+            .unwrap();
+        let details = &result.details.as_ref().unwrap()["truncation"];
+
+        assert!(result_text(&result).ends_with("\n\n[50.0KB limit reached]"));
+        assert_eq!(details["totalLines"], 300);
+        assert_eq!(details["totalBytes"], 60_299);
+        assert_eq!(details["outputLines"], 254);
+        assert_eq!(details["outputBytes"], 51_053);
+        assert!(
+            result
+                .details
+                .as_ref()
+                .unwrap()
+                .get("resultLimitReached")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn uses_tool_context_cwd_for_relative_search_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("ctx-cwd-find.txt"), "find me").unwrap();
+
+        let result = run_find(dir.path(), json!({"pattern":"ctx-cwd-find.txt"}))
+            .await
+            .unwrap();
+
+        assert_eq!(result_text(&result), "ctx-cwd-find.txt");
+    }
+
+    #[tokio::test]
+    async fn pre_aborted_find_returns_before_glob_or_filesystem_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let (abort, signal) = AbortHandle::new();
+        abort.abort();
+
+        let result = execute_find(
+            dir.path(),
+            json!({"pattern":"*.ts", "path":"missing"}),
+            signal,
+        )
+        .await;
+
+        assert!(matches!(result, Err(ToolError::Aborted)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn is_independent_of_external_fd_binary_configuration() {
+        use std::os::unix::fs::PermissionsExt;
+
+        static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _guard = ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let marker = dir.path().join("fd-was-run");
+        let fake_fd = bin.join("fd");
+        std::fs::write(
+            &fake_fd,
+            format!("#!/bin/sh\necho external > {}\nexit 99\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_fd, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.path().join("inside.txt"), "").unwrap();
+        let previous = std::env::var_os("PATH");
+        // SAFETY: this package's tests serialize PATH mutations, and the internal
+        // walker never launches another thread that consults the process PATH.
+        unsafe { std::env::set_var("PATH", &bin) };
+
+        let result = run_find(dir.path(), json!({"pattern":"*.txt"}))
+            .await
+            .unwrap();
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("PATH", value) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+        assert_eq!(result_text(&result), "inside.txt");
+        assert!(!marker.exists());
+    }
+
+    #[tokio::test]
+    async fn distinguishes_missing_search_roots_from_non_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = run_find(dir.path(), json!({"pattern":"*.txt", "path":"missing"}))
+            .await
+            .unwrap_err();
+        assert!(missing.to_string().contains("Path not found:"));
+
+        std::fs::write(dir.path().join("file.txt"), "").unwrap();
+        let file = run_find(dir.path(), json!({"pattern":"*.txt", "path":"file.txt"}))
+            .await
+            .unwrap_err();
+        assert!(file.to_string().contains("Not a directory:"));
     }
 }

@@ -119,10 +119,48 @@ mod tests {
         assert!(prepare("@.").is_err());
         std::fs::write(dir.path().join("empty"), []).unwrap();
         assert!(prepare("@empty").unwrap().is_none());
-        std::fs::write(dir.path().join("broken.gif"), b"GIF broken").unwrap();
+        std::fs::write(dir.path().join("broken.gif"), b"GIF89a broken").unwrap();
         let omitted = prepare("@broken.gif").unwrap().unwrap();
         assert!(omitted.images().is_empty());
         assert!(omitted.text().contains("[Image omitted:"));
+    }
+
+    #[test]
+    fn unsafe_image_attachment_is_omitted_but_deferred_resize_preserves_its_bytes() {
+        use base64::Engine as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let png = encode_rgba_png(4, 2, vec![255; 4 * 2 * 4]).unwrap();
+        std::fs::write(dir.path().join("valid.png"), &png).unwrap();
+        for auto_resize in [true, false] {
+            let input = prepare_input(
+                &["@valid.png".to_string()],
+                None,
+                dir.path(),
+                &ImagePolicy {
+                    auto_resize,
+                    max_encoded_bytes: 1,
+                    ..ImagePolicy::default()
+                },
+            )
+            .unwrap()
+            .unwrap();
+            if auto_resize {
+                assert!(input.images().is_empty());
+                assert!(input.text().contains("[Image omitted:"));
+            } else {
+                assert_eq!(input.images().len(), 1);
+                assert_eq!(input.images()[0].mime_type, "image/png");
+                assert_eq!(
+                    base64::engine::general_purpose::STANDARD
+                        .decode(&input.images()[0].data)
+                        .unwrap(),
+                    png
+                );
+                assert!(!input.text().contains("Image omitted"));
+                assert!(!input.text().contains("displayed at"));
+            }
+        }
     }
 
     #[test]

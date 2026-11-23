@@ -61,7 +61,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.8.6"
+version = "2.0.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
@@ -76,7 +76,12 @@ schemars = "1.2.1"
 serde = { version = "1.0.219", features = ["derive", "rc"] }
 serde_json = { version = "1.0.143", features = ["preserve_order"] }
 thiserror = "2.0.16"
-tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.47.1", features = [
+    "macros",
+    "rt-multi-thread",
+    "sync",
+    "time",
+] }
 tokio-util = "0.7.16"
 dotenvy = "0.15"
 libloading = "0.8.9"

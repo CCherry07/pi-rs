@@ -188,7 +188,7 @@ fn normalize_windows_shell_path(input: String) -> String {
 }
 
 fn macos_screenshot_path_variant(path: &str) -> String {
-    ["AM", "PM", "am", "pm"]
+    ["AM", "Am", "aM", "am", "PM", "Pm", "pM", "pm"]
         .into_iter()
         .fold(path.to_string(), |path, marker| {
             path.replace(&format!(" {marker}."), &format!("\u{202f}{marker}."))
@@ -484,12 +484,61 @@ mod path_tests {
 
     #[test]
     fn leading_tilde_expands_to_the_user_home() {
-        let root = tempfile::tempdir().unwrap();
-        let home = std::env::var_os("HOME").expect("HOME is required by the test environment");
+        const WINDOWS_CHILD: &str = "PI_TOOL_SUPPORT_USERPROFILE_CHILD";
+        if cfg!(windows) && std::env::var_os(WINDOWS_CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "path_tests::leading_tilde_expands_to_the_user_home",
+                    "--nocapture",
+                ])
+                .env(WINDOWS_CHILD, "1")
+                .env_remove("HOME")
+                .env("USERPROFILE", r"C:\pi-tool-support-home")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "USERPROFILE fallback child failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
 
+        let root = tempfile::tempdir().unwrap();
+        let home = user_home_dir().expect("a platform home directory is required");
+        if cfg!(windows) && std::env::var_os(WINDOWS_CHILD).is_some() {
+            assert_eq!(home, PathBuf::from(r"C:\pi-tool-support-home"));
+        }
+        assert_eq!(resolve_to_cwd(root.path(), "~").unwrap(), home);
         assert_eq!(
             resolve_to_cwd(root.path(), "~/.agents/skills/example/SKILL.md").unwrap(),
-            PathBuf::from(home).join(".agents/skills/example/SKILL.md")
+            home.join(".agents/skills/example/SKILL.md")
+        );
+    }
+
+    #[test]
+    fn tilde_prefixed_filenames_stay_literal_and_resolve_from_cwd() {
+        let root = tempfile::tempdir().unwrap();
+
+        assert_eq!(
+            resolve_to_cwd(root.path(), "~draft.md").unwrap(),
+            root.path().join("~draft.md")
+        );
+        assert_eq!(
+            resolve_to_cwd(root.path(), "@~draft.md").unwrap(),
+            root.path().join("~draft.md")
+        );
+    }
+
+    #[test]
+    fn relative_paths_resolve_from_cwd() {
+        let root = tempfile::tempdir().unwrap();
+
+        assert_eq!(
+            resolve_to_cwd(root.path(), "relative/file.txt").unwrap(),
+            root.path().join("relative/file.txt")
         );
     }
 
@@ -497,10 +546,15 @@ mod path_tests {
     fn tool_path_input_strips_at_and_normalizes_unicode_spaces() {
         let root = tempfile::tempdir().unwrap();
 
-        assert_eq!(
-            resolve_to_cwd(root.path(), "@folder\u{202f}name/file.txt").unwrap(),
-            root.path().join("folder name/file.txt")
-        );
+        for input in [
+            "@folder\u{00a0}name/file.txt",
+            "@folder\u{202f}name/file.txt",
+        ] {
+            assert_eq!(
+                resolve_to_cwd(root.path(), input).unwrap(),
+                root.path().join("folder name/file.txt")
+            );
+        }
     }
 
     #[test]
@@ -513,19 +567,60 @@ mod path_tests {
     }
 
     #[test]
-    fn read_path_uses_the_macos_screenshot_space_variant() {
+    fn read_path_prefers_an_existing_path() {
         let root = tempfile::tempdir().unwrap();
-        let actual = root.path().join("Screenshot 1.00.00\u{202f}PM.png");
-        std::fs::write(&actual, "image").unwrap();
+        let actual = root.path().join("test-file.txt");
+        std::fs::write(&actual, "content").unwrap();
 
         assert_eq!(
-            resolve_read_path(root.path(), "Screenshot 1.00.00 PM.png").unwrap(),
+            resolve_read_path(root.path(), "test-file.txt").unwrap(),
             actual
         );
     }
 
     #[test]
-    fn read_path_resolves_nfd_and_curly_quote_filename() {
+    fn read_path_uses_macos_screenshot_space_variants_case_insensitively() {
+        let root = tempfile::tempdir().unwrap();
+        for marker in ["AM", "Am", "aM", "am", "PM", "Pm", "pM", "pm"] {
+            let actual = root
+                .path()
+                .join(format!("Screenshot 1.00.00\u{202f}{marker}.png"));
+            std::fs::write(&actual, "image").unwrap();
+
+            assert_eq!(
+                resolve_read_path(root.path(), &format!("Screenshot 1.00.00 {marker}.png"))
+                    .unwrap(),
+                actual
+            );
+        }
+    }
+
+    #[test]
+    fn read_path_resolves_nfc_input_to_an_nfd_filename() {
+        let root = tempfile::tempdir().unwrap();
+        let actual = root.path().join("fileé.txt".nfd().collect::<String>());
+        std::fs::write(&actual, "accent").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(resolve_read_path(root.path(), "fileé.txt").unwrap()).unwrap(),
+            "accent"
+        );
+    }
+
+    #[test]
+    fn read_path_resolves_straight_quote_to_a_curly_quote_filename() {
+        let root = tempfile::tempdir().unwrap();
+        let actual = root.path().join("Capture d\u{2019}cran.txt");
+        std::fs::write(&actual, "quote").unwrap();
+
+        assert_eq!(
+            resolve_read_path(root.path(), "Capture d'cran.txt").unwrap(),
+            actual
+        );
+    }
+
+    #[test]
+    fn read_path_resolves_combined_nfd_and_curly_quote_filename() {
         let root = tempfile::tempdir().unwrap();
         let actual_name = "Capture d\u{2019}écran.txt".nfd().collect::<String>();
         let actual = root.path().join(actual_name);

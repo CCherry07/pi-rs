@@ -33,7 +33,7 @@ impl SessionShellExecutor for CodingShellExecutor {
         if request.shell_path.is_none() {
             request.shell_path.clone_from(&self.shell_path);
         }
-        pi_shell::execute(request).await
+        pi_shell::execute_user_shell(request).await
     }
 }
 
@@ -58,6 +58,62 @@ mod tests {
             })
             .build()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn user_shell_sanitizes_streams_while_bash_tool_preserves_raw_output() {
+        use pi_core::{AbortHandle, ContentBlock, ToolCallId};
+        use pi_plugin::{Tool, ToolContext, ToolUpdateSink};
+        use std::sync::{Arc, Mutex};
+
+        let directory = tempfile::tempdir().unwrap();
+        let command = "printf '\\033[31mred\\033[0m\\r\\n'";
+        let (_, signal) = AbortHandle::new();
+        let chunks = Arc::new(Mutex::new(Vec::new()));
+        let callback_chunks = Arc::clone(&chunks);
+        let result = CodingShellExecutor::default()
+            .execute(ShellRequest {
+                command: command.into(),
+                cwd: directory.path().into(),
+                timeout: None,
+                shell_path: None,
+                abort_signal: signal.clone(),
+                on_chunk: Some(Arc::new(move |chunk| {
+                    callback_chunks.lock().unwrap().push(chunk);
+                })),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.output, "red\n");
+        assert_eq!(result.exit_code, Some(0));
+        assert!(!result.truncated);
+        let streamed = chunks
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|chunk| chunk.text.clone())
+            .collect::<String>();
+        assert_eq!(streamed, "red\n");
+
+        let (updates, _) = ToolUpdateSink::channel();
+        let tool_result = pi_plugin_bash::BashTool
+            .execute(
+                ToolContext::standalone(directory.path().into(), signal),
+                ToolCallId::new("raw-shell-tool"),
+                serde_json::json!({"command": command}),
+                updates,
+            )
+            .await
+            .unwrap();
+        let ContentBlock::Text(text) = &tool_result.content[0] else {
+            panic!("expected tool text")
+        };
+        assert_eq!(text.text, "\x1b[31mred\x1b[0m\r\n");
+        assert_eq!(
+            tool_result.structured_content.as_ref().unwrap()["output"],
+            "\x1b[31mred\x1b[0m\r\n"
+        );
     }
 
     #[tokio::test]

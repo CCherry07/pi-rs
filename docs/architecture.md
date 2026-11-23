@@ -108,6 +108,11 @@ shell executor and use `GenericCompactionPolicy`; `domains/coding/src/session` s
 and read/write/edit tracking. The shell request/result types and old `bashExecution` projections
 remain readable for Pi wire compatibility. Shell execution still records the submitted command,
 respects the session operation gate and does not materialize a new log before an assistant response.
+Coding selects `pi_shell::execute_user_shell` for user-shell execution. Its private capture policy
+applies Pi's streaming ANSI/control/interlinear and carriage-return sanitization before callbacks,
+tail capture, and full-output persistence; rolling user buffers count UTF-16 units. Built-in bash
+and PowerShell tools keep raw capture. Both paths settle independent UTF-8 decoders for stdout and
+stderr. This selection does not add a mode to the generic shell request or change session wire data.
 `FileOperations` remains a compatibility hook value; generic compaction does not interpret coding
 tool names. Existing lazy JSONL persistence, recovery, shared mutation sequencing and native plugin
 contracts are unchanged.
@@ -538,6 +543,18 @@ profile exists. An empty profile intentionally selects Pi defaults. Decode/conve
 produce successful text-only omission results, not failed tool calls. Video/audio Modules and message
 contracts are future work; Rust and Photon encoder bytes/pixels are not claimed to be identical.
 
+Coding also installs a private, factory-backed tool-result image normalizer after extension
+result modifiers. `pi-media::image::normalize_tool_result_images` owns block normalization;
+Coding supplies the generation's `images.autoResize` setting and the current model's resize
+profile. Successful conversions/resizes preserve surrounding block order and insert their
+notes immediately after the image. Failed processing preserves the original image, matching
+Pi's generic tool-result policy rather than the read tool's text-only omission policy. Existing
+structured output is preserved when normalized display content is patched. The hook awaits
+its blocking image work before the scheduler's final event, history, and next provider request.
+This is Coding composition using the existing ordered hook/factory seams, not image policy in
+the generic Agent/Session runtime or a new session wire format. Generic SDK and private
+ephemeral Agents do not acquire implicit Coding hooks.
+
 CLI startup prepares text and image attachments into `SessionInput`, preserved through TUI,
 print and NDJSON submission. As in current Pi's `cli/file-processor.ts` and `cli/initial-message.ts`,
 stdin precedes file markup and the prompt; image detection uses bytes rather than extensions,
@@ -558,6 +575,12 @@ Editing splices only matched ranges back into the original text; fuzzy matching 
 untouched lines, and mixed line endings survive. These are Pi-compatible filesystem semantics, not
 an atomic-replacement or sandbox guarantee. Optional hashline editing retains its separate stale
 snapshot checks and remains opt-in.
+The reviewed [built-in tool conformance inventory](tool-test-conformance.md) ties the current
+legacy tool/support test definitions to executable Rust regressions. Cargo checks the frozen
+references without a Node or legacy checkout; the optional source-oracle check detects drift,
+including shared fixture changes. Definition counts are not a substitute for behavioral assertions
+or platform execution. Dedicated macOS/Windows tool jobs complement the full workspace CI gate.
+
 Matching current Pi's interactive mode, RGBA pixels become a temporary PNG and its path is inserted
 at the composer cursor; later tool reads process that image through `pi-media`. These files remain
 available after exit for saved path references. Pending reads never insert into a replaced session,

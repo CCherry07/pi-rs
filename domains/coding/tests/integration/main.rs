@@ -10,3 +10,4 @@ mod mcp_resources;
 mod plugin_history_reload;
 mod reload_state;
 mod responses_history;
+mod tool_result_images;

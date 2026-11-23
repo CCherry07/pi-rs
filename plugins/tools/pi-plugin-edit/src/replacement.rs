@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use pi_plugin::ToolError;
 use pi_tool_support::execution;
 use serde::Deserialize;
@@ -11,9 +13,9 @@ pub(super) struct EditInput {
 }
 
 pub(super) struct Replacement {
-    index: usize,
-    length: usize,
-    new_text: String,
+    pub(super) index: usize,
+    pub(super) length: usize,
+    pub(super) new_text: String,
 }
 
 pub(super) struct AppliedEdits {
@@ -21,8 +23,16 @@ pub(super) struct AppliedEdits {
     pub replacements: Vec<Replacement>,
 }
 
+pub(super) fn normalize_lf_cow(text: &str) -> Cow<'_, str> {
+    if text.contains('\r') {
+        Cow::Owned(text.replace("\r\n", "\n").replace('\r', "\n"))
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
 pub(super) fn normalize_lf(text: &str) -> String {
-    text.replace("\r\n", "\n").replace('\r', "\n")
+    normalize_lf_cow(text).into_owned()
 }
 
 fn fuzzy(text: &str) -> String {
@@ -53,6 +63,29 @@ fn fuzzy(text: &str) -> String {
             ],
             " ",
         )
+}
+
+fn fuzzy_is_identity(text: &str) -> bool {
+    if !text.is_ascii() {
+        return false;
+    }
+    let bytes = text.as_bytes();
+    bytes.iter().enumerate().all(|(index, byte)| {
+        if *byte != b'\n' {
+            return true;
+        }
+        index == 0 || !matches!(bytes[index - 1], b'\t'..=b'\r' | b' ')
+    }) && bytes
+        .last()
+        .is_none_or(|byte| *byte == b'\n' || !matches!(*byte, b'\t'..=b'\r' | b' '))
+}
+
+fn fuzzy_view(text: &str) -> Cow<'_, str> {
+    if fuzzy_is_identity(text) {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(fuzzy(text))
+    }
 }
 
 fn apply_replacements(content: &str, replacements: &[Replacement], offset: usize) -> String {
@@ -149,21 +182,26 @@ pub(super) fn apply_edits(
             }));
         }
     }
-    let fuzzy_content = fuzzy(content);
+    let fuzzy_content = fuzzy_view(content);
     let use_fuzzy = edits.iter().any(|edit| {
-        !content.contains(&edit.old_text) && fuzzy_content.contains(&fuzzy(&edit.old_text))
+        !content.contains(&edit.old_text)
+            && fuzzy_content.contains(fuzzy_view(&edit.old_text).as_ref())
     });
-    let base = if use_fuzzy { &fuzzy_content } else { content };
+    let base = if use_fuzzy {
+        fuzzy_content.as_ref()
+    } else {
+        content
+    };
     let mut matched = Vec::new();
     for (i, edit) in edits.iter().enumerate() {
-        let fuzzy_old = fuzzy(&edit.old_text);
+        let fuzzy_old = fuzzy_view(&edit.old_text);
         // Exact-first still applies when another edit selected the fuzzy view.
         let found = base
             .find(&edit.old_text)
             .map(|index| (index, edit.old_text.len()))
             .or_else(|| {
                 fuzzy_content
-                    .find(&fuzzy_old)
+                    .find(fuzzy_old.as_ref())
                     .map(|index| (index, fuzzy_old.len()))
             });
         let Some((index, length)) = found else {
@@ -181,7 +219,7 @@ pub(super) fn apply_edits(
         let count = if fuzzy_old.is_empty() {
             fuzzy_content.encode_utf16().count().saturating_sub(1)
         } else {
-            fuzzy_content.matches(&fuzzy_old).count()
+            fuzzy_content.matches(fuzzy_old.as_ref()).count()
         };
         if count > 1 {
             return Err(execution(if edits.len() == 1 {

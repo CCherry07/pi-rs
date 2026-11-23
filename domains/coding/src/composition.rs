@@ -254,7 +254,13 @@ impl GenerationComponents<'_> {
             .unwrap_or_else(|| pi_core::WorkspaceSpec::from_cwd(&config.cwd).snapshot());
         builder = builder
             .workspace(workspace)
-            .plugin_factory(|| crate::workspace_prompt::WorkspacePromptPlugin);
+            .plugin_factory(|| crate::workspace_prompt::WorkspacePromptPlugin)
+            // Tool images are product policy, and normalization must observe the final result
+            // after native, MCP, JavaScript, session-overlay, and workspace hooks have run.
+            .plugin_factory({
+                let auto_resize = config.runtime_settings.images.auto_resize;
+                move || crate::tool_result_images::ToolResultImageNormalizer::new(auto_resize)
+            });
 
         let mut resources = ResourceLoaderOptions::new(&config.cwd, &config.agent_dir);
         resources.project_trusted = project_trusted;

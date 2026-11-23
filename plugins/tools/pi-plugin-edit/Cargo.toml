@@ -19,4 +19,5 @@ tokio = { workspace = true, features = ["fs"] }
 unicode-normalization = "0.1.24"
 
 [dev-dependencies]
+pi-plugin-write = { path = "../pi-plugin-write" }
 tempfile = "3.21.0"

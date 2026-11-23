@@ -113,6 +113,7 @@ async fn execute_grep(
     context: ToolContext,
     input: Value,
 ) -> Result<ToolResult, ToolError> {
+    context.signal().check().map_err(|_| ToolError::Aborted)?;
     let pattern = require_str(&input, "pattern")?.to_string();
     let path = resolve_to_cwd(
         context.cwd(),
@@ -140,6 +141,7 @@ async fn execute_grep(
     let matcher = build_matcher(&pattern, literal, ignore_case)?;
     let metadata = std::fs::metadata(&path)
         .map_err(|_| execution(format!("Path not found: {}", path.display())))?;
+    context.signal().check().map_err(|_| ToolError::Aborted)?;
     let search_is_directory = metadata.is_dir();
     if !search_is_directory && !metadata.is_file() {
         return Err(execution(format!(
@@ -488,8 +490,11 @@ mod tests {
         );
     }
 
-    async fn run_grep(cwd: &Path, input: Value) -> ToolResult {
-        let (_, signal) = AbortHandle::new();
+    async fn execute_grep(
+        cwd: &Path,
+        input: Value,
+        signal: pi_core::AbortSignal,
+    ) -> Result<ToolResult, ToolError> {
         let (updates, _) = ToolUpdateSink::channel();
         GrepTool
             .execute(
@@ -499,7 +504,11 @@ mod tests {
                 updates,
             )
             .await
-            .unwrap()
+    }
+
+    async fn run_grep(cwd: &Path, input: Value) -> ToolResult {
+        let (_, signal) = AbortHandle::new();
+        execute_grep(cwd, input, signal).await.unwrap()
     }
 
     fn result_text(result: &ToolResult) -> &str {
@@ -664,6 +673,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn public_grep_truncation_drops_or_keeps_complete_surrogate_pairs_at_utf16_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("surrogates.txt"),
+            format!("{}😀tail\n{}😀tail\n", "a".repeat(499), "a".repeat(498)),
+        )
+        .unwrap();
+
+        let result = run_grep(
+            dir.path(),
+            json!({"pattern":"tail", "path":"surrogates.txt"}),
+        )
+        .await;
+
+        assert_eq!(
+            result_text(&result),
+            format!(
+                "surrogates.txt:1: {}... [truncated]\nsurrogates.txt:2: {}😀... [truncated]\n\n[Some lines truncated to 500 chars. Use read tool to see full lines]",
+                "a".repeat(499),
+                "a".repeat(498)
+            )
+        );
+        assert_eq!(result.details.as_ref().unwrap()["linesTruncated"], true);
+    }
+
+    #[tokio::test]
     async fn globs_are_root_relative_and_strip_dot_slash_prefixes() {
         let dir = tempfile::tempdir().unwrap();
         for name in ["root/src/a.ts", "root/pkg/src/b.ts", "elsewhere/src/c.ts"] {
@@ -779,5 +814,353 @@ mod tests {
             result.details.as_ref().unwrap()["truncation"]["truncated"],
             true
         );
+    }
+
+    #[tokio::test]
+    async fn respects_global_match_limit_and_includes_context_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("context.txt"),
+            "before\nmatch one\nafter\nmiddle\nmatch two\nafter two",
+        )
+        .unwrap();
+
+        let result = run_grep(
+            dir.path(),
+            json!({"pattern":"match", "path":"context.txt", "limit":1, "context":1}),
+        )
+        .await;
+
+        assert_eq!(
+            result_text(&result),
+            "context.txt-1- before\ncontext.txt:2: match one\ncontext.txt-3- after\n\n[1 matches limit reached. Use limit=2 for more, or refine pattern]"
+        );
+        assert_eq!(result.details.as_ref().unwrap()["matchLimitReached"], 1);
+    }
+
+    #[tokio::test]
+    async fn keeps_lone_cr_context_line_numbers_and_strips_only_terminators() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("lone-cr.txt"),
+            "before\rprogress\nneedle\nafter",
+        )
+        .unwrap();
+        let result = run_grep(
+            dir.path(),
+            json!({"pattern":"needle", "path":"lone-cr.txt", "context":1}),
+        )
+        .await;
+
+        assert_eq!(
+            result_text(&result),
+            "lone-cr.txt-1- before\rprogress\nlone-cr.txt:2: needle\nlone-cr.txt-3- after"
+        );
+    }
+
+    #[tokio::test]
+    async fn prints_overlapping_context_once_and_keeps_last_match_trailing_context() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("rg-context.txt"),
+            "a\nmatch one\nb\nmatch two\nmatch three\nc\nmatch four",
+        )
+        .unwrap();
+        let result = run_grep(
+            dir.path(),
+            json!({"pattern":"match", "path":"rg-context.txt", "context":1, "limit":2}),
+        )
+        .await;
+
+        assert_eq!(
+            result_text(&result).split("\n\n").next().unwrap(),
+            "rg-context.txt-1- a\nrg-context.txt:2: match one\nrg-context.txt-3- b\nrg-context.txt:4: match two\nrg-context.txt-5- match three"
+        );
+        assert_eq!(result.details.as_ref().unwrap()["matchLimitReached"], 2);
+    }
+
+    #[tokio::test]
+    async fn counts_allowed_matches_past_byte_cap_for_limit_and_continuation_details() {
+        let dir = tempfile::tempdir().unwrap();
+        let line = format!("match {}", "x".repeat(400));
+        std::fs::write(
+            dir.path().join("byte-cap.txt"),
+            std::iter::repeat_n(line, 200)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let result = run_grep(
+            dir.path(),
+            json!({"pattern":"match", "path":"byte-cap.txt", "limit":150}),
+        )
+        .await;
+        let text = result_text(&result);
+        let details = result.details.as_ref().unwrap();
+
+        assert!(
+            text.contains("150 matches limit reached. Use limit=300 for more, or refine pattern")
+        );
+        assert!(text.contains("50.0KB limit reached"));
+        assert_eq!(details["matchLimitReached"], 150);
+        assert_eq!(details["truncation"]["totalLines"], 150);
+        assert!(details["truncation"]["totalBytes"].as_u64().unwrap() > 50 * 1024);
+    }
+
+    #[tokio::test]
+    async fn reports_truncation_when_stored_output_ends_exactly_at_byte_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lines = vec!["x".repeat(490); 103];
+        lines.push("x".repeat(7));
+        lines.push("extra x".to_string());
+        std::fs::write(dir.path().join("x"), lines.join("\n")).unwrap();
+
+        let result = run_grep(dir.path(), json!({"pattern":"x", "path":"x", "limit":1000})).await;
+
+        assert!(result_text(&result).ends_with("\n\n[50.0KB limit reached]"));
+        assert_eq!(
+            result.details.as_ref().unwrap()["truncation"]["totalLines"],
+            105
+        );
+    }
+
+    #[tokio::test]
+    async fn accepts_huge_context_without_exponent_or_allocation_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("huge-context.txt"), "before\nneedle\nafter").unwrap();
+
+        let result = run_grep(
+            dir.path(),
+            json!({"pattern":"needle", "path":"huge-context.txt", "context":1e30}),
+        )
+        .await;
+
+        assert_eq!(
+            result_text(&result),
+            "huge-context.txt-1- before\nhuge-context.txt:2: needle\nhuge-context.txt-3- after"
+        );
+    }
+
+    #[tokio::test]
+    async fn decodes_utf16_context_and_lossy_utf8_search_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let utf16 = "\u{feff}before\nneedle 中文\nafter\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        std::fs::write(dir.path().join("utf16.txt"), utf16).unwrap();
+        std::fs::write(
+            dir.path().join("invalid-utf8.txt"),
+            b"before\n\xffneedle\nafter\n",
+        )
+        .unwrap();
+
+        let utf16 = run_grep(
+            dir.path(),
+            json!({"pattern":"needle", "path":"utf16.txt", "context":1}),
+        )
+        .await;
+        assert_eq!(
+            result_text(&utf16),
+            "utf16.txt-1- before\nutf16.txt:2: needle 中文\nutf16.txt-3- after"
+        );
+
+        let utf8 = run_grep(
+            dir.path(),
+            json!({"pattern":"needle", "path":"invalid-utf8.txt", "context":1}),
+        )
+        .await;
+        assert_eq!(
+            result_text(&utf8),
+            "invalid-utf8.txt-1- before\ninvalid-utf8.txt:2: �needle\ninvalid-utf8.txt-3- after"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_match_limit_has_no_notice_and_fractional_limit_is_floored() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("exact-limit.txt"),
+            "match one\nx\nmatch two\ny",
+        )
+        .unwrap();
+
+        for context in [0, 1] {
+            let exact = run_grep(
+                dir.path(),
+                json!({"pattern":"match", "path":"exact-limit.txt", "limit":2, "context":context}),
+            )
+            .await;
+            assert!(!result_text(&exact).contains("limit reached"));
+            assert!(exact.details.is_none());
+
+            let over = run_grep(
+                dir.path(),
+                json!({"pattern":"match", "path":"exact-limit.txt", "limit":1, "context":context}),
+            )
+            .await;
+            assert!(result_text(&over).contains("1 matches limit reached. Use limit=2 for more"));
+            assert_eq!(over.details.as_ref().unwrap()["matchLimitReached"], 1);
+        }
+
+        let fractional = run_grep(
+            dir.path(),
+            json!({"pattern":"match", "path":"exact-limit.txt", "limit":1.5}),
+        )
+        .await;
+        assert_eq!(fractional.details.as_ref().unwrap()["matchLimitReached"], 1);
+    }
+
+    #[tokio::test]
+    async fn ignores_ripgrep_configuration_and_external_binary_state() {
+        static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _guard = ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("rg-config");
+        std::fs::write(&config, "--fixed-strings\n").unwrap();
+        std::fs::write(dir.path().join("fixture.txt"), "aXb\na.b\n").unwrap();
+        let previous = std::env::var_os("RIPGREP_CONFIG_PATH");
+        // SAFETY: this package's tests serialize mutations of this variable, and the
+        // in-process implementation never launches another thread that reads it.
+        unsafe { std::env::set_var("RIPGREP_CONFIG_PATH", &config) };
+
+        let result = run_grep(
+            dir.path(),
+            json!({"pattern":"a.b", "path":"fixture.txt", "literal":false}),
+        )
+        .await;
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("RIPGREP_CONFIG_PATH", value) },
+            None => unsafe { std::env::remove_var("RIPGREP_CONFIG_PATH") },
+        }
+        assert_eq!(
+            result_text(&result),
+            "fixture.txt:1: aXb\nfixture.txt:2: a.b"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn roots_folder_globs_at_real_and_symlinked_search_paths() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join("migrations/main")).unwrap();
+        std::fs::create_dir_all(repo.join("nested/migrations/main")).unwrap();
+        std::fs::write(repo.join("migrations/main/a.js"), "hello\n").unwrap();
+        std::fs::write(repo.join("nested/migrations/main/b.js"), "hello\n").unwrap();
+        let link = dir.path().join("repo-link");
+        symlink(&repo, &link).unwrap();
+
+        for path in [&repo, &link] {
+            let anchored = run_grep(
+                dir.path(),
+                json!({"pattern":"hello", "path":path, "glob":"./migrations/main/*.js"}),
+            )
+            .await;
+            assert_eq!(result_text(&anchored), "migrations/main/a.js:1: hello");
+
+            let recursive = run_grep(
+                dir.path(),
+                json!({"pattern":"hello", "path":path, "glob":"**/migrations/main/*.js"}),
+            )
+            .await;
+            let mut lines = result_text(&recursive).lines().collect::<Vec<_>>();
+            lines.sort_unstable();
+            assert_eq!(
+                lines,
+                [
+                    "migrations/main/a.js:1: hello",
+                    "nested/migrations/main/b.js:1: hello",
+                ]
+            );
+
+            let negated = run_grep(
+                dir.path(),
+                json!({"pattern":"hello", "path":path, "glob":"!./migrations/**"}),
+            )
+            .await;
+            assert_eq!(
+                result_text(&negated),
+                "nested/migrations/main/b.js:1: hello"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn treats_flag_like_pattern_as_text_without_executing_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("grep-injection-marker");
+        let payload = dir.path().join("payload.sh");
+        std::fs::write(
+            &payload,
+            format!(
+                "#!/bin/sh\necho executed > {}\ncat \"$1\"\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&payload, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.path().join("target.txt"), "target\n").unwrap();
+
+        let result = run_grep(
+            dir.path(),
+            json!({"pattern":format!("--pre={}", payload.display()), "path":dir.path()}),
+        )
+        .await;
+
+        assert_eq!(result_text(&result), "No matches found");
+        assert!(!marker.exists());
+    }
+
+    #[tokio::test]
+    async fn uses_tool_context_cwd_for_relative_search_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("ctx-cwd-grep.txt"), "match in ctx.cwd").unwrap();
+
+        let result = run_grep(dir.path(), json!({"pattern":"match"})).await;
+
+        assert_eq!(result_text(&result), "ctx-cwd-grep.txt:1: match in ctx.cwd");
+    }
+
+    #[tokio::test]
+    async fn pre_aborted_search_does_no_filesystem_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let (abort, signal) = AbortHandle::new();
+        abort.abort();
+
+        let result = execute_grep(
+            dir.path(),
+            json!({"pattern":"needle", "path":"missing"}),
+            signal,
+        )
+        .await;
+
+        assert!(matches!(result, Err(ToolError::Aborted)));
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_regexes_and_missing_or_non_file_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, signal) = AbortHandle::new();
+        let invalid = execute_grep(dir.path(), json!({"pattern":"["}), signal)
+            .await
+            .unwrap_err();
+        assert!(matches!(invalid, ToolError::InvalidArguments(_)));
+
+        let (_, signal) = AbortHandle::new();
+        let missing = execute_grep(
+            dir.path(),
+            json!({"pattern":"needle", "path":"missing"}),
+            signal,
+        )
+        .await
+        .unwrap_err();
+        assert!(missing.to_string().contains("Path not found:"));
     }
 }

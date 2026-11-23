@@ -3,7 +3,7 @@ use std::io::Cursor;
 
 use base64::Engine as _;
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, RgbaImage};
-use pi_core::{ImageContent, ModelImageResizeOptions};
+use pi_core::{ContentBlock, ImageContent, ModelImageResizeOptions, TextContent};
 
 use crate::MediaError;
 
@@ -53,6 +53,54 @@ impl ImagePolicy {
 pub struct ProcessedImage {
     pub content: ImageContent,
     pub hints: Vec<String>,
+}
+
+/// Normalize every image in a tool result while preserving all other blocks and their order.
+///
+/// Returns `None` when the caller can keep the original content allocation. Invalid base64 and
+/// image-processing failures deliberately leave that image untouched: a tool has already produced
+/// the result, so normalization must not silently discard it.
+pub fn normalize_tool_result_images(
+    content: &[ContentBlock],
+    policy: &ImagePolicy,
+) -> Option<Vec<ContentBlock>> {
+    if !content
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Image(_)))
+    {
+        return None;
+    }
+
+    let mut changed = false;
+    let mut normalized = Vec::with_capacity(content.len());
+    for block in content {
+        let ContentBlock::Image(original) = block else {
+            normalized.push(block.clone());
+            continue;
+        };
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&original.data) else {
+            normalized.push(block.clone());
+            continue;
+        };
+        let Ok(processed) = process_image(&bytes, policy) else {
+            normalized.push(block.clone());
+            continue;
+        };
+        if processed.content == *original && processed.hints.is_empty() {
+            normalized.push(block.clone());
+            continue;
+        }
+
+        normalized.push(ContentBlock::Image(processed.content));
+        if !processed.hints.is_empty() {
+            normalized.push(ContentBlock::Text(TextContent::new(
+                processed.hints.join("\n"),
+            )));
+        }
+        changed = true;
+    }
+
+    changed.then_some(normalized)
 }
 
 /// Identify, normalize and encode one image. This performs CPU work synchronously;
@@ -238,7 +286,7 @@ pub fn detect_mime_type(bytes: &[u8]) -> Option<&'static str> {
         Some("image/png")
     } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) && bytes.get(3) != Some(&0xf7) {
         Some("image/jpeg")
-    } else if bytes.starts_with(b"GIF") {
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
         Some("image/gif")
     } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
         Some("image/webp")

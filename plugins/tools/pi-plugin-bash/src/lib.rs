@@ -396,14 +396,14 @@ fn format_output(result: &pi_shell::ShellResult, empty_text: &str) -> String {
         .as_ref()
         .map_or_else(|| "unknown".into(), |path| path.display().to_string());
     let end_line = truncation.total_lines;
+    let start_line = end_line.saturating_sub(truncation.output_lines) + 1;
     if truncation.last_line_partial {
         output.push_str(&format!(
-            "\n\n[Showing last {} of line {end_line} (line is {}). Full output: {full_path}]",
+            "\n\n[Showing last {} of line {start_line} (line is {}). Full output: {full_path}]",
             format_size(truncation.output_bytes),
             format_size(truncation.last_line_bytes)
         ));
     } else {
-        let start_line = end_line.saturating_sub(truncation.output_lines) + 1;
         if truncation.truncated_by == TruncatedBy::Lines {
             output.push_str(&format!(
                 "\n\n[Showing lines {start_line}-{end_line} of {}. Full output: {full_path}]",
@@ -488,6 +488,22 @@ mod tests {
     }
 
     impl UiContextAccess for SessionMetadata {}
+
+    fn execution_error_message(error: ToolError) -> String {
+        let ToolError::Execution(message) = error else {
+            panic!("expected an execution error")
+        };
+        message
+    }
+
+    fn full_output_path_from_message(message: &str) -> PathBuf {
+        let marker = "Full output: ";
+        let start = message.find(marker).expect("full-output marker") + marker.len();
+        let end = message[start..]
+            .find(']')
+            .map_or(message.len(), |offset| start + offset);
+        PathBuf::from(&message[start..end])
+    }
 
     #[cfg(unix)]
     #[tokio::test]
@@ -631,6 +647,74 @@ mod tests {
         assert!(structured["wall_time_seconds"].as_f64().unwrap() >= 0.0);
     }
 
+    #[tokio::test]
+    async fn executes_simple_commands() {
+        let directory = tempfile::tempdir().unwrap();
+        let (_, signal) = AbortHandle::new();
+        let (updates, _) = ToolUpdateSink::channel();
+        let result = BashTool
+            .execute(
+                ToolContext::standalone(directory.path().into(), signal),
+                ToolCallId::new("simple"),
+                json!({"command":"echo 'test output'"}),
+                updates,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            &result.content[0],
+            ContentBlock::Text(text) if text.text == "test output\n"
+        ));
+        assert!(result.details.is_none());
+        assert_eq!(result.structured_content.as_ref().unwrap()["exit_code"], 0);
+    }
+
+    #[tokio::test]
+    async fn nonzero_and_empty_results_match_the_shell_tool_contract() {
+        let directory = tempfile::tempdir().unwrap();
+        let (_, signal) = AbortHandle::new();
+        let (updates, _) = ToolUpdateSink::channel();
+        let failed = BashTool
+            .execute(
+                ToolContext::standalone(directory.path().into(), signal.clone()),
+                ToolCallId::new("failed"),
+                json!({"command":"echo out; exit 3"}),
+                updates,
+            )
+            .await
+            .unwrap();
+        assert!(failed.is_error);
+        assert!(matches!(
+            &failed.content[0],
+            ContentBlock::Text(text) if text.text == "out\n\n\nCommand exited with code 3"
+        ));
+        assert_eq!(
+            failed.structured_content.as_ref().unwrap()["output"],
+            "out\n"
+        );
+        assert_eq!(failed.structured_content.as_ref().unwrap()["exit_code"], 3);
+
+        let (updates, _) = ToolUpdateSink::channel();
+        let empty = BashTool
+            .execute(
+                ToolContext::standalone(directory.path().into(), signal),
+                ToolCallId::new("empty"),
+                json!({"command":"true"}),
+                updates,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            &empty.content[0],
+            ContentBlock::Text(text) if text.text == "(no output)"
+        ));
+        assert_eq!(empty.structured_content.as_ref().unwrap()["output"], "");
+        assert_eq!(
+            empty.structured_content.as_ref().unwrap()["truncated"],
+            false
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn programmatic_output_links_complete_file_above_one_mebibyte() {
@@ -654,18 +738,25 @@ mod tests {
     async fn signal_exit_remains_a_structured_failed_result() {
         let directory = tempfile::tempdir().unwrap();
         let (_, signal) = AbortHandle::new();
-        let (updates, _) = ToolUpdateSink::channel();
-        let result = BashTool
-            .execute(
-                ToolContext::standalone(directory.path().into(), signal),
-                ToolCallId::new("signal"),
-                json!({"command":"kill -TERM $$"}),
-                updates,
-            )
-            .await
-            .unwrap();
-        assert!(result.is_error);
-        assert_eq!(result.structured_content.unwrap()["exit_code"], 143);
+        for (name, exit_code) in [("KILL", 137), ("TERM", 143)] {
+            let (updates, _) = ToolUpdateSink::channel();
+            let result = BashTool
+                .execute(
+                    ToolContext::standalone(directory.path().into(), signal.clone()),
+                    ToolCallId::new(format!("signal-{name}")),
+                    json!({"command":format!("printf 'before-kill\\n'; kill -{name} $$")}),
+                    updates,
+                )
+                .await
+                .unwrap();
+            assert!(result.is_error);
+            assert!(matches!(
+                &result.content[0],
+                ContentBlock::Text(text)
+                    if text.text == format!("before-kill\n\n\nCommand exited with code {exit_code}")
+            ));
+            assert_eq!(result.structured_content.unwrap()["exit_code"], exit_code);
+        }
     }
 
     #[tokio::test]
@@ -767,6 +858,253 @@ mod tests {
         assert!(error.to_string().contains("timed out after 0.05 seconds"));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn truncated_timeout_and_abort_errors_link_complete_output() {
+        let directory = tempfile::tempdir().unwrap();
+
+        let (_, timeout_signal) = AbortHandle::new();
+        let (updates, _) = ToolUpdateSink::channel();
+        let timeout_error = BashTool
+            .execute(
+                ToolContext::standalone(directory.path().into(), timeout_signal),
+                ToolCallId::new("timeout-output"),
+                json!({
+                    "command":"i=1; while [ $i -le 3000 ]; do echo $i; i=$((i+1)); done; sleep 30",
+                    "timeout":0.5
+                }),
+                updates,
+            )
+            .await
+            .unwrap_err();
+        let timeout_message = execution_error_message(timeout_error);
+        assert!(timeout_message.contains("Command timed out after 0.5 seconds"));
+        assert!(timeout_message.contains("[Showing lines 1001-3000 of 3000. Full output: "));
+        let timeout_path = full_output_path_from_message(&timeout_message);
+        let timeout_output = std::fs::read_to_string(&timeout_path).unwrap();
+        assert!(timeout_output.starts_with("1\n2\n3\n"));
+        assert!(timeout_output.ends_with("2999\n3000\n"));
+        std::fs::remove_file(timeout_path).unwrap();
+
+        let ready = directory.path().join("ready");
+        let (abort, abort_signal) = AbortHandle::new();
+        let (updates, _) = ToolUpdateSink::channel();
+        let cwd = directory.path().to_path_buf();
+        let running = tokio::spawn(async move {
+            BashTool
+                .execute(
+                    ToolContext::standalone(cwd, abort_signal),
+                    ToolCallId::new("abort-output"),
+                    json!({
+                        "command":"i=1; while [ $i -le 3000 ]; do echo $i; i=$((i+1)); done; touch ready; sleep 30"
+                    }),
+                    updates,
+                )
+                .await
+        });
+        for _ in 0..200 {
+            if ready.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(ready.exists(), "shell did not finish producing output");
+        abort.abort();
+        let abort_message = execution_error_message(running.await.unwrap().unwrap_err());
+        assert!(abort_message.contains("Command aborted"));
+        assert!(abort_message.contains("[Showing lines 1001-3000 of 3000. Full output: "));
+        let abort_path = full_output_path_from_message(&abort_message);
+        let abort_output = std::fs::read_to_string(&abort_path).unwrap();
+        assert!(abort_output.starts_with("1\n2\n3\n"));
+        assert!(abort_output.ends_with("2999\n3000\n"));
+        std::fs::remove_file(abort_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_cwd_and_shell_path_report_actionable_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing_cwd = directory.path().join("does-not-exist");
+        let (_, signal) = AbortHandle::new();
+        let (updates, _) = ToolUpdateSink::channel();
+        let cwd_error = BashTool
+            .execute(
+                ToolContext::standalone(missing_cwd.clone(), signal.clone()),
+                ToolCallId::new("cwd"),
+                json!({"command":"echo test"}),
+                updates,
+            )
+            .await
+            .unwrap_err();
+        assert!(cwd_error.to_string().contains(&format!(
+            "Working directory does not exist: {}",
+            missing_cwd.display()
+        )));
+
+        let missing_shell = directory.path().join("missing-shell");
+        let (updates, _) = ToolUpdateSink::channel();
+        let shell_error = ConfiguredBashTool {
+            options: BashToolOptions::new(Some(missing_shell.clone()), None),
+        }
+        .execute(
+            ToolContext::standalone(directory.path().into(), signal),
+            ToolCallId::new("shell"),
+            json!({"command":"echo test"}),
+            updates,
+        )
+        .await
+        .unwrap_err();
+        assert!(shell_error.to_string().contains(&format!(
+            "Custom shell path not found: {}",
+            missing_shell.display()
+        )));
+    }
+
+    #[test]
+    fn chatty_output_updates_are_coalesced_and_keep_the_tail() {
+        let mut state = BashUpdateState::default();
+        let updates = (0..5_000)
+            .filter_map(|line| state.push(&format!("line {line}\n")))
+            .collect::<Vec<_>>();
+        assert!(updates.len() < 25);
+        assert!(state.tail.contains("line 4999\n"));
+    }
+
+    #[test]
+    fn partial_long_line_notice_uses_the_first_retained_line() {
+        let result = pi_shell::ShellResult {
+            output: format!("{}END\n", "y".repeat(100)),
+            exit_code: Some(0),
+            cancelled: false,
+            timed_out: false,
+            shell_exit_after: None,
+            truncated: true,
+            truncation: Some(pi_shell::ShellTruncation {
+                content: format!("{}END\n", "y".repeat(100)),
+                truncated_by: TruncatedBy::Bytes,
+                total_lines: 3,
+                total_bytes: 219_020,
+                output_lines: 2,
+                output_bytes: 104,
+                last_line_partial: true,
+                last_line_bytes: 0,
+            }),
+            full_output_path: Some("/tmp/full-output".into()),
+        };
+        let output = format_output(&result, "");
+        assert!(output.contains("[Showing last 104B of line 2"));
+        assert!(!output.contains("of line 3"));
+    }
+
+    #[tokio::test]
+    async fn tool_uses_the_context_cwd() {
+        let directory = tempfile::tempdir().unwrap();
+        let (_, signal) = AbortHandle::new();
+        let (updates, _) = ToolUpdateSink::channel();
+        BashTool
+            .execute(
+                ToolContext::standalone(directory.path().into(), signal),
+                ToolCallId::new("cwd"),
+                json!({"command":"printf marker > ctx-cwd-marker"}),
+                updates,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("ctx-cwd-marker")).unwrap(),
+            "marker"
+        );
+    }
+
+    #[cfg(windows)]
+    fn windows_executable_on_path(name: &str) -> Option<PathBuf> {
+        let output = std::process::Command::new("where")
+            .arg(name)
+            .output()
+            .ok()?;
+        let decoded = String::from_utf8_lossy(&output.stdout);
+        decoded
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(PathBuf::from)
+    }
+
+    #[cfg(windows)]
+    fn bash_single_quoted_path(path: &std::path::Path) -> String {
+        format!(
+            "'{}'",
+            path.to_string_lossy()
+                .replace('\\', "/")
+                .replace('\'', "'\"'\"'")
+        )
+    }
+
+    #[cfg(windows)]
+    fn cleanup_windows_process(pid_file: &std::path::Path) {
+        use std::os::windows::process::CommandExt;
+
+        let Ok(pid) = std::fs::read_to_string(pid_file) else {
+            return;
+        };
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+        let _ = std::process::Command::new(
+            std::path::Path::new(&root)
+                .join("System32")
+                .join("taskkill.exe"),
+        )
+        .args(["/F", "/T", "/PID", pid.trim()])
+        .creation_flags(0x08000000)
+        .status();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_bash_tool_releases_quiet_inherited_handles() {
+        let Some(node) = windows_executable_on_path("node.exe") else {
+            return;
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let script = directory.path().join("spawn-inherited-child.js");
+        let pid_file = directory.path().join("descendant.pid");
+        std::fs::write(
+            &script,
+            r#"const fs = require("fs");
+const { spawn } = require("child_process");
+const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "inherit", detached: true });
+fs.writeFileSync(process.argv[2], String(child.pid));
+child.unref();
+console.log("child-exiting");
+"#,
+        )
+        .unwrap();
+        let command = format!(
+            "{} {} {}",
+            bash_single_quoted_path(&node),
+            bash_single_quoted_path(&script),
+            bash_single_quoted_path(&pid_file)
+        );
+        let (_, signal) = AbortHandle::new();
+        let (updates, _) = ToolUpdateSink::channel();
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            BashTool.execute(
+                ToolContext::standalone(directory.path().into(), signal),
+                ToolCallId::new("windows-inherited-handles"),
+                json!({"command":command}),
+                updates,
+            ),
+        )
+        .await;
+        cleanup_windows_process(&pid_file);
+        let result = result
+            .expect("quiet inherited handles must not keep the bash tool open")
+            .unwrap();
+        assert!(matches!(
+            &result.content[0],
+            ContentBlock::Text(text) if text.text.contains("child-exiting")
+        ));
+    }
+
     #[tokio::test]
     async fn configured_tool_prepends_the_command_prefix() {
         let dir = tempfile::tempdir().unwrap();
@@ -787,6 +1125,29 @@ mod tests {
         assert!(matches!(
             &result.content[0],
             ContentBlock::Text(text) if text.text == "from-settings"
+        ));
+    }
+
+    #[tokio::test]
+    async fn configured_tool_includes_prefix_and_command_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let (_, signal) = AbortHandle::new();
+        let (updates, _) = ToolUpdateSink::channel();
+        let result = ConfiguredBashTool {
+            options: BashToolOptions::new(None, Some("echo prefix-output".to_string())),
+        }
+        .execute(
+            ToolContext::standalone(directory.path().into(), signal),
+            ToolCallId::new("prefix-output"),
+            json!({"command":"echo command-output"}),
+            updates,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            &result.content[0],
+            ContentBlock::Text(text) if text.text.trim() == "prefix-output\ncommand-output"
         ));
     }
 

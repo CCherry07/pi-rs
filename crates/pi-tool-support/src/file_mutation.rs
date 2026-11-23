@@ -96,6 +96,41 @@ pub async fn with_file_mutation_queue<T: Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn same_file_operations_run_in_registration_order() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("file");
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let (finish, held) = oneshot::channel();
+
+        let first_order = Arc::clone(&order);
+        let first = tokio::spawn(with_file_mutation_queue(path.clone(), async move {
+            first_order.lock().unwrap().push("first:start");
+            let _ = held.await;
+            first_order.lock().unwrap().push("first:end");
+            Ok(())
+        }));
+        tokio::task::yield_now().await;
+
+        let second_order = Arc::clone(&order);
+        let second = tokio::spawn(with_file_mutation_queue(path, async move {
+            second_order.lock().unwrap().push("second:start");
+            second_order.lock().unwrap().push("second:end");
+            Ok(())
+        }));
+        tokio::task::yield_now().await;
+        assert_eq!(*order.lock().unwrap(), ["first:start"]);
+
+        finish.send(()).unwrap();
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        assert_eq!(
+            *order.lock().unwrap(),
+            ["first:start", "first:end", "second:start", "second:end"]
+        );
+    }
 
     #[tokio::test]
     async fn same_file_waits_through_caller_cancellation_and_other_files_do_not() {
