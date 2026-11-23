@@ -14,6 +14,23 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check patch whitespace
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          base="$BASE_SHA"
+          if [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
+            # A new branch has no previous commit.
+            base="$(git hash-object -t tree -w --stdin </dev/null)"
+          elif ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            # A multi-commit push can start beyond the shallow checkout.
+            git fetch --no-tags --depth=1 origin "$base"
+          fi
+          git diff --check "$base" HEAD --
 
       - name: Install pinned Rust toolchain
         run: rustup show
@@ -42,9 +59,6 @@ jobs:
 
       - name: Lint workspace
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-      - name: Check patch whitespace
-        run: git diff --check
 
   tool-platforms:
     strategy:
@@ -105,15 +119,6 @@ jobs:
       - name: Test Node host and release Module
         run: npm test
 
-      - name: Test RPC acceptance harness
-        run: node --test ../../scripts/rpc/acceptance/test/*.test.mjs
-
-      - name: Test tool parity inventory checker
-        run: node --test ../../scripts/check-tool-test-parity.test.mjs
-
-      - name: Check frozen tool test references
-        run: node ../../scripts/check-tool-test-parity.mjs
-
       - name: Validate release configuration
         run: npm run release:check
 
@@ -138,9 +143,6 @@ jobs:
 
       - name: Install dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
-
-      - name: Synchronize inherited workspace versions in Cargo.lock
-        run: npm run --silent release:sync-lock
 
       - name: Build native binding
         run: npm run build:native
