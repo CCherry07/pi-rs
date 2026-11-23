@@ -767,6 +767,7 @@ async fn stream_assistant_response(
         thinking_level: config.thinking_level,
         thinking_budgets: config.thinking_budgets,
         max_output_tokens: None,
+        cache_retention: None,
         headers: Default::default(),
         sampling_params: Default::default(),
         session_id: config.session_id.clone(),

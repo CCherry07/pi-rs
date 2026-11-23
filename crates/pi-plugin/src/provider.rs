@@ -11,6 +11,14 @@ use crate::{
     ThinkingBudgets, ThinkingLevel, ToolSpec,
 };
 
+/// Request-local prompt-cache policy. An absent override preserves the provider default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheRetention {
+    None,
+    Short,
+    Long,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProviderRequest {
     pub model: ModelId,
@@ -26,14 +34,16 @@ pub struct ProviderRequest {
     /// Optional output cap for standalone operations such as compaction.
     /// Providers that do not support a request-side cap may ignore it.
     pub max_output_tokens: Option<u64>,
+    /// Overrides provider/environment prompt-cache retention for this request only.
+    pub cache_retention: Option<CacheRetention>,
     /// Per-request headers contributed by routing layers such as models.json.
     /// Providers may ignore these when their protocol does not use HTTP.
     pub headers: BTreeMap<String, String>,
     /// Provider-specific request parameters. Concrete providers decide how
     /// these are represented on the wire.
     pub sampling_params: BTreeMap<String, serde_json::Value>,
-    /// Stable affinity key when the caller owns a persisted session. Callers
-    /// without a session leave this unset.
+    /// Routing identity, normally the persisted session affinity key. Standalone
+    /// callers may supply a fresh identity without enabling prompt caching.
     pub session_id: Option<String>,
 }
 

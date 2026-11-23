@@ -1383,6 +1383,7 @@ impl Plugin for LifecyclePlugin {
             return Ok(None);
         }
         let compaction = CompactionEntry {
+            first_kept_entry_id: None,
             from_hook: None,
             system_message: None,
             retained_entry_ids: Vec::new(),
@@ -2066,6 +2067,7 @@ async fn compaction_uses_persisted_retained_tail() {
         .unwrap();
     session
         .append_compaction(CompactionEntry {
+            first_kept_entry_id: None,
             from_hook: None,
             system_message: None,
             retained_entry_ids: Vec::new(),
@@ -2114,6 +2116,7 @@ async fn lifecycle_hooks_can_replace_compaction_and_cancel_tree_navigation() {
 
     session
         .append_compaction(CompactionEntry {
+            first_kept_entry_id: None,
             from_hook: None,
             system_message: None,
             retained_entry_ids: Vec::new(),
@@ -2420,7 +2423,7 @@ async fn manual_compaction_uses_active_model_reasoning_without_a_reserve_based_o
 
     let requests = provider.requests();
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[1].max_output_tokens, None);
+    assert_eq!(requests[1].max_output_tokens, Some(32));
     assert_eq!(requests[1].thinking_level, ThinkingLevel::Off);
 }
 
@@ -2486,8 +2489,9 @@ async fn overflow_compaction_drops_the_failed_assistant_and_retries_once() {
     let agent_settled = Arc::new(AtomicUsize::new(0));
     let provider_plugin = ScriptedProviderPlugin::scripted([
         ScriptedTurn::Text("previous answer".to_string()),
-        ScriptedTurn::Error("context window token length exceeded".to_string()),
+        ScriptedTurn::Error("context length exceeded".to_string()),
         ScriptedTurn::Text("overflow summary".to_string()),
+        ScriptedTurn::Text("failed turn prefix summary".to_string()),
         ScriptedTurn::Text("recovered answer".to_string()),
     ]);
     let provider = provider_plugin.provider();
@@ -2523,7 +2527,8 @@ async fn overflow_compaction_drops_the_failed_assistant_and_retries_once() {
     };
 
     assert_eq!(outcome.stop, AgentLoopStop::Completed);
-    assert_eq!(provider.requests().len(), 4);
+    // Current Pi closes the omitted recovery suffix: history + turn-prefix summaries.
+    assert_eq!(provider.requests().len(), 5);
     assert_eq!(agent_ends.load(Ordering::SeqCst), 3);
     assert_eq!(agent_settled.load(Ordering::SeqCst), 2);
     assert!(
@@ -2857,6 +2862,7 @@ async fn context_budget_uses_session_limits_and_clears_after_compaction_and_rest
     );
     session
         .append_compaction(CompactionEntry {
+            first_kept_entry_id: None,
             from_hook: None,
             system_message: None,
             retained_entry_ids: Vec::new(),

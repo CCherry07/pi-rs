@@ -46,6 +46,7 @@ fn request(provider: &str, base_url: &str) -> ProviderRequest {
         thinking_level: ThinkingLevel::Off,
         thinking_budgets: None,
         max_output_tokens: Some(1_024),
+        cache_retention: None,
         headers: BTreeMap::new(),
         sampling_params: BTreeMap::new(),
         session_id: Some("session-123".into()),
@@ -91,6 +92,77 @@ fn cache_mode(test: &str) -> Option<String> {
         );
     }
     None
+}
+
+#[tokio::test]
+async fn request_cache_override_beats_environment_and_preserves_routing_identity() {
+    let Some(_) =
+        cache_mode("request_cache_override_beats_environment_and_preserves_routing_identity")
+    else {
+        return;
+    };
+    let mut req = request("custom", "https://gateway.example/v1");
+    req.model_spec.as_mut().unwrap().compat = Some(json!({
+        "supportsExplicitPromptCacheMode": true, "sessionAffinityFormat": "openrouter"
+    }));
+    req.cache_retention = Some(pi_plugin::CacheRetention::None);
+    let (headers, body) = capture("gateway-key", req.clone()).await;
+    assert!(body.get("prompt_cache_key").is_none());
+    assert!(body.get("prompt_cache_retention").is_none());
+    assert_eq!(body["prompt_cache_options"], json!({"mode":"explicit"}));
+    assert!(!headers.contains_key("x-session-id"));
+    assert_eq!(headers["thread-id"], "session-123");
+    req.cache_retention = Some(pi_plugin::CacheRetention::Short);
+    let (headers, body) = capture("gateway-key", req).await;
+    assert_eq!(body["prompt_cache_key"], "session-123");
+    assert_eq!(headers["x-session-id"], "session-123");
+}
+
+#[tokio::test]
+async fn request_cache_override_disables_completions_cache_and_affinity() {
+    let Some(_) = cache_mode("request_cache_override_disables_completions_cache_and_affinity")
+    else {
+        return;
+    };
+    let mut req = request("custom", "https://gateway.example/v1");
+    req.model_spec.as_mut().unwrap().compat = Some(json!({
+        "cacheControlFormat": "anthropic", "sendSessionAffinityHeaders": true,
+        "sessionAffinityFormat": "openrouter"
+    }));
+    req.system_prompt = "summarize".into();
+    req.messages = vec![pi_core::Message::User(pi_core::UserMessage::text(
+        "history", 1,
+    ))];
+    let transport = Arc::new(Capture::default());
+    let provider = pi_plugin_openai::OpenAiCompatibleProvider::with_transport(
+        OpenAiCompatibleConfig::new("https://gateway.example/v1", "fixture"),
+        transport.clone(),
+    )
+    .unwrap();
+    for retention in [
+        pi_plugin::CacheRetention::None,
+        pi_plugin::CacheRetention::Long,
+    ] {
+        req.cache_retention = Some(retention);
+        let context = ProviderCallContext::without_plugins("/", provider.id(), req.model.clone());
+        let _stream = provider
+            .stream(req.clone(), context, AbortHandle::new().1)
+            .await
+            .unwrap();
+        let (_, headers, body) = transport.0.lock().unwrap().take().unwrap();
+        if retention == pi_plugin::CacheRetention::None {
+            assert!(!body.to_string().contains("cache_control"));
+            assert!(body.get("prompt_cache_key").is_none());
+            assert!(body.get("prompt_cache_retention").is_none());
+            assert!(!headers.contains_key("x-session-id"));
+        } else {
+            assert_eq!(
+                body["messages"][0]["content"][0]["cache_control"]["ttl"],
+                "1h"
+            );
+            assert_eq!(headers["x-session-id"], "session-123");
+        }
+    }
 }
 
 struct PayloadHook;

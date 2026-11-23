@@ -11,7 +11,7 @@ use pi_core::{CustomMessage, Usage};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use pi_core::{AssistantMessage, Message, StopReason};
+use pi_core::{AssistantMessage, Message};
 use pi_runtime::{PiRuntime, RuntimeRestoreState};
 
 use super::configuration::clamp_thinking_for_model;
@@ -181,25 +181,66 @@ impl ContextUpdates {
         assistant: &AssistantMessage,
     ) -> Result<(), SessionError> {
         let branch = self.store.branch_entries()?;
-        let target = branch.iter().rev().find(|record| matches!(&record.entry,
-            SessionEntry::Message(message) if matches!(message.message.as_standard(), Some(Message::Assistant(value))
-                if value.timestamp_ms == assistant.timestamp_ms && value.stop_reason == StopReason::Error)));
-        if let Some(target) = target {
-            self.append(
-                SessionEntry::ContextEdit(crate::ContextEditEntry {
-                    target_id: target.id.clone(),
-                    replacement: None,
-                }),
-                ContextActivation::KeepConfiguration,
-            )?;
-        } else {
-            self.runtime
-                .agent()
-                .remove_last_failed_assistant()
-                .map_err(|error| SessionError::Runtime(error.to_string()))?;
-            self.events.refresh_agent(self.runtime.agent().state());
+        let projection = crate::project_session_entries(&branch, &self.options);
+        let messages = projection
+            .iter()
+            .flat_map(|entry| {
+                entry
+                    .messages
+                    .iter()
+                    .map(move |message| (&entry.source_entry.id, message))
+            })
+            .collect::<Vec<_>>();
+        let target = messages.iter().rposition(|(_, message)| {
+            matches!(message.as_standard(), Some(Message::Assistant(value)) if value.as_ref() == assistant)
+        }).or_else(|| messages.iter().rposition(|(_, message)| {
+            matches!(message.as_standard(), Some(Message::Assistant(value))
+                if value.timestamp_ms == assistant.timestamp_ms
+                    && value.provider == assistant.provider && value.model == assistant.model)
+        }));
+        let Some(index) = target else {
+            // Never repair only the live context: replay would resurrect the attempt.
+            if self.runtime.agent().state().messages.iter().any(|message| {
+                matches!(message, Message::Assistant(value) if value.as_ref() == assistant)
+            }) {
+                return Err(SessionError::InvalidEntry(
+                    "Cannot persist recovery omission because a projected message has no source entry".into(),
+                ));
+            }
+            return Ok(());
+        };
+        let call_ids = assistant
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                pi_core::ContentBlock::ToolCall(call) => Some(&call.id),
+                _ => None,
+            })
+            .collect::<std::collections::HashSet<_>>();
+        let mut targets = vec![messages[index].0.clone()];
+        for (id, message) in &messages[index + 1..] {
+            match message.as_standard() {
+                Some(Message::Assistant(_)) => break,
+                Some(Message::ToolResult(result))
+                    if call_ids.contains(&result.tool_call_id) && !targets.contains(id) =>
+                {
+                    targets.push((*id).clone());
+                }
+                _ => {}
+            }
         }
-        Ok(())
+        self.append_batch(
+            targets
+                .into_iter()
+                .map(|target_id| {
+                    SessionEntry::ContextEdit(crate::ContextEditEntry {
+                        target_id,
+                        replacement: None,
+                    })
+                })
+                .collect(),
+            ContextActivation::KeepConfiguration,
+        )
     }
 
     pub(super) fn activate_and_publish(

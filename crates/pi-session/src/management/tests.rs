@@ -694,6 +694,7 @@ async fn fork_point_excludes_later_compaction_and_rejects_invalid_sources() {
         .current()
         .store()
         .append_session_record(crate::SessionEntry::Compaction(crate::CompactionEntry {
+            first_kept_entry_id: None,
             from_hook: None,
             system_message: None,
             retained_entry_ids: Vec::new(),
@@ -798,6 +799,7 @@ async fn forked_context_survives_reload_without_importing_configuration_or_usage
         .current()
         .store()
         .append_session_record(crate::SessionEntry::Compaction(crate::CompactionEntry {
+            first_kept_entry_id: None,
             from_hook: None,
             system_message: None,
             retained_entry_ids: Vec::new(),

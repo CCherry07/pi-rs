@@ -17,6 +17,7 @@ pi-runtime.workspace = true
 pi-shell.workspace = true
 pi-telemetry.workspace = true
 pi-utils.workspace = true
+regex = "1"
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 thiserror.workspace = true

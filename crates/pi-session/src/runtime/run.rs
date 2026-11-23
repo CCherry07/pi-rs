@@ -1,8 +1,8 @@
 use super::activity::{ActivityPhase, CancellationStage};
 use super::options::AutoRetrySettings;
 use super::{
-    AgentSession, CompactionActivation, PreparedSessionPrompt, PromptDisposition, PromptOutcome,
-    SessionInput, SessionSubmission,
+    AgentSession, PreparedSessionPrompt, PromptDisposition, PromptOutcome, SessionInput,
+    SessionSubmission,
 };
 use crate::{MAIN_LANE, QueueKind, QueueSnapshot, SessionError};
 use pi_agent::{AgentLoopOutcome, AgentLoopStop};
@@ -183,7 +183,6 @@ impl AgentSession {
     ) -> Result<Option<AgentLoopOutcome>, SessionError> {
         let _operation = self.activity.begin(ActivityPhase::Preparing).await;
         self.ensure_open()?;
-        self.maybe_threshold_compact_locked().await;
         let (prepared, run_id) = match submission {
             SessionSubmission::Text {
                 display_text,
@@ -205,6 +204,12 @@ impl AgentSession {
                 if self.activity.is_aborted() {
                     return Err(SessionError::Cancelled("session input"));
                 }
+                // Pi runs input interception/expansion before pre-prompt checks.
+                // A handled input must not summarize or edit the previous turn.
+                self.compact_before_prompt().await?;
+                if self.activity.is_aborted() {
+                    return Ok(None);
+                }
                 let run_id = self.activity.begin_text(
                     prepared.generation(),
                     prepared.display_text(),
@@ -214,6 +219,10 @@ impl AgentSession {
                 (PreparedSessionPrompt::Text(prepared), run_id)
             }
             SessionSubmission::Messages(messages) => {
+                self.compact_before_prompt().await?;
+                if self.activity.is_aborted() {
+                    return Ok(None);
+                }
                 let prepared = self.runtime.prepare_message_submission(messages).await;
                 if self.activity.is_aborted() {
                     return Err(SessionError::Cancelled("session input"));
@@ -224,6 +233,10 @@ impl AgentSession {
                 (PreparedSessionPrompt::Messages(prepared), run_id)
             }
             SessionSubmission::Queued => {
+                self.compact_before_prompt().await?;
+                if self.activity.is_aborted() {
+                    return Ok(None);
+                }
                 let Some((entry_id, message)) = self.activity.next_queued() else {
                     return Ok(None);
                 };
@@ -526,12 +539,22 @@ impl AgentSession {
         self.activity.set_retry_attempt(0);
         let mut outcome = outcome;
         let mut retry_attempt = 0_u32;
-        let mut overflow_recovery_attempted = false;
         let mut continued_messages = Vec::new();
         loop {
             self.context_updates.reconcile()?;
             outcome.final_context.messages = self.runtime.agent().state().messages.as_ref().clone();
-            if !self.activity.is_aborted() && self.is_overflow_outcome(&outcome) {
+            let overflow = if !self.activity.is_aborted()
+                && !matches!(
+                    outcome.stop,
+                    AgentLoopStop::Aborted | AgentLoopStop::TerminatedByTools
+                )
+                && let Some(message) = last_assistant(&outcome)
+            {
+                self.maybe_overflow_compact_locked(message).await?
+            } else {
+                None
+            };
+            if let Some(retry) = overflow {
                 if retry_attempt > 0 {
                     self.events.publish_auto_retry_end(
                         false,
@@ -541,29 +564,16 @@ impl AgentSession {
                     retry_attempt = 0;
                     self.activity.set_retry_attempt(0);
                 }
-                if self.compaction_settings().enabled && !overflow_recovery_attempted {
-                    overflow_recovery_attempted = true;
-                    if self
-                        .run_compaction_locked(
-                            crate::CompactionReason::Overflow,
-                            true,
-                            None,
-                            true,
-                            CompactionActivation::Immediate,
-                        )
-                        .await
-                        .is_ok()
-                        && !self.activity.is_aborted()
-                        && let Ok(retried) = self.runtime.continue_activity().await
-                    {
-                        outcome = retried;
-                        continue;
-                    }
+                if retry {
+                    continued_messages.append(&mut outcome.new_messages);
+                    outcome = self.runtime.continue_activity().await?;
+                    continue;
                 }
             }
 
             let retry_settings = self.retry_settings();
-            if !self.activity.is_aborted()
+            if overflow.is_none()
+                && !self.activity.is_aborted()
                 && retry_settings.enabled
                 && retry_attempt < retry_settings.max_retries
                 && is_retryable_assistant_outcome(&outcome)
@@ -596,6 +606,7 @@ impl AgentSession {
                 }
                 match self.runtime.continue_activity().await {
                     Ok(retried) => {
+                        continued_messages.append(&mut outcome.new_messages);
                         outcome = retried;
                         continue;
                     }
@@ -619,7 +630,14 @@ impl AgentSession {
                 retry_attempt = 0;
                 self.activity.set_retry_attempt(0);
             }
-            self.maybe_threshold_compact_locked().await;
+            if overflow.is_none()
+                && !matches!(
+                    outcome.stop,
+                    AgentLoopStop::Aborted | AgentLoopStop::TerminatedByTools
+                )
+            {
+                self.maybe_threshold_compact_locked(false).await?;
+            }
             if !self.activity.is_aborted() && outcome.stop != AgentLoopStop::Aborted {
                 if !self.activity.is_stopped() && self.runtime.agent().has_queued_messages() {
                     continued_messages.append(&mut outcome.new_messages);
@@ -709,6 +727,7 @@ pub(super) fn will_retry_after_agent_end(
     messages.iter().rev().find_map(|message| match message {
         Message::Assistant(message) => Some(
             message.stop_reason == StopReason::Error
+                && !super::compaction::is_context_overflow_error(message)
                 && message
                     .error_message
                     .as_deref()
@@ -729,7 +748,9 @@ pub(super) fn is_retryable_assistant_outcome(outcome: &AgentLoopOutcome) -> bool
     let Some(message) = last_assistant(outcome) else {
         return false;
     };
-    if message.stop_reason != StopReason::Error {
+    if message.stop_reason != StopReason::Error
+        || super::compaction::is_context_overflow_error(message)
+    {
         return false;
     }
     let Some(error) = message.error_message.as_deref() else {

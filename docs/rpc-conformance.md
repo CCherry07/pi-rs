@@ -427,11 +427,14 @@ to old artifacts or failures.
   evidence `target/rpc-evidence/idle-differential-1jGraw`: full model metadata agrees, but Rust
   additionally emits entry_appended(model_change). Only generated sessionId values were mapped
   bijectively; the extra event remains a failure. The provenance table above identifies its owner.
-- `scripts/rpc/differential.mjs --legacy <checkout> --rust <fresh-binary> --preparation <ready-manifest> --evidence-dir <persistent-directory> --scenario idle|clear-queue|models`
-  retains both complete stdout/stderr, commands, exit statuses, actual HEAD/base tree, tracked-diff
-  digest, input/fixture digests, binary SHA and normalization mappings. These runs do **not** cover
-  the Node/NAPI entrypoint. Oracle regeneration from the isolated clone passed `--check`
-  (`8259ed7f-5462-4415-931b-1db6e5c51040`).
+- The standalone runs above retained complete stdout/stderr, commands, exit statuses, HEAD/base
+  tree, tracked-diff digest, input/fixture digests, binary SHA and normalization mappings. They did
+  **not** cover the Node/NAPI entrypoint. Oracle regeneration from the isolated clone passed
+  `--check` (`8259ed7f-5462-4415-931b-1db6e5c51040`).
+- To run those recipes with fresh pinned inputs, use the [RPC acceptance runner](../scripts/rpc/acceptance/README.md):
+  `node scripts/rpc/acceptance/run.mjs --inputs <pinned-inputs.json> --evidence-dir <persistent-directory> --scenarios idle,clear-queue,models --targets rust`.
+  The runner records complete ordered stdout, exit status, input and artifact hashes, and explicit
+  normalization mappings. Run results apply only to the selected scenarios and targets.
 - **R:** duration wire red `78f6323c-0a91-47a7-9c4a-11b6d77722a4` / green
   `23d3f97e-bad6-4894-bbc8-d1a6c9118f7a`; execution distinction red
   `c1932493-2e9c-4d56-899c-0b11e71dfe0e` / green `fd6384bb-f200-4f1b-bfbe-82e42ea68ac7`.

@@ -15,6 +15,7 @@ pi-agent.workspace = true
 pi-utils.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+uuid = { version = "1.18.1", features = ["v7"] }
 
 [dev-dependencies]
 async-trait.workspace = true

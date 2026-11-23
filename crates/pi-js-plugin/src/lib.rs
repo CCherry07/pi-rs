@@ -2421,12 +2421,14 @@ impl Plugin for JsPlugin {
                 if let Some(source) = entry["sourceEntry"].as_object_mut() {
                     source.remove("seq");
                     if source.get("type").and_then(Value::as_str) == Some("compaction") {
-                        let first = source
-                            .get("retainedEntryIds")
-                            .and_then(Value::as_array)
-                            .and_then(|ids| ids.first())
-                            .cloned()
-                            .unwrap_or(Value::Null);
+                        let first = source.get("firstKeptEntryId").cloned().unwrap_or_else(|| {
+                            source
+                                .get("retainedEntryIds")
+                                .and_then(Value::as_array)
+                                .and_then(|ids| ids.first())
+                                .cloned()
+                                .unwrap_or(Value::Null)
+                        });
                         source.remove("retainedTail");
                         source.remove("retainedEntryIds");
                         source.insert("firstKeptEntryId".into(), first);
@@ -2920,6 +2922,7 @@ impl Plugin for JsPlugin {
                 json!({
                     "type": "session_before_compact",
                     "preparation": {
+                        "firstKeptEntryId": preparation.first_kept_entry_id,
                         "messagesToSummarize": preparation.messages_to_summarize,
                         "turnPrefixMessages": preparation.turn_prefix_messages,
                         "retainedTail": preparation.retained_tail,
@@ -2950,6 +2953,7 @@ impl Plugin for JsPlugin {
         Ok(Some(SessionBeforeCompactResult {
             cancel: result.cancel,
             compaction: result.compaction.map(|compaction| CompactionEntry {
+                first_kept_entry_id: compaction.first_kept_entry_id,
                 from_hook: None,
                 system_message: None,
                 retained_entry_ids: Vec::new(),
@@ -3584,6 +3588,8 @@ struct JsSessionBeforeForkResult {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct JsCompactionResult {
+    #[serde(default)]
+    first_kept_entry_id: Option<String>,
     summary: String,
     tokens_before: u64,
     #[serde(default)]

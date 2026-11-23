@@ -633,6 +633,7 @@ async fn editing_retained_messages_after_repeated_compaction_keeps_provenance() 
             .collect();
         session
             .append_compaction(CompactionEntry {
+                first_kept_entry_id: None,
                 from_hook: None,
                 system_message: None,
                 summary: "checkpoint".into(),
@@ -919,10 +920,13 @@ impl Plugin for BoundaryCompactionProbe {
         Ok(Some(pi_plugin::SessionBeforeCompactResult {
             cancel: false,
             compaction: Some(CompactionEntry {
+                first_kept_entry_id: None,
                 from_hook: None,
                 system_message: None,
                 summary: "summary".into(),
-                retained_tail: vec![],
+                // The hook owns retention; use the current Pi preparation rather
+                // than relying on automatic injection into an explicit empty tail.
+                retained_tail: event.preparation.retained_tail.clone(),
                 retained_entry_ids: vec![],
                 tokens_before: 1,
                 details: None,

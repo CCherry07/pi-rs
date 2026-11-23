@@ -7,8 +7,11 @@
 //! generation. Historical setting names and migrations are intentionally not
 //! supported.
 
+mod compaction;
 mod document;
 mod store;
+
+pub use compaction::{CompactionSettingError, CompactionTokenSettings};
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -331,6 +334,8 @@ pub struct SettingsValues {
     pub steering_mode: QueueModeSetting,
     pub follow_up_mode: QueueModeSetting,
     pub compaction: CompactionSettings,
+    /// Generation-local token policy with lazy validation of exact model entries.
+    pub compaction_tokens: CompactionTokenSettings,
     pub branch_summary: BranchSummarySettings,
     pub retry: RetrySettings,
     pub default_project_trust: DefaultProjectTrust,
@@ -370,6 +375,7 @@ impl Default for SettingsValues {
             steering_mode: QueueModeSetting::OneAtATime,
             follow_up_mode: QueueModeSetting::OneAtATime,
             compaction: CompactionSettings::default(),
+            compaction_tokens: CompactionTokenSettings::default(),
             branch_summary: BranchSummarySettings::default(),
             retry: RetrySettings::default(),
             default_project_trust: DefaultProjectTrust::Ask,
@@ -395,6 +401,17 @@ impl Default for SettingsValues {
             websocket_connect_timeout_ms: None,
             images: ImageSettings::default(),
         }
+    }
+}
+
+impl SettingsValues {
+    /// Resolve token fields for an exact provider/model ID, or ordinary settings
+    /// when no model is supplied. Invalid unselected model entries stay dormant.
+    pub fn compaction_for_model(
+        &self,
+        model: Option<(&str, &str)>,
+    ) -> Result<CompactionSettings, CompactionSettingError> {
+        self.compaction_tokens.resolve(self.compaction, model)
     }
 }
 

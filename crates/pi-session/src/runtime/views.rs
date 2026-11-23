@@ -4,15 +4,40 @@ use std::path::Path;
 use std::sync::Arc;
 
 use pi_core::{ModelId, ModelSpec, PluginId, ProviderId, ToolSpec, WorkspaceSnapshot};
-use pi_plugin::{CommandSpec, PluginDiagnostic, ProviderStatus};
+use pi_plugin::{CommandSpec, ContextUsage, PluginDiagnostic, ProviderStatus};
 use pi_runtime::{PiRuntime, ResourceDiagnostic};
 
 use crate::{
-    BranchQuery, EntryQuery, JsonlSessionMetadata, LaneRecord, SessionContext, SessionDocument,
-    SessionError, SessionHeader, SessionRecord, SessionStats, SessionStore,
+    BranchQuery, EntryQuery, HistoryError, JsonlSessionMetadata, LaneRecord, SessionContext,
+    SessionDocument, SessionError, SessionHeader, SessionRecord, SessionStats, SessionStore,
+    build_context_entries, current_session_context_tokens,
 };
 
 impl super::AgentSession {
+    /// Historical usage for the default projection, with stale checkpoints left unknown.
+    /// This differs from both configured live context and the latest request's budget.
+    pub(crate) fn context_usage(&self) -> Result<Option<ContextUsage>, HistoryError> {
+        let Some(context_window) = self.active_context_window() else {
+            return Ok(None);
+        };
+        let branch = self.store.branch_entries()?;
+        let context = self.store.context()?;
+        let tokens =
+            current_session_context_tokens(&branch, &context.messages).map(|usage| usage.tokens);
+        let percent = tokens.map(|tokens| {
+            if context_window == 0 {
+                0.0
+            } else {
+                tokens as f64 / context_window as f64 * 100.0
+            }
+        });
+        Ok(Some(ContextUsage {
+            tokens,
+            context_window,
+            percent,
+        }))
+    }
+
     /// Canonical session context before provider conversion, including opaque message extensions.
     pub fn context_messages(&self) -> Result<Vec<crate::AgentMessage>, SessionError> {
         Ok(self
@@ -227,6 +252,14 @@ impl<'a> SessionHistory<'a> {
         self.store
             .find_open_operations(lane, limit)
             .map_err(Into::into)
+    }
+
+    /// Default context-bearing records, preserving journal identities and wire extensions.
+    /// Runtime-specific transforms and message projectors do not participate in this view.
+    pub(crate) fn context_entries(&self) -> Result<Vec<SessionRecord>, HistoryError> {
+        let document = self.store.shared_document()?;
+        let branch = document.branch()?.into_iter().cloned().collect::<Vec<_>>();
+        Ok(build_context_entries(&branch, &Default::default()))
     }
 
     pub fn context(&self) -> Result<SessionContext, SessionError> {

@@ -1,17 +1,15 @@
-use async_trait::async_trait;
-use pi_core::{
-    AbortSignal, ContentBlock, Message, StopReason, ThinkingLevel, Usage, UsageCost, UserMessage,
-};
-use pi_runtime::{PiRuntime, RuntimeCompletionRequest, RuntimeError};
-use serde_json::Value;
-#[cfg(test)]
-use serde_json::json;
+//! Deterministic compaction planning, summary formatting and execution contracts.
+//!
+//! Callers supply projected entries and normalized messages. History projection,
+//! provider execution and checkpoint persistence belong to the adapters/caller.
 
-use crate::{
-    AgentMessage, CompactionEntry, CompactionPreparation, CompactionSettings, FileOperations,
-    SessionContextBuildOptions, SessionEntry, SessionRecord, agent_message_to_provider_message,
-    build_session_context,
+use async_trait::async_trait;
+use pi_core::session::{
+    AgentMessage, CompactionPreparation, CompactionSettings, FileOperations, ProjectedSessionEntry,
+    SessionEntry, SessionRecord,
 };
+use pi_core::{AbortSignal, ContentBlock, Message, StopReason, ThinkingLevel, Usage, UsageCost};
+use serde_json::Value;
 
 pub const SUMMARIZATION_SYSTEM_PROMPT: &str = r#"You are a context summarization assistant. Your task is to read a conversation between a user and an AI assistant, then produce a structured summary following the exact format specified.
 
@@ -231,82 +229,6 @@ pub trait CompactionCompleter: Send + Sync {
     ) -> Result<CompactionCompletion, CompactionError>;
 }
 
-#[async_trait]
-impl CompactionCompleter for PiRuntime {
-    fn model_capabilities(&self) -> CompactionModelCapabilities {
-        let state = self.agent().state();
-        self.model(&state.provider_id, &state.model_id).map_or(
-            CompactionModelCapabilities {
-                reasoning: false,
-                max_output_tokens: None,
-            },
-            |model| CompactionModelCapabilities {
-                reasoning: model.reasoning,
-                max_output_tokens: (model.max_tokens > 0).then_some(model.max_tokens),
-            },
-        )
-    }
-
-    async fn complete_compaction(
-        &self,
-        request: CompactionCompletionRequest,
-        signal: AbortSignal,
-    ) -> Result<CompactionCompletion, CompactionError> {
-        compaction_completion(
-            self.complete(compaction_request(self, request), signal)
-                .await,
-        )
-    }
-}
-
-pub(super) fn compaction_request(
-    runtime: &PiRuntime,
-    request: CompactionCompletionRequest,
-) -> RuntimeCompletionRequest {
-    RuntimeCompletionRequest {
-        system_prompt: request.system_prompt,
-        messages: vec![Message::User(UserMessage::text(
-            request.prompt,
-            crate::now_ms(),
-        ))],
-        model: None,
-        thinking_level: request.thinking_level,
-        thinking_budgets: runtime.agent().thinking_budgets(),
-        max_output_tokens: request.max_output_tokens,
-    }
-}
-
-pub(super) fn compaction_completion(
-    response: Result<pi_core::AssistantMessage, RuntimeError>,
-) -> Result<CompactionCompletion, CompactionError> {
-    let response = response.map_err(|error| match error {
-        RuntimeError::Aborted => CompactionError::Aborted("summarization aborted".into()),
-        other => CompactionError::SummarizationFailed(other.to_string()),
-    })?;
-    if response.stop_reason == StopReason::Aborted {
-        return Err(CompactionError::Aborted(
-            response
-                .error_message
-                .unwrap_or_else(|| "summarization aborted".into()),
-        ));
-    }
-    if let Some(error) = summarization_failure(&response, "Summarization") {
-        return Err(CompactionError::SummarizationFailed(error));
-    }
-    Ok(CompactionCompletion {
-        text: response
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                ContentBlock::Text(text) => Some(text.text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-        usage: response.usage,
-    })
-}
-
 pub(crate) fn summarization_failure(
     response: &pi_core::AssistantMessage,
     label: &str,
@@ -346,26 +268,12 @@ pub fn calculate_context_tokens(usage: &Usage) -> u64 {
     }
 }
 
-pub fn get_last_assistant_usage(entries: &[SessionRecord]) -> Option<Usage> {
-    entries.iter().rev().find_map(|entry| match &entry.entry {
-        SessionEntry::Message(message) => assistant_usage(&message.message).cloned(),
-        _ => None,
-    })
-}
-
 pub fn estimate_context_tokens(messages: &[AgentMessage]) -> ContextUsageEstimate {
-    let mut latest_prefix_timestamp = i64::MIN;
-    let mut usage_info = None;
-    for (index, message) in messages.iter().enumerate() {
-        if message_timestamp(message).is_some_and(|timestamp| timestamp >= latest_prefix_timestamp)
-            && let Some(usage) = assistant_usage(message)
-        {
-            usage_info = Some((index, usage));
-        }
-        if let Some(timestamp) = message_timestamp(message) {
-            latest_prefix_timestamp = latest_prefix_timestamp.max(timestamp);
-        }
-    }
+    let usage_info = messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, message)| assistant_usage(message).map(|usage| (index, usage)));
     let Some((index, usage)) = usage_info else {
         let estimated = messages.iter().map(estimate_tokens).sum();
         return ContextUsageEstimate {
@@ -385,61 +293,14 @@ pub fn estimate_context_tokens(messages: &[AgentMessage]) -> ContextUsageEstimat
     }
 }
 
-/// Estimates the active session context while rejecting usage blocks retained
-/// from before the latest compaction or isolated-context seed. Those blocks
-/// describe the old context and could otherwise immediately retrigger compaction.
-pub fn estimate_session_context_tokens(
-    path_entries: &[SessionRecord],
-    messages: &[AgentMessage],
-) -> ContextUsageEstimate {
-    let Some(compaction_index) = path_entries.iter().rposition(|entry| {
-        matches!(
-            entry.entry,
-            SessionEntry::Compaction(_) | SessionEntry::ContextEdit(_)
-        ) || crate::history::is_inherited_context_entry(&entry.entry)
-    }) else {
-        return estimate_context_tokens(messages);
-    };
-    if get_last_assistant_usage(&path_entries[compaction_index + 1..]).is_some() {
-        return estimate_context_tokens(messages);
-    }
-    let estimated = messages.iter().map(estimate_tokens).sum();
-    ContextUsageEstimate {
-        tokens: estimated,
-        usage_tokens: 0,
-        trailing_tokens: estimated,
-        last_usage_index: None,
-    }
-}
-
-/// Returns the current context usage exposed to product frontends.
-///
-/// Immediately after compaction, retained assistant messages still carry
-/// usage for the larger pre-compaction prefix. Pi reports the current usage as
-/// unknown until a later successful assistant response establishes a new
-/// checkpoint.
-pub fn current_session_context_tokens(
-    path_entries: &[SessionRecord],
-    messages: &[AgentMessage],
-) -> Option<ContextUsageEstimate> {
-    let Some(compaction_index) = path_entries.iter().rposition(|entry| {
-        matches!(
-            entry.entry,
-            SessionEntry::Compaction(_) | SessionEntry::ContextEdit(_)
-        ) || crate::history::is_inherited_context_entry(&entry.entry)
-    }) else {
-        return Some(estimate_context_tokens(messages));
-    };
-    get_last_assistant_usage(&path_entries[compaction_index + 1..])
-        .map(|_| estimate_context_tokens(messages))
-}
-
 pub fn should_compact(
     context_tokens: u64,
     context_window: u64,
     settings: CompactionSettings,
 ) -> bool {
-    settings.enabled && context_tokens > context_window.saturating_sub(settings.reserve_tokens)
+    settings.enabled
+        && (settings.reserve_tokens > context_window
+            || context_tokens > context_window - settings.reserve_tokens)
 }
 
 pub fn estimate_tokens(message: &AgentMessage) -> u64 {
@@ -483,103 +344,40 @@ pub fn estimate_tokens(message: &AgentMessage) -> u64 {
     u64::try_from(chars.saturating_add(3) / 4).unwrap_or(u64::MAX)
 }
 
-/// Input appended or replaced after the latest assistant has not reached a provider yet.
-/// Metadata appended after it must not make automatic compaction swallow it.
-pub(crate) fn unsent_context_inputs(
-    path: &[SessionRecord],
-    options: &SessionContextBuildOptions,
-) -> Vec<AgentMessage> {
-    let last_assistant = path.iter().rev().find(|entry| matches!(&entry.entry, SessionEntry::Message(message) if message.message.role() == "assistant")).map_or(0, |entry| entry.seq);
-    let edited = path
-        .iter()
-        .filter(|entry| entry.seq > last_assistant)
-        .filter_map(|entry| match &entry.entry {
-            SessionEntry::ContextEdit(edit) if edit.replacement.is_some() => {
-                Some(edit.target_id.as_str())
-            }
-            _ => None,
-        })
-        .collect::<std::collections::HashSet<_>>();
-    crate::project_session_entries(path, options)
-        .into_iter()
-        .filter(|entry| {
-            entry.source_entry.seq > last_assistant
-                || edited.contains(entry.source_entry.id.as_str())
-        })
-        .flat_map(|entry| entry.messages)
-        .filter(|message| matches!(message.role(), "user" | "custom"))
-        .collect()
-}
-
-pub fn prepare_compaction(
-    path_entries: &[SessionRecord],
+/// Selects a source-aware cut from an already-projected history snapshot.
+pub(super) fn prepare_projected_compaction(
+    projected: Vec<ProjectedSessionEntry>,
     settings: CompactionSettings,
-    context_options: &SessionContextBuildOptions,
-    policy: &dyn SessionCompactionPolicy,
+    tokens_before: u64,
 ) -> Option<CompactionPreparation> {
-    if path_entries.is_empty()
-        || path_entries
-            .last()
-            .is_some_and(|entry| matches!(entry.entry, SessionEntry::Compaction(_)))
-    {
-        return None;
-    }
-
-    let previous_index = path_entries
-        .iter()
-        .rposition(|entry| matches!(entry.entry, SessionEntry::Compaction(_)));
-    let previous_summary = previous_index.and_then(|index| match &path_entries[index].entry {
-        SessionEntry::Compaction(previous) => Some(previous.summary.clone()),
-        _ => None,
-    });
-    let compactable = crate::project_session_entries(path_entries, context_options)
+    let compactable = projected
         .into_iter()
-        .flat_map(|entry| {
-            if entry.messages.is_empty() {
-                return vec![CompactableEntry::Metadata];
-            }
-            entry
-                .messages
-                .into_iter()
-                .filter(|message| !matches!(message.role(), "compactionSummary" | "system"))
-                .map(|message| {
-                    if message.role() == "branchSummary" {
-                        CompactableEntry::BranchSummary(message)
-                    } else {
-                        CompactableEntry::Message(message)
-                    }
-                })
-                .collect()
-        })
+        .map(CompactableEntry::from_projected)
         .collect::<Vec<_>>();
-
-    let context = build_session_context(path_entries, context_options);
-    let tokens_before = estimate_session_context_tokens(path_entries, &context.messages).tokens;
-    let mut cut = find_cut_point_compactable(
+    let previous_index = compactable
+        .iter()
+        .position(|entry| entry.is_compaction && !entry.messages.is_empty());
+    let previous_summary =
+        previous_index.and_then(|index| match &compactable[index].source_entry.entry {
+            SessionEntry::Compaction(previous) => Some(previous.summary.clone()),
+            _ => None,
+        });
+    let boundary_start = previous_index.map_or(0, |index| index + 1);
+    let cut = find_cut_point_compactable(
         &compactable,
-        0,
+        boundary_start,
         compactable.len(),
         settings.keep_recent_tokens,
     );
-    let unsent = unsent_context_inputs(path_entries, context_options);
-    if let Some(index) = compactable.iter().position(|entry| {
-        entry
-            .message()
-            .is_some_and(|message| unsent.contains(message))
-    }) && index < cut.first_kept_entry_index
-    {
-        cut = CutPointResult {
-            first_kept_entry_index: index,
-            turn_start_index: None,
-            is_split_turn: false,
-        };
+    if cut.first_kept_entry_index >= compactable.len() {
+        return None;
     }
     let history_end = if cut.is_split_turn {
         cut.turn_start_index.unwrap_or(cut.first_kept_entry_index)
     } else {
         cut.first_kept_entry_index
     };
-    let messages_to_summarize = messages_in(&compactable[..history_end]);
+    let messages_to_summarize = messages_in(&compactable[boundary_start..history_end]);
     let turn_prefix_messages = cut
         .turn_start_index
         .filter(|_| cut.is_split_turn)
@@ -592,7 +390,13 @@ pub fn prepare_compaction(
         return None;
     }
 
-    let mut preparation = CompactionPreparation {
+    let preparation = CompactionPreparation {
+        first_kept_entry_id: Some(
+            compactable[cut.first_kept_entry_index]
+                .source_entry
+                .id
+                .clone(),
+        ),
         messages_to_summarize,
         turn_prefix_messages,
         retained_tail,
@@ -602,99 +406,14 @@ pub fn prepare_compaction(
         file_ops: FileOperations::default(),
         settings,
     };
-    policy.prepare(path_entries, &mut preparation);
     Some(preparation)
 }
 
-pub async fn compact(
-    preparation: &CompactionPreparation,
-    completer: &dyn CompactionCompleter,
-    policy: &dyn SessionCompactionPolicy,
-    custom_instructions: Option<&str>,
-    thinking_level: ThinkingLevel,
-    signal: AbortSignal,
-) -> Result<CompactionEntry, CompactionError> {
-    let (mut summary, usage) =
-        if preparation.is_split_turn && !preparation.turn_prefix_messages.is_empty() {
-            let history = if preparation.messages_to_summarize.is_empty() {
-                None
-            } else {
-                Some(
-                    generate_summary(
-                        completer,
-                        policy,
-                        &preparation.messages_to_summarize,
-                        preparation,
-                        custom_instructions,
-                        thinking_level,
-                        signal.child(),
-                    )
-                    .await?,
-                )
-            };
-            let prefix = generate_turn_prefix_summary(
-                completer,
-                policy,
-                &preparation.turn_prefix_messages,
-                custom_instructions,
-                thinking_level,
-                signal.child(),
-            )
-            .await?;
-            let history_text = history.as_ref().map_or_else(
-                || {
-                    preparation
-                        .previous_summary
-                        .as_deref()
-                        .unwrap_or("No prior history.")
-                },
-                |value| value.text.as_str(),
-            );
-            let usage = history.as_ref().map_or(prefix.usage.clone(), |value| {
-                combine_usage(&value.usage, &prefix.usage)
-            });
-            (
-                format!(
-                    "{history_text}\n\n---\n\n**Turn Context (split turn):**\n\n{}",
-                    prefix.text
-                ),
-                usage,
-            )
-        } else {
-            let generated = generate_summary(
-                completer,
-                policy,
-                &preparation.messages_to_summarize,
-                preparation,
-                custom_instructions,
-                thinking_level,
-                signal.child(),
-            )
-            .await?;
-            (generated.text, generated.usage)
-        };
-
-    let details = policy.finalize(preparation, &mut summary);
-    Ok(CompactionEntry {
-        from_hook: None,
-        system_message: None,
-        retained_entry_ids: Vec::new(),
-        summary,
-        retained_tail: preparation.retained_tail.clone(),
-        tokens_before: preparation.tokens_before,
-        details,
-        usage: Some(usage),
-    })
-}
-
-pub fn serialize_conversation(messages: &[AgentMessage]) -> String {
+pub(super) fn format_conversation(messages: impl IntoIterator<Item = Message>) -> String {
     let mut parts = Vec::new();
-    for agent_message in messages {
-        let Some(message) = agent_message_to_provider_message(agent_message) else {
-            continue;
-        };
+    for message in messages {
         match message {
-            Message::System(message) => parts.push(format!("[System]: {}", message.render())),
+            Message::System(_) => {}
             Message::User(message) => {
                 let content = content_text(&message.content);
                 if !content.is_empty() {
@@ -750,19 +469,13 @@ pub fn serialize_conversation(messages: &[AgentMessage]) -> String {
     parts.join("\n\n")
 }
 
-async fn generate_summary(
-    completer: &dyn CompactionCompleter,
+pub(super) fn summary_prompt(
+    messages: impl IntoIterator<Item = Message>,
+    previous_summary: Option<&str>,
     policy: &dyn SessionCompactionPolicy,
-    messages: &[AgentMessage],
-    preparation: &CompactionPreparation,
     custom_instructions: Option<&str>,
-    thinking_level: ThinkingLevel,
-    signal: AbortSignal,
-) -> Result<CompactionCompletion, CompactionError> {
-    let previous_summary = preparation
-        .previous_summary
-        .as_deref()
-        .filter(|value| !value.is_empty());
+) -> String {
+    let previous_summary = previous_summary.filter(|value| !value.is_empty());
     let mut base_prompt = policy
         .summary_prompt(previous_summary.is_some())
         .to_string();
@@ -772,7 +485,7 @@ async fn generate_summary(
     }
     let mut prompt = format!(
         "<conversation>\n{}\n</conversation>\n\n",
-        serialize_conversation(messages)
+        format_conversation(messages)
     );
     if let Some(previous) = previous_summary {
         prompt.push_str("<previous-summary>\n");
@@ -780,56 +493,27 @@ async fn generate_summary(
         prompt.push_str("\n</previous-summary>\n\n");
     }
     prompt.push_str(&base_prompt);
-    let capabilities = completer.model_capabilities();
-    let max_output_tokens = None;
-    let thinking_level = compaction_thinking_level(thinking_level, capabilities);
-    completer
-        .complete_compaction(
-            CompactionCompletionRequest {
-                system_prompt: policy.system_prompt().to_string(),
-                prompt,
-                max_output_tokens,
-                thinking_level,
-            },
-            signal,
-        )
-        .await
+    prompt
 }
 
-async fn generate_turn_prefix_summary(
-    completer: &dyn CompactionCompleter,
+pub(super) fn turn_prefix_prompt(
+    messages: impl IntoIterator<Item = Message>,
     policy: &dyn SessionCompactionPolicy,
-    messages: &[AgentMessage],
     custom_instructions: Option<&str>,
-    thinking_level: ThinkingLevel,
-    signal: AbortSignal,
-) -> Result<CompactionCompletion, CompactionError> {
+) -> String {
     let mut prompt = format!(
         "# Conversation\n{}\n\n# Instructions\n{}",
-        serialize_conversation(messages),
+        format_conversation(messages),
         policy.turn_prefix_prompt()
     );
     if let Some(instructions) = custom_instructions.filter(|value| !value.is_empty()) {
         prompt.push_str("\n\nAdditional focus: ");
         prompt.push_str(instructions);
     }
-    let capabilities = completer.model_capabilities();
-    let max_output_tokens = None;
-    let thinking_level = compaction_thinking_level(thinking_level, capabilities);
-    completer
-        .complete_compaction(
-            CompactionCompletionRequest {
-                system_prompt: policy.system_prompt().to_string(),
-                prompt,
-                max_output_tokens,
-                thinking_level,
-            },
-            signal,
-        )
-        .await
+    prompt
 }
 
-fn compaction_thinking_level(
+pub(super) fn compaction_thinking_level(
     requested: ThinkingLevel,
     capabilities: CompactionModelCapabilities,
 ) -> ThinkingLevel {
@@ -841,70 +525,70 @@ fn compaction_thinking_level(
 }
 
 #[derive(Debug, Clone)]
-enum CompactableEntry {
-    Message(AgentMessage),
-    BranchSummary(AgentMessage),
-    #[cfg(test)]
-    Compaction,
-    Metadata,
+struct CompactableEntry {
+    source_entry: SessionRecord,
+    messages: Vec<AgentMessage>,
+    is_compaction: bool,
+    intrinsically_visible: bool,
 }
 
 impl CompactableEntry {
-    #[cfg(test)]
-    fn from_record(record: &SessionRecord) -> Self {
-        match &record.entry {
-            SessionEntry::Message(message) => Self::Message(message.message.clone()),
-            SessionEntry::CustomMessage(message) => {
-                Self::Message(AgentMessage::from(message.to_message(record.timestamp_ms)))
-            }
-            SessionEntry::BranchSummary(summary) => Self::BranchSummary(
-                AgentMessage::custom(json!({
-                    "role": "branchSummary",
-                    "summary": summary.summary,
-                    "fromId": summary.from_id,
-                    "timestamp": record.timestamp_ms,
-                }))
-                .expect("built-in branch summary is valid"),
+    fn from_projected(entry: ProjectedSessionEntry) -> Self {
+        // Snapshot-only older Rust checkpoints may not have retained provenance.
+        // Their tail messages use the checkpoint as source, but are conversation,
+        // not the checkpoint's own summary/system contribution.
+        let is_compaction = matches!(entry.source_entry.entry, SessionEntry::Compaction(_))
+            && (entry.messages.is_empty()
+                || entry
+                    .messages
+                    .iter()
+                    .any(|message| message.role() == "compactionSummary"));
+        // Edits can omit message/custom_message records. Other entries cannot
+        // be edited, so use their already-projected visibility without invoking
+        // potentially stateful custom projectors a second time.
+        let intrinsically_visible = match &entry.source_entry.entry {
+            SessionEntry::Message(message) => !matches!(
+                message.message.as_standard(),
+                Some(Message::Assistant(assistant)) if assistant.stop_reason == StopReason::Deferred
             ),
-            SessionEntry::Compaction(_) => Self::Compaction,
-            SessionEntry::ModelChange(_)
-            | SessionEntry::ThinkingLevelChange(_)
-            | SessionEntry::ActiveToolsChange(_)
-            | SessionEntry::Custom(_)
-            | SessionEntry::ContextEdit(_) => Self::Metadata,
-        }
-    }
-
-    fn message(&self) -> Option<&AgentMessage> {
-        match self {
-            Self::Message(message) | Self::BranchSummary(message) => Some(message),
-            Self::Metadata => None,
-            #[cfg(test)]
-            Self::Compaction => None,
+            SessionEntry::CustomMessage(_) => true,
+            _ => !entry.messages.is_empty(),
+        };
+        Self {
+            source_entry: entry.source_entry,
+            messages: entry.messages,
+            is_compaction,
+            intrinsically_visible,
         }
     }
 
     fn is_valid_cut(&self) -> bool {
-        match self {
-            Self::BranchSummary(_) => true,
-            Self::Message(message) => matches!(
-                message.role(),
-                "user"
-                    | "assistant"
-                    | "bashExecution"
-                    | "custom"
-                    | "branchSummary"
-                    | "compactionSummary"
-            ),
-            Self::Metadata => false,
-            #[cfg(test)]
-            Self::Compaction => false,
-        }
+        !self.is_compaction
+            && self.messages.iter().any(|message| {
+                matches!(
+                    message.role(),
+                    "user"
+                        | "assistant"
+                        | "bashExecution"
+                        | "custom"
+                        | "branchSummary"
+                        | "compactionSummary"
+                )
+            })
     }
 
     fn starts_turn(&self) -> bool {
-        matches!(self, Self::BranchSummary(_))
-            || matches!(self, Self::Message(message) if matches!(message.role(), "user" | "bashExecution"))
+        !self.is_compaction
+            && self.messages.iter().any(|message| {
+                matches!(
+                    message.role(),
+                    "user" | "bashExecution" | "custom" | "branchSummary" | "compactionSummary"
+                )
+            })
+    }
+
+    fn is_omitted(&self) -> bool {
+        self.intrinsically_visible && self.messages.is_empty()
     }
 }
 
@@ -925,33 +609,54 @@ fn find_cut_point_compactable(
         };
     };
     let mut accumulated = 0_u64;
+    let mut exceeded_budget = false;
     let mut cut_index = first_cut;
     for index in (start_index..end_index).rev() {
-        let Some(message) = entries[index].message() else {
+        let tokens: u64 = entries[index].messages.iter().map(estimate_tokens).sum();
+        if tokens == 0 {
             continue;
-        };
-        accumulated = accumulated.saturating_add(estimate_tokens(message));
+        }
+        accumulated = accumulated.saturating_add(tokens);
         if accumulated >= keep_recent_tokens {
+            exceeded_budget = true;
             cut_index = cut_points
                 .iter()
                 .copied()
                 .find(|point| *point >= index)
-                // A trailing oversized result must retain its nearest assistant
-                // call, not force all history to remain (current Pi findCutPoint).
                 .unwrap_or(*cut_points.last().expect("nonempty cut points"));
             break;
         }
     }
-    while cut_index > start_index {
-        match entries[cut_index - 1] {
-            CompactableEntry::Message(_) => break,
-            #[cfg(test)]
-            CompactableEntry::Compaction => break,
-            CompactableEntry::BranchSummary(_) | CompactableEntry::Metadata => cut_index -= 1,
-        }
+
+    // Advance past an input only for a closed, context-invisible recovery suffix.
+    // Arbitrary metadata or an external replacement must not swallow unsent input.
+    let suffix = &entries[cut_index + 1..end_index];
+    let omitted_ids = suffix
+        .iter()
+        .filter(|entry| entry.is_omitted())
+        .map(|entry| entry.source_entry.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let external_replacement = suffix.iter().any(|entry| matches!(
+        &entry.source_entry.entry,
+        SessionEntry::ContextEdit(edit) if edit.replacement.is_some() && !omitted_ids.contains(edit.target_id.as_str())
+    ));
+    let recovery_suffix = exceeded_budget && !external_replacement
+        && suffix.iter().any(|entry| entry.is_omitted() && matches!(
+            &entry.source_entry.entry, SessionEntry::Message(message) if message.message.role() == "assistant"
+        ))
+        && suffix.iter().all(|entry| !entry.is_compaction && (!entry.intrinsically_visible || entry.is_omitted()));
+    if recovery_suffix {
+        cut_index += 1;
     }
-    let is_user = matches!(&entries[cut_index], CompactableEntry::Message(message) if message.role() == "user");
-    let turn_start_index = (!is_user)
+    while cut_index > start_index {
+        let previous = &entries[cut_index - 1];
+        if previous.is_compaction || !previous.messages.is_empty() {
+            break;
+        }
+        cut_index -= 1;
+    }
+    let starts_turn = entries[cut_index].starts_turn();
+    let turn_start_index = (!starts_turn)
         .then(|| {
             (start_index..=cut_index)
                 .rev()
@@ -961,14 +666,17 @@ fn find_cut_point_compactable(
     CutPointResult {
         first_kept_entry_index: cut_index,
         turn_start_index,
-        is_split_turn: !is_user && turn_start_index.is_some(),
+        is_split_turn: !starts_turn && turn_start_index.is_some(),
     }
 }
 
 fn messages_in(entries: &[CompactableEntry]) -> Vec<AgentMessage> {
     entries
         .iter()
-        .filter_map(|entry| entry.message().cloned())
+        .filter(|entry| !entry.is_compaction)
+        .flat_map(|entry| entry.messages.iter())
+        .filter(|message| message.role() != "system")
+        .cloned()
         .collect()
 }
 
@@ -979,26 +687,6 @@ fn assistant_usage(message: &AgentMessage) -> Option<&Usage> {
     (!matches!(message.stop_reason, StopReason::Aborted | StopReason::Error)
         && calculate_context_tokens(&message.usage) > 0)
         .then_some(&message.usage)
-}
-
-fn message_timestamp(message: &AgentMessage) -> Option<i64> {
-    match message.as_standard() {
-        Some(Message::System(message)) => Some(message.timestamp_ms),
-        Some(Message::User(message)) => Some(message.timestamp_ms),
-        Some(Message::Assistant(message)) => Some(message.timestamp_ms),
-        Some(Message::ToolResult(message)) => Some(message.timestamp_ms),
-        Some(Message::Custom(message)) => Some(message.timestamp_ms),
-        None => message
-            .as_custom()
-            .and_then(|value| value.get("timestamp"))
-            .and_then(|timestamp| {
-                timestamp.as_i64().or_else(|| {
-                    timestamp
-                        .as_u64()
-                        .and_then(|timestamp| i64::try_from(timestamp).ok())
-                })
-            }),
-    }
 }
 
 fn utf16_len(text: &str) -> usize {
@@ -1088,7 +776,7 @@ fn truncate_for_summary(text: &str, max_chars: usize) -> String {
     )
 }
 
-fn combine_usage(first: &Usage, second: &Usage) -> Usage {
+pub(super) fn combine_usage(first: &Usage, second: &Usage) -> Usage {
     Usage {
         input: first.input.saturating_add(second.input),
         output: first.output.saturating_add(second.output),
@@ -1111,792 +799,4 @@ fn combine_usage(first: &Usage, second: &Usage) -> Usage {
 fn combine_optional(first: Option<u64>, second: Option<u64>) -> Option<u64> {
     (first.is_some() || second.is_some())
         .then(|| first.unwrap_or(0).saturating_add(second.unwrap_or(0)))
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::{Arc, Mutex};
-
-    use pi_core::{
-        AssistantMessage, ModelId, ProviderId, TextContent, ToolCall, ToolCallId, ToolResultMessage,
-    };
-
-    use super::*;
-    use crate::{MessageEntry, SessionEntry};
-
-    #[test]
-    fn token_estimates_match_executed_legacy_oracle() {
-        let fixture: Value = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/rpc-compaction-oracle.json"
-        ))
-        .unwrap();
-        for case in fixture["tokens"].as_array().unwrap() {
-            let message: AgentMessage = serde_json::from_value(case["message"].clone()).unwrap();
-            assert_eq!(
-                estimate_tokens(&message),
-                case["expected"].as_u64().unwrap(),
-                "message: {}",
-                case["message"]
-            );
-        }
-    }
-
-    fn usage(total_tokens: u64) -> Usage {
-        Usage {
-            input: total_tokens,
-            total_tokens,
-            ..Usage::default()
-        }
-    }
-
-    fn user(text: &str) -> AgentMessage {
-        Message::User(UserMessage::text(text, 0)).into()
-    }
-
-    fn assistant(text: &str, total_tokens: u64) -> AgentMessage {
-        assistant_at(text, total_tokens, 0)
-    }
-
-    fn assistant_at(text: &str, total_tokens: u64, timestamp_ms: i64) -> AgentMessage {
-        Message::assistant(AssistantMessage {
-            duration_ms: None,
-            thinking_level: None,
-            content: vec![ContentBlock::Text(TextContent::new(text))],
-            api: "scripted".to_string(),
-            provider: ProviderId::new("scripted"),
-            model: ModelId::new("test"),
-            provider_thinking_level: None,
-            response_model: None,
-            response_id: None,
-            diagnostics: None,
-            usage: usage(total_tokens),
-            stop_reason: StopReason::Stop,
-            error_message: None,
-            deferred: None,
-            raw_stop_reason: None,
-            end_turn: None,
-            timestamp_ms,
-        })
-        .into()
-    }
-
-    fn record(index: usize, entry: SessionEntry) -> SessionRecord {
-        SessionRecord {
-            id: format!("entry-{index}"),
-            seq: index as u64,
-            parent_id: index.checked_sub(1).map(|value| format!("entry-{value}")),
-            timestamp_ms: index as i64,
-            entry,
-        }
-    }
-
-    fn message_record(index: usize, message: AgentMessage) -> SessionRecord {
-        record(
-            index,
-            SessionEntry::Message(MessageEntry {
-                message,
-                terminate: false,
-            }),
-        )
-    }
-
-    #[test]
-    fn estimate_uses_last_valid_usage_plus_trailing_messages() {
-        let mut failed = assistant("failed", 9_999);
-        if let Some(Message::Assistant(message)) = failed.as_standard() {
-            let mut value = (**message).clone();
-            value.stop_reason = StopReason::Error;
-            failed = Message::assistant(value).into();
-        }
-        let messages = vec![assistant("done", 100), user("tail"), failed];
-        let estimate = estimate_context_tokens(&messages);
-        assert_eq!(estimate.usage_tokens, 100);
-        assert_eq!(estimate.last_usage_index, Some(0));
-        assert!(estimate.trailing_tokens > 0);
-        assert_eq!(estimate.tokens, 100 + estimate.trailing_tokens);
-    }
-
-    #[test]
-    fn estimate_ignores_usage_made_stale_by_a_newer_inserted_prefix() {
-        let messages = vec![
-            AgentMessage::custom(json!({
-                "role": "compactionSummary",
-                "summary": "short summary",
-                "tokensBefore": 9_500,
-                "timestamp": 200,
-            }))
-            .unwrap(),
-            assistant_at("retained answer", 9_500, 100),
-            Message::User(UserMessage::text("x".repeat(4_000), 300)).into(),
-        ];
-
-        let estimate = estimate_context_tokens(&messages);
-
-        assert_eq!(estimate.last_usage_index, None);
-        assert_eq!(estimate.usage_tokens, 0);
-        assert_eq!(estimate.tokens, estimate.trailing_tokens);
-        assert!(estimate.tokens < 2_000);
-    }
-
-    #[test]
-    fn token_totals_and_thresholds_match_pi_boundaries() {
-        assert_eq!(calculate_context_tokens(&usage(42)), 42);
-        assert_eq!(
-            calculate_context_tokens(&Usage {
-                input: 10,
-                output: 20,
-                cache_read: 30,
-                cache_write: 40,
-                total_tokens: 0,
-                ..Usage::default()
-            }),
-            100
-        );
-        let settings = CompactionSettings {
-            enabled: true,
-            reserve_tokens: 200,
-            keep_recent_tokens: 50,
-        };
-        assert!(!should_compact(800, 1_000, settings));
-        assert!(should_compact(801, 1_000, settings));
-        assert!(!should_compact(
-            u64::MAX,
-            1_000,
-            CompactionSettings {
-                enabled: false,
-                ..settings
-            }
-        ));
-        assert!(should_compact(
-            1,
-            100,
-            CompactionSettings {
-                reserve_tokens: 200,
-                ..settings
-            }
-        ));
-    }
-
-    #[test]
-    fn cut_point_never_starts_at_a_tool_result() {
-        let entries = [
-            message_record(0, user("request")),
-            message_record(1, assistant("call", 10)),
-            message_record(
-                2,
-                Message::tool_result(ToolResultMessage {
-                    duration_ms: None,
-                    tool_call_id: ToolCallId::new("call-1"),
-                    tool_name: "read".to_string(),
-                    content: vec![ContentBlock::Text(TextContent::new("result"))],
-                    details: None,
-                    usage: None,
-                    added_tool_names: None,
-                    is_error: false,
-                    timestamp_ms: 0,
-                })
-                .into(),
-            ),
-            message_record(3, assistant("finish", 20)),
-        ];
-        let compactable = entries
-            .iter()
-            .map(CompactableEntry::from_record)
-            .collect::<Vec<_>>();
-        let cut = find_cut_point_compactable(&compactable, 0, compactable.len(), 1);
-        assert!(
-            matches!(entries[cut.first_kept_entry_index].entry, SessionEntry::Message(ref value) if value.message.role() == "assistant")
-        );
-    }
-
-    #[test]
-    fn preparation_carries_previous_summary_and_retained_tail() {
-        let previous = record(
-            0,
-            SessionEntry::Compaction(CompactionEntry {
-                from_hook: None,
-                system_message: None,
-                retained_entry_ids: Vec::new(),
-                summary: "previous".to_string(),
-                retained_tail: vec![user("retained user"), assistant("retained assistant", 50)],
-                tokens_before: 1_000,
-                details: Some(
-                    json!({ "readFiles": ["README.md"], "modifiedFiles": ["src/lib.rs"] }),
-                ),
-                usage: None,
-            }),
-        );
-        let entries = vec![
-            previous,
-            message_record(1, user("new user")),
-            message_record(2, assistant("new assistant", 100)),
-        ];
-        let preparation = prepare_compaction(
-            &entries,
-            CompactionSettings {
-                keep_recent_tokens: 1,
-                ..CompactionSettings::default()
-            },
-            &SessionContextBuildOptions::default(),
-            &GenericCompactionPolicy,
-        )
-        .unwrap();
-        assert_eq!(preparation.previous_summary.as_deref(), Some("previous"));
-        assert_eq!(preparation.file_ops, FileOperations::default());
-        let all = preparation
-            .messages_to_summarize
-            .iter()
-            .chain(&preparation.turn_prefix_messages)
-            .chain(&preparation.retained_tail)
-            .map(AgentMessage::role)
-            .collect::<Vec<_>>();
-        assert_eq!(all, vec!["user", "assistant", "user", "assistant"]);
-    }
-
-    #[test]
-    fn preparation_requires_compactable_history_after_the_latest_compaction() {
-        assert!(
-            prepare_compaction(
-                &[],
-                CompactionSettings::default(),
-                &SessionContextBuildOptions::default(),
-                &GenericCompactionPolicy,
-            )
-            .is_none()
-        );
-        let latest = record(
-            0,
-            SessionEntry::Compaction(CompactionEntry {
-                from_hook: None,
-                system_message: None,
-                retained_entry_ids: Vec::new(),
-                summary: "done".to_string(),
-                retained_tail: Vec::new(),
-                tokens_before: 10,
-                details: None,
-                usage: None,
-            }),
-        );
-        assert!(
-            prepare_compaction(
-                &[latest],
-                CompactionSettings::default(),
-                &SessionContextBuildOptions::default(),
-                &GenericCompactionPolicy,
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn retained_pre_compaction_usage_is_not_treated_as_current_usage() {
-        let retained = assistant("small retained answer", 100_000);
-        let entries = vec![record(
-            0,
-            SessionEntry::Compaction(CompactionEntry {
-                from_hook: None,
-                system_message: None,
-                retained_entry_ids: Vec::new(),
-                summary: "short summary".to_string(),
-                retained_tail: vec![retained],
-                tokens_before: 100_000,
-                details: None,
-                usage: None,
-            }),
-        )];
-        let context = build_session_context(&entries, &SessionContextBuildOptions::default());
-        let estimate = estimate_session_context_tokens(&entries, &context.messages);
-        assert_eq!(estimate.usage_tokens, 0);
-        assert!(estimate.tokens < 100_000);
-        assert_eq!(
-            current_session_context_tokens(&entries, &context.messages),
-            None
-        );
-    }
-
-    #[test]
-    fn post_compaction_assistant_usage_restores_current_context_accounting() {
-        let entries = vec![
-            record(
-                0,
-                SessionEntry::Compaction(CompactionEntry {
-                    from_hook: None,
-                    system_message: None,
-                    retained_entry_ids: Vec::new(),
-                    summary: "short summary".to_string(),
-                    retained_tail: vec![assistant_at("retained", 100_000, 1)],
-                    tokens_before: 100_000,
-                    details: None,
-                    usage: None,
-                }),
-            ),
-            message_record(1, Message::User(UserMessage::text("continue", 3)).into()),
-            message_record(2, assistant_at("fresh", 250, 4)),
-        ];
-        let context = build_session_context(&entries, &SessionContextBuildOptions::default());
-
-        let estimate = current_session_context_tokens(&entries, &context.messages).unwrap();
-
-        assert_eq!(estimate.tokens, 250);
-        assert_eq!(estimate.usage_tokens, 250);
-    }
-
-    #[test]
-    fn summary_serialization_matches_legacy_visible_text_and_utf16_limits() {
-        let mut assistant = serde_json::to_value(assistant("", 10)).unwrap();
-        assistant["content"] = json!([
-            {"type":"thinking", "thinking":"omit this reasoning"},
-            {"type":"text", "text":"first"},
-            {"type":"text", "text":"second"},
-            {"type":"toolCall", "id":"call", "name":"lookup", "arguments":{"key":"42"}}
-        ]);
-        let messages = [
-            AgentMessage::custom(json!({"role":"user", "content":[
-                {"type":"text", "text":"hello"}, {"type":"text", "text":" world"}
-            ], "timestamp":0}))
-            .unwrap(),
-            AgentMessage::custom(assistant).unwrap(),
-            AgentMessage::custom(
-                json!({"role":"toolResult", "toolCallId":"call", "toolName":"lookup", "content":[
-                {"type":"text", "text":"found"}, {"type":"text", "text":" it"}
-            ], "isError":false, "timestamp":0}),
-            )
-            .unwrap(),
-        ];
-        assert_eq!(
-            serialize_conversation(&messages),
-            "[User]: hello world\n\n[Assistant]: first\nsecond\n\n[Assistant tool calls]: lookup(key=\"42\")\n\n[Tool result]: found it"
-        );
-
-        let result = AgentMessage::custom(
-            json!({"role":"toolResult", "toolCallId":"call", "toolName":"lookup", "content":[
-            {"type":"text", "text":format!("{}🦀tail", "x".repeat(1999))}
-        ], "isError":false, "timestamp":0}),
-        )
-        .unwrap();
-        assert_eq!(
-            serialize_conversation(&[result]),
-            format!(
-                "[Tool result]: {}\n\n[... 5 more characters truncated]",
-                "x".repeat(1999)
-            )
-        );
-    }
-
-    #[tokio::test]
-    async fn incomplete_or_tool_call_summaries_are_rejected() {
-        use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
-        let truncated = ScriptedTurn::Events(vec![
-            pi_core::StreamEvent::Start {
-                metadata: pi_core::ResponseMetadata::new(
-                    ProviderId::new("scripted"),
-                    ModelId::new("test"),
-                    "scripted",
-                    0,
-                ),
-            },
-            pi_core::StreamEvent::TextStart { content_index: 0 },
-            pi_core::StreamEvent::TextDelta {
-                content_index: 0,
-                delta: "unfinished checkpoint".to_string(),
-            },
-            pi_core::StreamEvent::TextEnd {
-                content_index: 0,
-                text_signature: None,
-            },
-            pi_core::StreamEvent::Done {
-                reason: StopReason::Length,
-                usage: Usage::default(),
-            },
-        ]);
-        for (turn, expected) in [
-            (
-                truncated,
-                "Summarization failed: generation hit the token cap and the summary is incomplete",
-            ),
-            (
-                ScriptedTurn::ToolCalls(vec![ToolCall::new("call", "lookup", json!({}))]),
-                "Summarization attempted to call a tool",
-            ),
-        ] {
-            let runtime = PiRuntime::builder()
-                .provider_plugin(ScriptedProviderPlugin::scripted([turn]))
-                .agent_options(pi_agent::AgentOptions {
-                    provider_id: ProviderId::new("scripted"),
-                    model_id: ModelId::new("test"),
-                    ..pi_agent::AgentOptions::default()
-                })
-                .build()
-                .unwrap();
-            let preparation = CompactionPreparation {
-                messages_to_summarize: vec![user("work")],
-                turn_prefix_messages: Vec::new(),
-                retained_tail: Vec::new(),
-                is_split_turn: false,
-                tokens_before: 10,
-                previous_summary: None,
-                file_ops: FileOperations::default(),
-                settings: CompactionSettings::default(),
-            };
-            let (_, signal) = pi_core::AbortHandle::new();
-            let error = compact(
-                &preparation,
-                &runtime,
-                &GenericCompactionPolicy,
-                None,
-                ThinkingLevel::Off,
-                signal,
-            )
-            .await
-            .unwrap_err();
-            assert!(
-                matches!(error, CompactionError::SummarizationFailed(ref message) if message == expected)
-            );
-        }
-    }
-
-    #[test]
-    fn serialize_truncates_tool_results() {
-        let message: AgentMessage = Message::tool_result(ToolResultMessage {
-            duration_ms: None,
-            tool_call_id: ToolCallId::new("call-1"),
-            tool_name: "read".to_string(),
-            content: vec![ContentBlock::Text(TextContent::new("x".repeat(5_000)))],
-            details: None,
-            usage: None,
-            added_tool_names: None,
-            is_error: false,
-            timestamp_ms: 0,
-        })
-        .into();
-        let serialized = serialize_conversation(&[message]);
-        assert!(serialized.contains("[... 3000 more characters truncated]"));
-    }
-
-    struct FakeCompleter {
-        prompts: Mutex<Vec<CompactionCompletionRequest>>,
-        capabilities: CompactionModelCapabilities,
-    }
-
-    #[tokio::test]
-    async fn summary_request_carries_previous_summary_custom_focus_and_reasoning() {
-        let preparation = CompactionPreparation {
-            messages_to_summarize: vec![user("new work")],
-            turn_prefix_messages: Vec::new(),
-            retained_tail: vec![assistant("tail", 10)],
-            is_split_turn: false,
-            tokens_before: 500,
-            previous_summary: Some("old summary".to_string()),
-            file_ops: FileOperations::default(),
-            settings: CompactionSettings {
-                reserve_tokens: 100,
-                keep_recent_tokens: 20,
-                enabled: true,
-            },
-        };
-        let completer = FakeCompleter {
-            prompts: Mutex::new(Vec::new()),
-            capabilities: CompactionModelCapabilities::default(),
-        };
-        let (_, signal) = pi_core::AbortHandle::new();
-
-        let result = compact(
-            &preparation,
-            &completer,
-            &GenericCompactionPolicy,
-            Some("preserve exact errors"),
-            ThinkingLevel::High,
-            signal,
-        )
-        .await
-        .unwrap();
-        let requests = completer.prompts.lock().unwrap();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].thinking_level, ThinkingLevel::High);
-        assert_eq!(requests[0].max_output_tokens, None);
-        assert_eq!(requests[0].system_prompt, SUMMARIZATION_SYSTEM_PROMPT);
-        assert!(
-            requests[0]
-                .prompt
-                .contains("<previous-summary>\nold summary")
-        );
-        assert!(
-            requests[0]
-                .prompt
-                .contains("Additional focus: preserve exact errors")
-        );
-        assert_eq!(result.summary, "## Goal\nKeep working");
-        assert_eq!(result.retained_tail, preparation.retained_tail);
-    }
-
-    #[tokio::test]
-    async fn split_turn_requests_wrap_prefix_and_forward_custom_focus() {
-        struct CheckpointPolicy;
-        impl SessionCompactionPolicy for CheckpointPolicy {
-            fn summary_prompt(&self, _updating: bool) -> &str {
-                "Summarize history."
-            }
-
-            fn turn_prefix_prompt(&self) -> &str {
-                "Summarize earlier messages."
-            }
-        }
-        let preparation = CompactionPreparation {
-            messages_to_summarize: vec![user("prior work")],
-            turn_prefix_messages: vec![user("current request"), assistant("early progress", 10)],
-            retained_tail: vec![assistant("later work", 10)],
-            is_split_turn: true,
-            tokens_before: 500,
-            previous_summary: None,
-            file_ops: FileOperations::default(),
-            settings: CompactionSettings::default(),
-        };
-        for (instructions, suffix) in [
-            (None, ""),
-            (Some(""), ""),
-            (
-                Some("preserve exact errors"),
-                "\n\nAdditional focus: preserve exact errors",
-            ),
-        ] {
-            let completer = FakeCompleter {
-                prompts: Mutex::new(Vec::new()),
-                capabilities: CompactionModelCapabilities::default(),
-            };
-            let (_, signal) = pi_core::AbortHandle::new();
-            compact(
-                &preparation,
-                &completer,
-                &CheckpointPolicy,
-                instructions,
-                ThinkingLevel::Off,
-                signal,
-            )
-            .await
-            .unwrap();
-            let requests = completer.prompts.lock().unwrap();
-            assert_eq!(requests.len(), 2);
-            assert_eq!(
-                requests[0].prompt,
-                format!(
-                    "<conversation>\n[User]: prior work\n</conversation>\n\nSummarize history.{suffix}"
-                )
-            );
-            // The split-turn wrapper differs from the ordinary summary wrapper
-            // in legacy compaction.ts's generateTurnPrefixSummary.
-            assert_eq!(
-                requests[1].prompt,
-                format!(
-                    "# Conversation\n[User]: current request\n\n[Assistant]: early progress\n\n# Instructions\nSummarize earlier messages.{suffix}"
-                )
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn split_turn_without_new_history_preserves_previous_checkpoint() {
-        for (previous, history) in [
-            (None, "No prior history."),
-            (Some("previous checkpoint"), "previous checkpoint"),
-            (Some(""), ""),
-        ] {
-            let preparation = CompactionPreparation {
-                messages_to_summarize: Vec::new(),
-                turn_prefix_messages: vec![user("current request")],
-                retained_tail: vec![assistant("later work", 10)],
-                is_split_turn: true,
-                tokens_before: 500,
-                previous_summary: previous.map(str::to_string),
-                file_ops: FileOperations::default(),
-                settings: CompactionSettings::default(),
-            };
-            let completer = FakeCompleter {
-                prompts: Mutex::new(Vec::new()),
-                capabilities: CompactionModelCapabilities::default(),
-            };
-            let (_, signal) = pi_core::AbortHandle::new();
-            let result = compact(
-                &preparation,
-                &completer,
-                &GenericCompactionPolicy,
-                None,
-                ThinkingLevel::Off,
-                signal,
-            )
-            .await
-            .unwrap();
-            assert_eq!(completer.prompts.lock().unwrap().len(), 1);
-            assert_eq!(
-                result.summary,
-                format!(
-                    "{history}\n\n---\n\n**Turn Context (split turn):**\n\n## Goal\nKeep working"
-                )
-            );
-            assert_eq!(result.retained_tail, preparation.retained_tail);
-            assert_eq!(result.usage, Some(usage(25)));
-        }
-    }
-
-    struct FailingCompleter {
-        aborted: bool,
-    }
-
-    #[async_trait]
-    impl CompactionCompleter for FailingCompleter {
-        async fn complete_compaction(
-            &self,
-            _request: CompactionCompletionRequest,
-            _signal: AbortSignal,
-        ) -> Result<CompactionCompletion, CompactionError> {
-            if self.aborted {
-                Err(CompactionError::Aborted("cancelled fixture".to_string()))
-            } else {
-                Err(CompactionError::SummarizationFailed(
-                    "failed fixture".to_string(),
-                ))
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn summary_failures_and_aborts_are_returned_without_partial_entries() {
-        let preparation = CompactionPreparation {
-            messages_to_summarize: vec![user("work")],
-            turn_prefix_messages: Vec::new(),
-            retained_tail: Vec::new(),
-            is_split_turn: false,
-            tokens_before: 10,
-            previous_summary: None,
-            file_ops: FileOperations::default(),
-            settings: CompactionSettings::default(),
-        };
-        for (aborted, expected) in [(false, "failed fixture"), (true, "cancelled fixture")] {
-            let (_, signal) = pi_core::AbortHandle::new();
-            let error = compact(
-                &preparation,
-                &FailingCompleter { aborted },
-                &GenericCompactionPolicy,
-                None,
-                ThinkingLevel::Off,
-                signal,
-            )
-            .await
-            .unwrap_err();
-            assert!(error.to_string().contains(expected));
-            assert_eq!(matches!(error, CompactionError::Aborted(_)), aborted);
-        }
-    }
-
-    #[async_trait]
-    impl CompactionCompleter for FakeCompleter {
-        fn model_capabilities(&self) -> CompactionModelCapabilities {
-            self.capabilities
-        }
-
-        async fn complete_compaction(
-            &self,
-            request: CompactionCompletionRequest,
-            _signal: AbortSignal,
-        ) -> Result<CompactionCompletion, CompactionError> {
-            self.prompts.lock().unwrap().push(request);
-            Ok(CompactionCompletion {
-                text: "## Goal\nKeep working".to_string(),
-                usage: usage(25),
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn summaries_leave_output_limits_to_provider_and_respect_reasoning() {
-        let preparation = CompactionPreparation {
-            messages_to_summarize: vec![user("history")],
-            turn_prefix_messages: vec![user("large turn")],
-            retained_tail: vec![assistant("tail", 10)],
-            is_split_turn: true,
-            tokens_before: 600_000,
-            previous_summary: None,
-            file_ops: FileOperations::default(),
-            settings: CompactionSettings {
-                reserve_tokens: 500_000,
-                keep_recent_tokens: 20_000,
-                enabled: true,
-            },
-        };
-        let completer = FakeCompleter {
-            prompts: Mutex::new(Vec::new()),
-            capabilities: CompactionModelCapabilities {
-                reasoning: false,
-                max_output_tokens: Some(128_000),
-            },
-        };
-        let (_, signal) = pi_core::AbortHandle::new();
-
-        compact(
-            &preparation,
-            &completer,
-            &GenericCompactionPolicy,
-            None,
-            ThinkingLevel::High,
-            signal,
-        )
-        .await
-        .unwrap();
-
-        let requests = completer.prompts.lock().unwrap();
-        assert_eq!(requests.len(), 2);
-        assert!(
-            requests
-                .iter()
-                .all(|request| request.max_output_tokens.is_none())
-        );
-        assert!(
-            requests
-                .iter()
-                .all(|request| request.thinking_level == ThinkingLevel::Off)
-        );
-    }
-
-    #[tokio::test]
-    async fn generic_split_turn_summarizes_without_interpreting_coding_tools() {
-        let mut calling = assistant("", 50);
-        if let Some(Message::Assistant(message)) = calling.as_standard() {
-            let mut value = (**message).clone();
-            value.content = vec![ContentBlock::ToolCall(ToolCall::new(
-                "call-1",
-                "edit",
-                json!({"path":"src/lib.rs"}),
-            ))];
-            calling = Message::assistant(value).into();
-        }
-        let preparation = CompactionPreparation {
-            messages_to_summarize: vec![user("old"), calling],
-            turn_prefix_messages: vec![user("large turn prefix")],
-            retained_tail: vec![assistant("suffix", 50)],
-            is_split_turn: true,
-            tokens_before: 500,
-            previous_summary: None,
-            file_ops: FileOperations::default(),
-            settings: CompactionSettings::default(),
-        };
-        let completer = Arc::new(FakeCompleter {
-            prompts: Mutex::new(Vec::new()),
-            capabilities: CompactionModelCapabilities::default(),
-        });
-        let (_, signal) = pi_core::AbortHandle::new();
-        let result = compact(
-            &preparation,
-            completer.as_ref(),
-            &GenericCompactionPolicy,
-            None,
-            ThinkingLevel::Off,
-            signal,
-        )
-        .await
-        .unwrap();
-        assert_eq!(completer.prompts.lock().unwrap().len(), 2);
-        assert!(result.summary.contains("Turn Context (split turn)"));
-        assert!(!result.summary.contains("<modified-files>"));
-        assert_eq!(result.details, None);
-        assert_eq!(result.usage.unwrap().total_tokens, 50);
-    }
 }

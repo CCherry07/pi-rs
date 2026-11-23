@@ -109,6 +109,7 @@ pub(super) struct SessionActivity {
     aborted: AtomicBool,
     stopped: AtomicBool,
     continuation: AtomicBool,
+    overflow_recovery_attempted: AtomicBool,
     retry_attempt: AtomicU32,
 }
 
@@ -132,6 +133,7 @@ impl SessionActivity {
             aborted: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             continuation: AtomicBool::new(false),
+            overflow_recovery_attempted: AtomicBool::new(false),
             retry_attempt: AtomicU32::new(0),
         }
     }
@@ -471,6 +473,8 @@ impl SessionActivity {
         if !matches!(message, Message::User(_)) {
             return None;
         }
+        self.overflow_recovery_attempted
+            .store(false, Ordering::Release);
         let mut state = self.lock();
         // Enqueue/edit also locks activity before Agent queues. While this
         // listener runs, the drained batch cannot advance to another message.
@@ -564,8 +568,15 @@ impl SessionActivity {
                 (self.store.append_session_record(entry)?, None)
             }
         };
-        if matches!(message, Message::Assistant(_)) {
+        if let Message::Assistant(message) = message {
             self.store.materialize()?;
+            if !matches!(
+                message.stop_reason,
+                pi_core::StopReason::Error | pi_core::StopReason::Length
+            ) {
+                self.overflow_recovery_attempted
+                    .store(false, Ordering::Release);
+            }
         }
         Ok(MessageCommit {
             entry,
@@ -829,6 +840,15 @@ impl SessionActivity {
     pub(super) fn take_continuation(&self) -> bool {
         self.continuation.swap(false, Ordering::AcqRel)
     }
+    /// Recovery is bounded per user/assistant attempt, not per outer activity.
+    /// A delivered user message or successful assistant response resets it; merely
+    /// preparing another prompt must not restart recovery of the old failure.
+    pub(super) fn start_overflow_recovery(&self) -> bool {
+        !self
+            .overflow_recovery_attempted
+            .swap(true, Ordering::AcqRel)
+    }
+
     pub(super) fn retry_attempt(&self) -> u32 {
         self.retry_attempt.load(Ordering::Acquire)
     }
@@ -845,6 +865,18 @@ impl SessionActivity {
             handle.abort();
         }
         *cancellation.slot(stage) = Some(handle);
+    }
+
+    pub(super) fn cancellation(
+        &self,
+        stage: CancellationStage,
+        handle: AbortHandle,
+    ) -> CancellationGuard<'_> {
+        self.register_cancellation(stage, handle);
+        CancellationGuard {
+            activity: self,
+            stage,
+        }
     }
 
     pub(super) fn clear_cancellation(&self, stage: CancellationStage) {
@@ -917,6 +949,17 @@ impl Drop for ActivityGuard<'_> {
     fn drop(&mut self) {
         self.activity.set_retry_attempt(0);
         self.activity.phase.send_replace(ActivityPhase::Idle);
+    }
+}
+
+pub(super) struct CancellationGuard<'a> {
+    activity: &'a SessionActivity,
+    stage: CancellationStage,
+}
+
+impl Drop for CancellationGuard<'_> {
+    fn drop(&mut self) {
+        self.activity.clear_cancellation(self.stage);
     }
 }
 

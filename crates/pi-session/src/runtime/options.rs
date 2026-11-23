@@ -19,6 +19,9 @@ pub struct AgentSessionOptions {
     pub in_memory: bool,
     pub context: SessionContextBuildOptions,
     pub compaction: CompactionSettings,
+    /// Optional product token policy, resolved against the selected model at use
+    /// time. Keeps settings discovery/validation outside the generic session.
+    pub compaction_settings_resolver: Option<Arc<dyn CompactionSettingsResolver>>,
     /// Optional domain summary policy. Without one, summaries use neutral
     /// prompts and do not interpret tool names or attach domain metadata.
     pub compaction_policy: Option<Arc<dyn SessionCompactionPolicy>>,
@@ -53,6 +56,17 @@ pub struct AgentSessionOptions {
     pub(crate) initial_model_fallback_message: Option<String>,
 }
 
+/// Product-owned per-model token settings. Resolution can fail lazily for an
+/// invalid selected model without rejecting unrelated models or session toggles.
+pub trait CompactionSettingsResolver: Send + Sync {
+    fn resolve(
+        &self,
+        base: CompactionSettings,
+        provider: &ProviderId,
+        model: &ModelId,
+    ) -> Result<CompactionSettings, SessionError>;
+}
+
 /// Bounded, abortable retry policy used by normal assistant turns.
 ///
 /// The initial provider call does not count toward `max_retries`; attempt one
@@ -85,6 +99,14 @@ impl AgentSessionOptions {
     }
     pub fn compaction(mut self, compaction: CompactionSettings) -> Self {
         self.compaction = compaction;
+        self
+    }
+
+    pub fn compaction_settings_resolver(
+        mut self,
+        resolver: Arc<dyn CompactionSettingsResolver>,
+    ) -> Self {
+        self.compaction_settings_resolver = Some(resolver);
         self
     }
 

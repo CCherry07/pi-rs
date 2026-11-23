@@ -105,6 +105,9 @@ jobs:
       - name: Test Node host and release Module
         run: npm test
 
+      - name: Test RPC acceptance harness
+        run: node --test ../../scripts/rpc/acceptance/test/*.test.mjs
+
       - name: Test tool parity inventory checker
         run: node --test ../../scripts/check-tool-test-parity.test.mjs
 

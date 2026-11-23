@@ -51,6 +51,7 @@ fn request(messages: Vec<Message>, level: ThinkingLevel) -> ProviderRequest {
         thinking_level: level,
         thinking_budgets: None,
         max_output_tokens: None,
+        cache_retention: None,
         headers: BTreeMap::new(),
         sampling_params: BTreeMap::new(),
         session_id: None,

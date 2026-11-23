@@ -222,6 +222,7 @@ mod tests {
                 thinking_level: pi_core::ThinkingLevel::Off,
                 thinking_budgets: None,
                 max_output_tokens: None,
+                cache_retention: None,
                 headers: BTreeMap::new(),
                 sampling_params: BTreeMap::new(),
                 session_id: None,

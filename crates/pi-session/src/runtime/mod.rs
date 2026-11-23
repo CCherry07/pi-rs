@@ -158,6 +158,7 @@ pub struct AgentSession {
     executor: tokio::runtime::Handle,
     session_dispatch_context: SessionDispatchContext,
     compaction_settings: Arc<RwLock<CompactionSettings>>,
+    compaction_settings_resolver: Option<Arc<dyn CompactionSettingsResolver>>,
     context_window: Option<u64>,
     branch_summary_reserve_tokens: u64,
     lifecycle_state: Arc<AtomicU8>,
@@ -256,10 +257,10 @@ impl AgentSession {
     /// session has no snapshot until its next model request. This is not billed usage.
     pub fn context_budget(&self) -> Option<pi_core::ContextBudget> {
         let request = self.runtime.agent().context_request_usage()?;
-        let settings = *self
-            .compaction_settings
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (provider, model) = self.runtime.agent().model_selection();
+        let settings = self
+            .resolved_compaction_settings_for(&provider, &model)
+            .ok()?;
         let reserve_tokens = if settings.enabled {
             settings.reserve_tokens
         } else {

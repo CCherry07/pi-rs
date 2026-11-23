@@ -166,12 +166,38 @@ pub(crate) fn session_compaction_settings(
     }
 }
 
+struct CodingCompactionSettings(pi_settings::CompactionTokenSettings);
+
+impl pi_session::CompactionSettingsResolver for CodingCompactionSettings {
+    fn resolve(
+        &self,
+        base: CompactionSettings,
+        provider: &ProviderId,
+        model: &pi_core::ModelId,
+    ) -> Result<CompactionSettings, pi_session::SessionError> {
+        self.0
+            .resolve(
+                pi_settings::CompactionSettings {
+                    enabled: base.enabled,
+                    reserve_tokens: base.reserve_tokens,
+                    keep_recent_tokens: base.keep_recent_tokens,
+                },
+                Some((provider.as_str(), model.as_str())),
+            )
+            .map(session_compaction_settings)
+            .map_err(|error| pi_session::SessionError::Runtime(error.to_string()))
+    }
+}
+
 pub(crate) fn session_options(
     settings: &SettingsValues,
     initial_model: InitialModelRequest,
 ) -> AgentSessionOptions {
     AgentSessionOptions::default()
         .compaction(session_compaction_settings(settings.compaction))
+        .compaction_settings_resolver(Arc::new(CodingCompactionSettings(
+            settings.compaction_tokens.clone(),
+        )))
         .branch_summary_reserve_tokens(settings.branch_summary.reserve_tokens)
         .retry(AutoRetrySettings {
             enabled: settings.retry.enabled,
@@ -224,6 +250,9 @@ impl pi_session::SessionSettingsWriter for CodingSessionSettings {
             .map_err(|error| error.to_string())
     }
 }
+
+#[cfg(test)]
+mod compaction_tests;
 
 #[cfg(test)]
 mod tests {

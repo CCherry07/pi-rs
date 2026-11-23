@@ -214,6 +214,7 @@ mod tests {
             timestamp_ms: 2,
         }));
         let compaction = SessionEntry::Compaction(CompactionEntry {
+            first_kept_entry_id: None,
             from_hook: None,
             system_message: None,
             retained_entry_ids: Vec::new(),

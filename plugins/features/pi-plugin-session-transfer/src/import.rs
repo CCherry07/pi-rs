@@ -351,6 +351,7 @@ fn convert_entry(
         "compaction" => {
             let (retained_tail, retained_entry_ids) = retained_tail(raw, converted_by_id)?;
             Ok(SessionEntry::Compaction(CompactionEntry {
+                first_kept_entry_id: optional_string(raw, "firstKeptEntryId")?.map(str::to_owned),
                 from_hook: optional_bool(raw, "fromHook")?,
                 system_message: raw
                     .get("systemMessage")
@@ -431,6 +432,10 @@ fn retained_tail(
     let Some(first_kept) = optional_string(compaction, "firstKeptEntryId")? else {
         return Ok((Vec::new(), Vec::new()));
     };
+    // Pi encodes retain-none with the checkpoint's own identity.
+    if Some(first_kept) == optional_string(compaction, "id")? {
+        return Ok((Vec::new(), Vec::new()));
+    }
     let mut path = Vec::new();
     let mut current = optional_string(compaction, "parentId")?;
     while let Some(id) = current {
@@ -731,6 +736,17 @@ mod tests {
             document.entries[1].parent_id.as_deref(),
             Some("legacy-00000001")
         );
+        let SessionEntry::Compaction(compaction) = &document.entries[2].entry else {
+            panic!("checkpoint")
+        };
+        assert_eq!(
+            compaction.first_kept_entry_id.as_deref(),
+            Some("legacy-00000002")
+        );
+        assert_eq!(
+            compaction.retained_entry_ids,
+            vec![Some("legacy-00000002".into())]
+        );
         assert_eq!(context.messages.len(), 3);
         assert_eq!(context.messages[1].role(), "custom");
         assert_eq!(context.messages[2].role(), "user");
@@ -770,6 +786,89 @@ mod tests {
         assert_eq!(
             serde_json::to_value(document.messages().remove(0)).unwrap()["extensionField"],
             json!({"x":1})
+        );
+    }
+
+    #[test]
+    fn imports_current_oracle_invisible_compaction_boundaries_without_rewriting_history() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../crates/pi-session/tests/fixtures/compaction-current-oracle.json"
+        ))
+        .unwrap();
+        for name in [
+            "metadata-before-turn-start",
+            "recovery-two-turn-split",
+            "repeated-compaction-retains-invisible-metadata-cut",
+            "repeated-compaction-retains-omitted-recovery-cut",
+        ] {
+            let case = fixture["cases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|case| case["name"] == name)
+                .unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let source = directory.path().join("v3.jsonl");
+            let destination = directory.path().join("v4.jsonl");
+            let mut values = vec![
+                json!({"type":"session","version":3,"id":"oracle","timestamp":"2025-02-01T00:00:00.123Z","cwd":"/oracle"}),
+            ];
+            values.extend(case["entries"].as_array().unwrap().iter().cloned());
+            values.push(json!({"id":"checkpoint","parentId":values.last().unwrap()["id"],
+                "timestamp":"2025-02-01T00:00:00.123Z", "type":"compaction", "summary":"summary",
+                "firstKeptEntryId":case["expected"]["firstKeptEntryId"], "tokensBefore":case["expected"]["tokensBefore"]}));
+            write_legacy(&source, &values);
+            let original = fs::read(&source).unwrap();
+            import_session_file(&source, &destination).unwrap();
+            let (_, document) = SessionStore::open(&destination).unwrap();
+            let SessionEntry::Compaction(compaction) = &document.entries.last().unwrap().entry
+            else {
+                panic!("checkpoint")
+            };
+            assert_eq!(
+                compaction.first_kept_entry_id.as_deref(),
+                case["expected"]["firstKeptEntryId"].as_str()
+            );
+            let tail: Vec<AgentMessage> =
+                serde_json::from_value(case["expected"]["retainedTail"].clone()).unwrap();
+            assert_eq!(compaction.retained_tail, tail);
+            assert_eq!(fs::read(&source).unwrap(), original);
+            let copy = directory.path().join("copy.jsonl");
+            import_session_file(&destination, &copy).unwrap();
+            assert_eq!(fs::read(&copy).unwrap(), fs::read(&destination).unwrap());
+        }
+    }
+
+    #[test]
+    fn imports_pi_retain_none_self_id() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../crates/pi-session/tests/fixtures/rpc-compaction-oracle.json"
+        ))
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("v3.jsonl");
+        let destination = directory.path().join("v4.jsonl");
+        write_legacy(
+            &source,
+            &[
+                json!({"type":"session", "version":3, "id":"oracle", "timestamp":"2025-02-01T00:00:00.123Z", "cwd":"/oracle"}),
+                fixture["imported"]["entry"].clone(),
+            ],
+        );
+        import_session_file(&source, &destination).unwrap();
+        let (store, document) = SessionStore::open(&destination).unwrap();
+        let record = document.entries.last().unwrap();
+        let SessionEntry::Compaction(compaction) = &record.entry else {
+            panic!("checkpoint")
+        };
+        assert_eq!(
+            compaction.first_kept_entry_id.as_deref(),
+            Some(record.id.as_str())
+        );
+        assert!(compaction.retained_tail.is_empty());
+        assert_eq!(
+            serde_json::to_value(store.context().unwrap().messages).unwrap(),
+            fixture["imported"]["context"]
         );
     }
 

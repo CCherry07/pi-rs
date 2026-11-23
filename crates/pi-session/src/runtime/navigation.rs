@@ -4,7 +4,7 @@ use super::compaction::{CompactionCompleter, serialize_conversation};
 use crate::{
     AgentMessage, BranchSummaryEntry, CompactionPreparation, FileOperations,
     SessionBeforeTreeEvent, SessionContext, SessionDocument, SessionError, SessionTreeEvent,
-    TreePreparation, estimate_context_tokens, now_ms,
+    TreePreparation, estimate_tokens, now_ms,
 };
 use pi_core::{AbortHandle, AbortSignal, ContentBlock, Message, StopReason, UserMessage};
 use pi_runtime::RuntimeCompletionRequest;
@@ -177,20 +177,19 @@ impl AgentSession {
         signal: AbortSignal,
     ) -> Result<BranchSummaryEntry, SessionError> {
         const PREAMBLE: &str = "The user explored a different conversation branch before returning here.\nSummary of that exploration:\n\n";
-        let context = crate::build_session_context(
+        let branch_input = prepare_branch_summary_messages(
             &preparation.entries_to_summarize,
             self.context_updates.options(),
-        );
-        let messages = branch_summary_input_messages(
-            context.messages,
             self.active_context_window().unwrap_or(128_000),
             self.branch_summary_reserve_tokens,
         );
+        let messages = branch_input.messages;
         let (summary, usage, details) = if messages.is_empty() {
             ("No content to summarize".to_string(), None, None)
         } else {
             let mut summary_preparation = CompactionPreparation {
-                messages_to_summarize: messages,
+                first_kept_entry_id: None,
+                messages_to_summarize: branch_input.inspected_messages,
                 turn_prefix_messages: Vec::new(),
                 retained_tail: Vec::new(),
                 is_split_turn: false,
@@ -201,6 +200,9 @@ impl AgentSession {
             };
             self.compaction_policy
                 .prepare_branch(&preparation.entries_to_summarize, &mut summary_preparation);
+            // File tracking includes the first over-budget message, but the LLM
+            // receives only the messages admitted to the branch history budget.
+            summary_preparation.messages_to_summarize = messages;
             let conversation = serialize_conversation(&summary_preparation.messages_to_summarize);
             let prompt = self.compaction_policy.branch_prompt();
             let instructions = match (
@@ -232,6 +234,8 @@ impl AgentSession {
                         },
                         thinking_budgets: self.runtime.agent().thinking_budgets(),
                         max_output_tokens: None,
+                        cache_retention: None,
+                        routing_session_id: None,
                     },
                     signal.clone(),
                     crate::SummarizationSource::BranchSummary,
@@ -312,33 +316,165 @@ impl AgentSession {
     }
 }
 
+struct BranchSummaryMessages {
+    messages: Vec<AgentMessage>,
+    inspected_messages: Vec<AgentMessage>,
+}
+
+fn prepare_branch_summary_messages(
+    entries: &[crate::SessionRecord],
+    options: &crate::SessionContextBuildOptions,
+    context_window: u64,
+    reserve_tokens: u64,
+) -> BranchSummaryMessages {
+    let edits = entries
+        .iter()
+        .filter_map(|record| match &record.entry {
+            crate::SessionEntry::ContextEdit(edit) => Some((edit.target_id.as_str(), edit)),
+            _ => None,
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let candidates = entries
+        .iter()
+        .enumerate()
+        .flat_map(|(index, record)| {
+            let (messages, important) = match &record.entry {
+                crate::SessionEntry::Compaction(compaction) => (
+                    vec![
+                AgentMessage::custom(serde_json::json!({
+                    "role":"compactionSummary", "summary":compaction.summary,
+                    "tokensBefore":compaction.tokens_before, "timestamp":record.timestamp_ms,
+                })).expect("valid compaction summary"),
+            ],
+                    true,
+                ),
+                crate::SessionEntry::BranchSummary(branch) => (
+                    vec![
+                        AgentMessage::custom(serde_json::json!({
+                            "role":"branchSummary", "summary":branch.summary,
+                            "fromId":branch.from_id, "timestamp":record.timestamp_ms,
+                        }))
+                        .expect("valid branch summary"),
+                    ],
+                    true,
+                ),
+                crate::SessionEntry::Message(message) if message.message.role() != "toolResult" => {
+                    (
+                        edits
+                            .get(record.id.as_str())
+                            .map_or_else(
+                                || Some(message.message.clone()),
+                                |edit| edit.apply(&message.message),
+                            )
+                            .into_iter()
+                            .collect(),
+                        false,
+                    )
+                }
+                crate::SessionEntry::CustomMessage(_) | crate::SessionEntry::Custom(_) => {
+                    // Preserve Rust's injected projectors/isolated seeds without
+                    // applying the active-context latest-compaction boundary.
+                    let messages =
+                        crate::session_entry_to_context_messages(record, index, entries, options)
+                            .into_iter()
+                            .filter(|message| message.role() != "toolResult")
+                            .filter_map(|message| {
+                                edits.get(record.id.as_str()).map_or_else(
+                                    || Some(message.clone()),
+                                    |edit| edit.apply(&message),
+                                )
+                            })
+                            .collect();
+                    (messages, false)
+                }
+                _ => (Vec::new(), false),
+            };
+            messages
+                .into_iter()
+                .map(move |message| (message, important))
+        })
+        .collect::<Vec<_>>();
+    select_branch_summary_messages(candidates, context_window.saturating_sub(reserve_tokens))
+}
+
+fn select_branch_summary_messages(
+    candidates: Vec<(AgentMessage, bool)>,
+    token_budget: u64,
+) -> BranchSummaryMessages {
+    let mut total_tokens = 0_u64;
+    let mut messages = Vec::new();
+    let mut inspected_messages = Vec::new();
+    for (message, important) in candidates.into_iter().rev() {
+        inspected_messages.push(message.clone());
+        let tokens = estimate_tokens(&message);
+        if token_budget > 0 && total_tokens.saturating_add(tokens) > token_budget {
+            // An existing summary is valuable context: allow it to exceed the
+            // remaining budget only when less than 90% was already consumed.
+            if important && u128::from(total_tokens) * 10 < u128::from(token_budget) * 9 {
+                messages.push(message);
+            }
+            break;
+        }
+        total_tokens = total_tokens.saturating_add(tokens);
+        messages.push(message);
+    }
+    messages.reverse();
+    inspected_messages.reverse();
+    BranchSummaryMessages {
+        messages,
+        inspected_messages,
+    }
+}
+
+#[cfg(test)]
 pub(super) fn branch_summary_input_messages(
     messages: Vec<AgentMessage>,
     context_window: u64,
     reserve_tokens: u64,
 ) -> Vec<AgentMessage> {
-    let messages = messages
-        .into_iter()
-        .filter(|message| !matches!(message.as_standard(), Some(Message::ToolResult(_))))
-        .collect::<Vec<_>>();
-    let Some(token_budget) = context_window.checked_sub(reserve_tokens) else {
-        return messages;
-    };
-    if token_budget == 0 {
-        return messages;
-    }
-    let mut total_tokens = 0_u64;
-    let mut selected = Vec::new();
-    for message in messages.into_iter().rev() {
-        let tokens = estimate_context_tokens(std::slice::from_ref(&message)).tokens;
-        if total_tokens.saturating_add(tokens) > token_budget {
-            break;
+    select_branch_summary_messages(
+        messages
+            .into_iter()
+            .filter(|message| message.role() != "toolResult")
+            .map(|message| (message, false))
+            .collect(),
+        context_window.saturating_sub(reserve_tokens),
+    )
+    .messages
+}
+
+#[cfg(test)]
+#[test]
+fn current_oracle_branch_preparation_uses_raw_history_and_text_budget() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/compaction-current-oracle.json"
+    ))
+    .unwrap();
+    for case in fixture["branchCases"].as_array().unwrap() {
+        let entries =
+            serde_json::from_value::<Vec<crate::SessionRecord>>(case["rustEntries"].clone())
+                .unwrap();
+        let input = prepare_branch_summary_messages(
+            &entries,
+            &Default::default(),
+            case["budget"].as_u64().unwrap(),
+            0,
+        );
+        assert_eq!(
+            serde_json::to_value(&input.messages).unwrap(),
+            case["expected"]["messages"],
+            "{}",
+            case["name"]
+        );
+        assert_eq!(
+            input.messages.iter().map(estimate_tokens).sum::<u64>(),
+            case["expected"]["totalTokens"].as_u64().unwrap()
+        );
+        if case["name"] == "branch-over-budget-file-tracking" {
+            assert_eq!(input.messages.len(), 1);
+            assert_eq!(input.inspected_messages.len(), 2);
         }
-        total_tokens = total_tokens.saturating_add(tokens);
-        selected.push(message);
     }
-    selected.reverse();
-    selected
 }
 
 pub(super) fn tree_preparation(

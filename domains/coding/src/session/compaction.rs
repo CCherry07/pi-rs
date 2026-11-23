@@ -128,6 +128,7 @@ impl SessionCompactionPolicy for CodingCompactionPolicy {
                 SessionEntry::Compaction(previous) => Some(previous),
                 _ => None,
             })
+            && previous.from_hook != Some(true)
             && let Some(details) = &previous.details
         {
             extend_string_set(&mut file_ops.read, details.get("readFiles"));
@@ -151,6 +152,7 @@ impl SessionCompactionPolicy for CodingCompactionPolicy {
         let mut file_ops = FileOperations::default();
         for entry in path_entries {
             if let SessionEntry::BranchSummary(summary) = &entry.entry
+                && summary.from_hook != Some(true)
                 && let Some(details) = &summary.details
             {
                 extend_string_set(&mut file_ops.read, details.get("readFiles"));
@@ -235,8 +237,9 @@ fn compute_file_lists(file_ops: &FileOperations) -> (Vec<String>, Vec<String>) {
         .cloned()
         .collect::<Vec<_>>();
     let mut modified_files = modified.into_iter().collect::<Vec<_>>();
-    read_files.sort();
-    modified_files.sort();
+    // JavaScript Array.sort compares UTF-16 code units, not Unicode scalars.
+    read_files.sort_by(|left, right| left.encode_utf16().cmp(right.encode_utf16()));
+    modified_files.sort_by(|left, right| left.encode_utf16().cmp(right.encode_utf16()));
     (read_files, modified_files)
 }
 
@@ -269,6 +272,151 @@ mod tests {
     use pi_session::{CompactionEntry, CompactionSettings};
 
     use super::*;
+
+    #[test]
+    fn current_oracle_file_metadata_and_summary_prompts() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../crates/pi-session/tests/fixtures/compaction-current-oracle.json"
+        ))
+        .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let expected = &case["expected"];
+            if expected.is_null() {
+                continue;
+            }
+            let records: Vec<SessionRecord> =
+                serde_json::from_value(case["rustEntries"].clone()).unwrap();
+            let mut preparation = CompactionPreparation {
+                first_kept_entry_id: None,
+                messages_to_summarize: serde_json::from_value(
+                    expected["messagesToSummarize"].clone(),
+                )
+                .unwrap(),
+                turn_prefix_messages: serde_json::from_value(
+                    expected["turnPrefixMessages"].clone(),
+                )
+                .unwrap(),
+                retained_tail: serde_json::from_value(expected["retainedTail"].clone()).unwrap(),
+                is_split_turn: expected["isSplitTurn"].as_bool().unwrap(),
+                tokens_before: expected["tokensBefore"].as_u64().unwrap(),
+                previous_summary: expected["previousSummary"].as_str().map(str::to_string),
+                file_ops: FileOperations::default(),
+                settings: serde_json::from_value(case["settings"].clone()).unwrap(),
+            };
+            CodingCompactionPolicy.prepare(&records, &mut preparation);
+            for (name, values) in [
+                ("read", &preparation.file_ops.read),
+                ("written", &preparation.file_ops.written),
+                ("edited", &preparation.file_ops.edited),
+            ] {
+                let expected: HashSet<String> =
+                    serde_json::from_value(expected["fileOps"][name].clone()).unwrap();
+                assert_eq!(values, &expected, "{} {name}", case["name"]);
+            }
+            assert_eq!(
+                CodingCompactionPolicy
+                    .finalize(&preparation, &mut String::new())
+                    .unwrap(),
+                expected["details"],
+                "{}",
+                case["name"]
+            );
+            if let Some(summary) = fixture["summaries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|summary| summary["name"] == case["name"])
+            {
+                let mut result = if preparation.is_split_turn {
+                    let history = if preparation.messages_to_summarize.is_empty() {
+                        preparation
+                            .previous_summary
+                            .as_deref()
+                            .unwrap_or("No prior history.")
+                    } else {
+                        "summary one\nsummary two"
+                    };
+                    format!(
+                        "{history}\n\n---\n\n**Turn Context (split turn):**\n\nsummary one\nsummary two"
+                    )
+                } else {
+                    "summary one\nsummary two".to_string()
+                };
+                let details = CodingCompactionPolicy
+                    .finalize(&preparation, &mut result)
+                    .unwrap();
+                assert_eq!(details, summary["details"]);
+                assert_eq!(result, summary["summary"]);
+                let prompt = if preparation.is_split_turn {
+                    CodingCompactionPolicy.turn_prefix_prompt()
+                } else {
+                    CodingCompactionPolicy.summary_prompt(preparation.previous_summary.is_some())
+                };
+                assert!(
+                    summary["requests"]
+                        .as_array()
+                        .unwrap()
+                        .last()
+                        .unwrap()
+                        .as_str()
+                        .unwrap()
+                        .ends_with(&format!("{prompt}\n\nAdditional focus: Focus 😀"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn current_oracle_branch_file_metadata_excludes_hook_summaries() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../crates/pi-session/tests/fixtures/compaction-current-oracle.json"
+        ))
+        .unwrap();
+        let case = fixture["branchCases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["name"] == "branch-hook-metadata-guard")
+            .unwrap();
+        let mut entries: Vec<SessionRecord> =
+            serde_json::from_value(case["rustEntries"].clone()).unwrap();
+        // Give the hook distinct files so the guard cannot pass by deduplication.
+        if let SessionEntry::BranchSummary(hook) = &mut entries[1].entry {
+            hook.details =
+                Some(json!({"readFiles":["hook-only.md"],"modifiedFiles":["hook-only.rs"]}));
+        }
+        let mut preparation = CompactionPreparation {
+            first_kept_entry_id: None,
+            messages_to_summarize: serde_json::from_value(case["expected"]["messages"].clone())
+                .unwrap(),
+            turn_prefix_messages: Vec::new(),
+            retained_tail: Vec::new(),
+            is_split_turn: false,
+            tokens_before: 0,
+            previous_summary: None,
+            file_ops: FileOperations::default(),
+            settings: CompactionSettings::default(),
+        };
+        CodingCompactionPolicy.prepare_branch(&entries, &mut preparation);
+        assert_eq!(
+            preparation.file_ops.read,
+            HashSet::from(["branch.md".into()])
+        );
+        assert_eq!(
+            preparation.file_ops.edited,
+            HashSet::from(["branch.rs".into()])
+        );
+    }
+
+    #[test]
+    fn current_oracle_file_sort_uses_javascript_utf16_order() {
+        let mut file_ops = FileOperations::default();
+        file_ops
+            .written
+            .extend(["😀.rs".to_string(), "\u{e000}.rs".to_string()]);
+        let (_, modified) = compute_file_lists(&file_ops);
+        assert_eq!(modified, ["😀.rs", "\u{e000}.rs"]);
+    }
 
     fn calls(tools: &[(&str, &str)]) -> AgentMessage {
         Message::assistant(AssistantMessage {
@@ -306,7 +454,7 @@ mod tests {
     #[test]
     fn coding_checkpoint_prompts_match_current_legacy_text() {
         // Literal oracles from compaction.ts and branch-summarization.ts in
-        // legacy/pi/packages/coding-agent/src/core/compaction (05fd3fbda).
+        // legacy/pi/packages/coding-agent/src/core/compaction (b8be10a7ac).
         assert_eq!(
             CodingCompactionPolicy.turn_prefix_prompt(),
             r#"The messages above are earlier context from an ongoing conversation. Later messages are stored separately and do not need to be reconstructed.
@@ -365,6 +513,7 @@ Keep each section concise. Preserve exact file paths, function names, and error 
             parent_id: None,
             timestamp_ms: 0,
             entry: SessionEntry::Compaction(CompactionEntry {
+                first_kept_entry_id: None,
                 from_hook: None,
                 system_message: None,
                 retained_entry_ids: Vec::new(),
@@ -379,6 +528,7 @@ Keep each section concise. Preserve exact file paths, function names, and error 
             }),
         };
         let mut preparation = CompactionPreparation {
+            first_kept_entry_id: None,
             messages_to_summarize: vec![calls(&[
                 ("edit", "src/lib.rs"),
                 ("read", "docs/guide.md"),
@@ -424,6 +574,7 @@ Keep each section concise. Preserve exact file paths, function names, and error 
     #[test]
     fn coding_compaction_tracks_nested_calls_and_ignores_empty_paths() {
         let mut preparation = CompactionPreparation {
+            first_kept_entry_id: None,
             messages_to_summarize: vec![
                 calls(&[("read", ""), ("write", "direct.rs")]),
                 AgentMessage::custom(json!({
@@ -461,6 +612,172 @@ Keep each section concise. Preserve exact file paths, function names, and error 
             summary,
             "checkpoint\n\n<read-files>\nnested.md\n</read-files>\n\n<modified-files>\nchanged.rs\ncreated.rs\ndirect.rs\n</modified-files>"
         );
+    }
+
+    #[tokio::test]
+    async fn current_oracle_live_summary_requests_match_initial_split_and_incremental_prompts() {
+        use pi_agent::AgentOptions;
+        use pi_session::{AgentSession, AgentSessionOptions, SessionHeader, SessionStore};
+        use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
+
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../crates/pi-session/tests/fixtures/compaction-current-oracle.json"
+        ))
+        .unwrap();
+        for summary in fixture["summaries"].as_array().unwrap() {
+            let case = fixture["cases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|case| case["name"] == summary["name"])
+                .unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("session.jsonl");
+            let store = SessionStore::create(&path, SessionHeader::new("oracle", directory.path()))
+                .unwrap();
+            let records: Vec<SessionRecord> =
+                serde_json::from_value(case["rustEntries"].clone()).unwrap();
+            for mut record in records {
+                if let SessionEntry::Message(message) = &mut record.entry
+                    && message.message.role() == "assistant"
+                {
+                    let mut value = serde_json::to_value(&message.message).unwrap();
+                    value["provider"] = json!("scripted");
+                    value["model"] = json!("test");
+                    message.message = AgentMessage::custom(value).unwrap();
+                }
+                store
+                    .append_entry(record.provisioned(), pi_session::MAIN_LANE)
+                    .unwrap();
+            }
+            drop(store);
+            let expected_requests = summary["requests"].as_array().unwrap();
+            let plugin = ScriptedProviderPlugin::scripted(
+                expected_requests
+                    .iter()
+                    .map(|_| ScriptedTurn::Text("summary one\nsummary two".to_string())),
+            );
+            let provider = plugin.provider();
+            let runtime = pi_runtime::PiRuntime::builder()
+                .provider_plugin(plugin)
+                .agent_options(AgentOptions {
+                    cwd: directory.path().to_path_buf(),
+                    provider_id: ProviderId::new("scripted"),
+                    model_id: ModelId::new("test"),
+                    ..AgentOptions::default()
+                })
+                .build()
+                .unwrap();
+            let settings = serde_json::from_value(case["settings"].clone()).unwrap();
+            let session = AgentSession::open(
+                runtime,
+                &path,
+                AgentSessionOptions::default()
+                    .compaction(settings)
+                    .compaction_policy(std::sync::Arc::new(CodingCompactionPolicy)),
+            )
+            .await
+            .unwrap();
+            let result = session.compact(Some("Focus 😀".to_string())).await.unwrap();
+            assert_eq!(
+                result.first_kept_entry_id.as_deref(),
+                summary["firstKeptEntryId"].as_str()
+            );
+            assert_eq!(result.summary, summary["summary"], "{}", case["name"]);
+            assert_eq!(result.details.unwrap(), summary["details"]);
+            let requests = provider.requests();
+            assert_eq!(requests.len(), expected_requests.len());
+            for (request, expected) in requests.iter().zip(expected_requests) {
+                let Message::User(user) = &request.messages[0] else {
+                    panic!("expected summary prompt")
+                };
+                let ContentBlock::Text(text) = &user.content[0] else {
+                    panic!("expected summary text")
+                };
+                assert_eq!(text.text, expected.as_str().unwrap(), "{}", case["name"]);
+            }
+            session.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn branch_metadata_includes_first_over_budget_tool_call_but_not_its_prompt() {
+        use pi_agent::AgentOptions;
+        use pi_session::{AgentSession, AgentSessionOptions, SessionHeader, SessionStore};
+        use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let store =
+            SessionStore::create(&path, SessionHeader::new("branch-budget", directory.path()))
+                .unwrap();
+        let root = store
+            .append_message(Message::User(pi_core::UserMessage::text("root", 0)))
+            .unwrap();
+        store
+            .append_message(calls(&[("read", "over-budget.md")]))
+            .unwrap();
+        store.append_message(AgentMessage::custom(json!({
+            "role":"toolResult", "toolCallId":"0", "toolName":"read", "content":[{"type":"text","text":"result"}],
+            "isError":false, "timestamp":1,
+        })).unwrap()).unwrap();
+        store
+            .append_message(Message::User(pi_core::UserMessage::text("new", 2)))
+            .unwrap();
+        drop(store);
+        let plugin =
+            ScriptedProviderPlugin::scripted([ScriptedTurn::Text("branch summary".into())]);
+        let provider = plugin.provider();
+        let runtime = pi_runtime::PiRuntime::builder()
+            .provider_plugin(plugin)
+            .agent_options(AgentOptions {
+                cwd: directory.path().to_path_buf(),
+                provider_id: ProviderId::new("scripted"),
+                model_id: ModelId::new("test"),
+                ..AgentOptions::default()
+            })
+            .build()
+            .unwrap();
+        let session = AgentSession::open(
+            runtime,
+            &path,
+            AgentSessionOptions::default()
+                .context_window(100)
+                .branch_summary_reserve_tokens(98)
+                .compaction_policy(std::sync::Arc::new(CodingCompactionPolicy)),
+        )
+        .await
+        .unwrap();
+        session
+            .summarize_branch_and_checkout(&root, None, false, None)
+            .await
+            .unwrap();
+        let document = session.history().load().unwrap();
+        let summary = document
+            .entries
+            .iter()
+            .find_map(|record| match &record.entry {
+                SessionEntry::BranchSummary(summary) => Some(summary),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            summary.details,
+            Some(json!({"readFiles":["over-budget.md"],"modifiedFiles":[]}))
+        );
+        let requests = provider.requests();
+        let Message::User(prompt) = &requests.last().unwrap().messages[0] else {
+            panic!("summary user")
+        };
+        let ContentBlock::Text(text) = &prompt.content[0] else {
+            panic!("summary text")
+        };
+        assert!(
+            text.text
+                .starts_with("<conversation>\n[User]: new\n</conversation>")
+        );
+        assert!(!text.text.contains("over-budget.md"));
+        session.shutdown().await;
     }
 
     #[tokio::test]

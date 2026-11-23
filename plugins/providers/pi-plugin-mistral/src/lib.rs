@@ -281,7 +281,9 @@ pub fn request_body(request: &ProviderRequest) -> Result<Value, ProviderError> {
     if let Some(max_tokens) = request.max_output_tokens {
         payload["max_tokens"] = json!(max_tokens);
     }
-    if let Some(session_id) = &request.session_id {
+    if request.cache_retention != Some(pi_plugin::CacheRetention::None)
+        && let Some(session_id) = &request.session_id
+    {
         payload["prompt_cache_key"] = Value::String(session_id.clone());
     }
     if request
@@ -972,6 +974,7 @@ mod tests {
             thinking_level: ThinkingLevel::High,
             thinking_budgets: None,
             max_output_tokens: Some(1234),
+            cache_retention: None,
             headers: BTreeMap::new(),
             sampling_params: BTreeMap::new(),
             session_id: Some("session-1".to_string()),
@@ -1002,6 +1005,20 @@ mod tests {
             body["tools"][0]["function"]["parameters"]["required"],
             json!(["path"])
         );
+    }
+
+    #[test]
+    fn request_cache_override_disables_cache_key() {
+        let mut req = request("magistral-medium-latest");
+        req.cache_retention = Some(pi_plugin::CacheRetention::None);
+        assert!(
+            request_body(&req)
+                .unwrap()
+                .get("prompt_cache_key")
+                .is_none()
+        );
+        req.cache_retention = Some(pi_plugin::CacheRetention::Short);
+        assert_eq!(request_body(&req).unwrap()["prompt_cache_key"], "session-1");
     }
 
     #[test]

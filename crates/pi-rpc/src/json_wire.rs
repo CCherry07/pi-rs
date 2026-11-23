@@ -332,6 +332,9 @@ fn first_kept_entry_id(
     compaction: &CompactionEntry,
     document: &SessionDocument,
 ) -> Option<String> {
+    if let Some(id) = &compaction.first_kept_entry_id {
+        return Some(id.clone());
+    }
     let first = compaction.retained_tail.first()?;
     if let Some(Some(id)) = compaction.retained_entry_ids.first() {
         return Some(id.clone());

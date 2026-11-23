@@ -326,6 +326,13 @@ preparation, and typed sampling/output contracts. ABI 35 introduced typed `Syste
 and optional `providerThinkingLevel` metadata. Rebuild native plugins against this SDK;
 older descriptors are rejected before constructors are resolved.
 
+`ProviderRequest::cache_retention` adds a typed request-local prompt-cache override. `None`
+preserves provider defaults; `Some(CacheRetention::None)` disables explicit cache writes and
+cache affinity without changing process configuration. Summary callers can supply a fresh
+routing identity separately. Native providers must rebuild against this SDK: the existing
+exact-build source fingerprint covers this additive request-layout change and rejects previous
+artifacts before constructor resolution. Descriptor symbols and library lifetime are unchanged.
+
 The current source fingerprint also covers `BeforeAgentStartPatch::prompt_contributions` and
 `ToolDiscovery::origin`. Source fragments are optional accounting metadata; they do not change
 prompt text or tool exposure. Rebuild native plugins against the exact SDK after these layout changes.
@@ -477,7 +484,9 @@ the same SDK. Descriptor symbols and library lifetime are unchanged.
 `CompactionEntry` and `BranchSummaryEntry` now preserve optional `from_hook` metadata.
 Compactions can carry a validated `SystemMessageSnapshot`, retaining the complete extensible
 system wire message rather than only rendered text. Rebuild native plugins for these additive
-value-layout changes under the exact-build fingerprint. Existing v4 entries without the fields
+value-layout changes under the exact-build fingerprint. `CompactionPreparation` and `CompactionEntry` also carry optional `first_kept_entry_id`
+source-cut provenance, including boundaries without visible messages; this additive layout change is
+covered by the same exact-build source fingerprint. Existing v4 entries without the fields
 remain readable; the v4 schema number and shared mutation sequence are unchanged.
 
 Tool-end events and `ToolResultMessage` now carry optional `duration_ms`, measured by the owning

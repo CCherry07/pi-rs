@@ -66,6 +66,17 @@ impl AgentSession {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    pub(super) fn resolved_compaction_settings_for(
+        &self,
+        provider: &ProviderId,
+        model: &ModelId,
+    ) -> Result<CompactionSettings, SessionError> {
+        let base = self.compaction_settings();
+        self.compaction_settings_resolver
+            .as_ref()
+            .map_or(Ok(base), |resolver| resolver.resolve(base, provider, model))
+    }
+
     pub(super) fn retry_settings(&self) -> AutoRetrySettings {
         *self
             .retry_settings

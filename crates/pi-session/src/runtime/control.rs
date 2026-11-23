@@ -70,6 +70,7 @@ impl AgentTurnControl for SessionTurnControl {
         let compacted_context = session
             .compact_before_next_turn(&turn)
             .await
+            .map_err(|error| AgentTurnControlError(error.to_string()))?
             .or(edited_context);
         if let Some(context) = &compacted_context {
             turn.context = Arc::new(context.clone());

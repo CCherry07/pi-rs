@@ -170,6 +170,15 @@ variant-preserving conversion. `ForkPosition` is a shared `pi-core` value re-exp
 existing plugin/session paths. These are Rust Interface changes, with no v4 schema or plugin-wire
 change.
 
+Internal historical context queries have typed Session owners: `AgentSession::context_usage`
+combines the active model window with default-history checkpoint accounting, while
+`SessionHistory::context_entries` selects the default context-bearing records from a shared
+journal snapshot. Both retain the built-in history view rather than running generation-specific
+transforms or projectors. Historical usage can remain unknown after edits or compaction and is
+separate from configured `context_messages` and the latest-request `context_budget`. The Plugin
+Adapter delegates these queries and only converts errors and serializes entry values; the internal
+queries preserve the original History errors and do not expand the public Rust Interface.
+
 `PiSession::observe()` captures a generation and initial snapshot, then returns `SessionUpdate`:
 `Event` carries `(epoch, revision)` and a product event; `Reset` carries the same cursor, a full
 snapshot and either `Replacement` or `Lagged`. A replacement increments the epoch even on reload
@@ -2281,9 +2290,10 @@ Accounting reads metadata without cloning the entire undeclared schema catalog o
 
 Snapshots live in Agent state and are never written to Pi v4 journals. New runs, explicit model/tool
 configuration, context replacement, reset, restore and generation replacement clear the old snapshot.
-`AgentSession::context_budget` adds the active session window and enabled compaction reserve with
-saturating free-space subtraction. Missing windows remain unknown; disabled auto-compaction reserves
-zero. Desktop exposes a localized expandable panel from the composer context indicator; CLI `/session`
+`AgentSession::context_budget` adds the active session window and the model-resolved enabled
+compaction reserve with saturating free-space subtraction. Missing windows remain unknown; disabled
+auto-compaction reserves zero. Invalid selected-model settings leave this optional budget unavailable;
+actual compaction preparation reports the settings error instead of silently using a fallback. Desktop exposes a localized expandable panel from the composer context indicator; CLI `/session`
 shows the same breakdown. Both label it as the last request estimate, distinct from cumulative tokens.
 This breakdown is an intentional pi-rs addition; legacy Pi's `getContextUsage` semantics, including
 unknown usage immediately after compaction, and existing compaction decisions remain unchanged.
@@ -2295,7 +2305,13 @@ unknown usage immediately after compaction, and existing compaction decisions re
 and applies the latest content edit only in model-context projection. Original messages, usage
 and unknown wire fields remain durable. Compaction snapshots have an optional `retainedEntryIds`
 field so edits after compaction resolve original message identities without changing plugin
-`details`. Legacy snapshots retain the ordered message-match fallback. The v1-v3 import bridge
+`details`. An optional `firstKeptEntryId` separately preserves the exact source cut, including
+invisible metadata or an omitted recovery attempt; it is validated against the selected ancestor
+path. Imported retain-none checkpoints may use their own ID, as Pi does. RPC/export prefers this
+explicit boundary while older snapshots retain the ordered message-match fallback. When an explicit
+boundary and ordered, resolvable source IDs prove the retained range, projection also preserves its
+zero-message source records for later cut decisions without changing the authoritative snapshot
+messages or re-running custom projectors. Unproven/reordered hook tails keep the prior fallback. The v1-v3 import bridge
 converts edits and compactions once in journal order, including retain-none checkpoints.
 
 `pi-plugin` owns `BoundaryResult`, draft and preview contracts plus ordered callback dispatch.
@@ -2321,9 +2337,10 @@ boundary callback; `agent_settled` remains the final product event. All prompt e
 session activity so messages queued by these hooks use the existing durable queue lifecycle.
 Activity continuation preserves the last effective prompt and does not repeat `before_agent_start`;
 the standalone `continue_run` API retains its per-run preparation semantics.
-Retry records an omission edit for the failed attempt so later projection cannot restore it.
-Edits invalidate older context-usage checkpoints, and automatic compaction preserves unsent boundary
-input. Native ABI 25 carries these contracts. See [the session boundary guide](../crates/pi-session/README.md)
+Retry and overflow recovery record omission edits for the failed attempt and its associated projected
+tool results before waiting or summarizing, so later projection cannot restore either half of the pair.
+Edits invalidate older context-usage checkpoints. Automatic compaction uses the current Pi cut-point
+policy, including closed recovery-omission suffixes, rather than separately retaining all unsent input. Native ABI 25 carries these contracts. See [the session boundary guide](../crates/pi-session/README.md)
 for examples and the standalone-Agent boundary.
 
 ## Agent layering
@@ -2818,32 +2835,83 @@ Preparation and `PreparedAgentSession` are crate-private. The Manager binds capa
 preparation and activates the new session after old-session shutdown. Generation factories provide
 bindings through `PreparedSessionGeneration::bind_session`; callers do not activate sessions.
 
-`pi-session::compaction` ports the Harness `retainedTail` algorithm: provider usage plus trailing
-heuristics estimate context size, cut points never begin at a tool result, oversized turns receive a
-separate prefix summary, previous summaries update incrementally, and read/modified file metadata is
-carried forward. Summary calls use `PiRuntime::complete`, an isolated provider request with no tools
-that does not mutate the agent transcript. `AgentSession::compact` performs manual compaction;
-`AgentSessionOptions::context_window` enables threshold compaction before/after runs and proactively
-between a completed tool result and the next provider request in the same run. The session composes
-this policy over any existing `AgentTurnControl`; successful in-run compaction persists its checkpoint
-and replaces only the run-local context, then reconciles global Agent state after the run becomes idle.
-Failures are best effort and leave the original live context in place. Recoverable context overflow
-removes the failed assistant from the prepared context, compacts, and retries once.
-Retained pre-compaction usage is ignored for subsequent threshold decisions so it cannot cause an
-immediate compaction loop. It is also excluded from product context reporting: context usage is
-unknown immediately after compaction and becomes known again only after a later successful
-assistant response. Assistant usage is a valid estimate anchor only when its timestamp is not older
-than a prefix message inserted before it, such as a compaction summary. Summary thinking still follows
-the active model's capabilities, but Pi-compatible summary requests leave `max_output_tokens` unset
-rather than deriving a cap from the retained-context reserve. Length-limited responses and tool calls
-are rejected as incomplete summaries. Conversation serialization omits assistant thinking, preserves
-Pi's text-block joining and UTF-16 truncation rules, and uses the same text serializer for branch
-summaries rather than pretty JSON. `SessionCompactionPolicy::prepare_branch` defaults to `prepare`;
-Coding overrides it to accumulate previous branch file-operation metadata and then uses `finalize`.
-File/tool-name policy remains in Coding, not the generic session algorithm. System messages remain
-prompt state and are excluded from compactable conversation input. When trailing tool results exceed
-the retained budget, the cut falls back to their closest valid assistant call, never the first message;
-this allows in-run compaction while keeping call/result pairs intact.
+The internal `pi-session` compaction Module separates computation from its two Adapters.
+`runtime/compaction/algorithm.rs` owns deterministic token estimates, cuts over already-projected
+entries, normalized-message formatting, summary prompts, validation, and the existing policy and
+completer contracts. Its production code depends on core values rather than Session History or
+`PiRuntime`. `session_adapter.rs` projects history once, establishes source-aware usage, delegates
+cut computation, and enriches the completed preparation through the selected policy. It also
+normalizes each summary message through the existing history converter and sequences normal or
+split-turn summaries through the injected completer. Normalization does not use provider-context
+repair, so serialization never synthesizes missing tool results. `runtime_adapter.rs` binds the
+completer to `PiRuntime` and converts requests and responses. `AgentSession` retains model pinning,
+retry progress, cancellation, hooks, checkpoint persistence, and context activation. The crate-root
+Interface, Coding policy, branch-summary reuse, and separate ephemeral retention policy are unchanged.
+
+Session compaction follows current Pi preparation while preserving Rust's durable `retainedTail`
+and source-entry provenance. Cuts operate on projected entries, not a flattened role list: user,
+custom, bash and branch-summary messages start turns; results never start retained tool turns;
+branch-summary adjacency and closed recovery-omission suffixes participate in cuts. Oversized turns
+receive a separate prefix summary and previous summaries update incrementally. Preparation estimates
+use provider usage plus trailing heuristics; edits and compactions invalidate usage by projected
+source identity, not by arbitrary ordering of message timestamps. Heuristic fallback counts only the
+effective system prompt. Product usage remains unknown until a new applicable assistant checkpoint.
+
+`AgentSession::compact` aborts and awaits an active run before manual compaction. Automatic compaction
+runs before/after requests and between a completed tool result and the next request in the same run.
+Text input interception and resource expansion precede the pre-prompt check, so handled input does
+not compact or edit the previous turn. The prepared input keeps its generation lease through both.
+The session composes this policy over any existing `AgentTurnControl`; successful in-run compaction
+persists its checkpoint and replaces the run-local context, then reconciles Agent state after the run.
+Summary failures are best effort; invalid token settings and failed recovery-omission writes are not.
+Automatic checks use a valid final assistant's measured usage directly, falling back to estimation
+for errors or zero usage and to edit-aware projection when needed. Stale pre-compaction messages do
+not retrigger checks. Aborted runs and terminating tool results do not start post-run compaction.
+Cancellation is registered before `compaction_start`, remains active through hooks, and is checked
+again before persistence. Cancelling a summary does not erase queued input or already durable edits.
+
+Overflow classification follows current Pi's provider patterns, including HTTP 413, provider-specific
+bodyless errors, non-overflow exclusions, successful input overflow, and zero-output near-window
+length stops. Rust's typed provider-error wrapper is removed before matching anchored error text.
+An early length stop below the selected model's original output limit can recover independently of
+the context threshold. Only the selected model's applicable response can trigger recovery. Failed
+attempts and associated tool results are durably omitted with ordinary v4 `context_edit` entries
+before summarization; raw history remains intact even if a summary fails or is cancelled. Recovery
+makes at most one compact-and-retry attempt and publishes a terminal recovery failure on repetition.
+The budget resets on a delivered user message (including queued input) or an assistant response
+ending with neither error nor length, not merely when an outer activity or pre-prompt check starts.
+A successful overflow response is compacted without retrying it. Pre-prompt recovery also never
+continues the old turn: the caller sends the new explicit input instead.
+
+Coding injects a generation-local `CompactionSettingsResolver`; generic Session does not discover or
+parse Coding settings. `compaction.modelOverrides["provider/model"]` uses exact case-sensitive keys
+and independently falls back for `reserveTokens` and `keepRecentTokens`. Global/project merge and
+trust remain settings-layer policy. Token settings are non-negative JavaScript-safe integers;
+ordinary invalid fields fail even with valid overrides, while invalid unselected overrides stay
+latent. Resolution is fallible against the captured active model on each compaction; toggles remain
+global/ordinary and model switching/resume select the appropriate override without reconstructing
+live registries.
+
+Compaction and branch summaries use `PiRuntime::prepare_summarization_request` followed by isolated,
+tool-free completion/retry. The helper pins the model and supported thinking, fits the model output
+limit using current Pi input estimation and its fixed 4096-token/15% margin (32768-token fallback),
+forces request-level `CacheRetention::None`, and creates a fresh routing identity unless explicitly
+supplied. Prepared identity is reused across retries. Retention reserve settings do not cap summary
+output. Ordinary provider-request defaults are unchanged; explicit tiny-output thinking budgets also
+follow the legacy Bedrock ceiling-minus-1024 and Anthropic zero-to-1024 fallback. Native providers
+must rebuild for the `ProviderRequest` layout change; the existing exact source fingerprint rejects
+old artifacts before constructor lookup, without changing descriptor symbols or loader policy.
+
+Length-limited responses and tool calls are rejected as incomplete summaries. Conversation
+serialization omits assistant thinking and system prompt state, preserves Pi's text-block joining
+and UTF-16 truncation, and is shared by branch summaries. Branch preparation traverses the entire
+abandoned raw branch (including older checkpoints), budgets message text rather than billed usage,
+and preserves Pi's important-summary allowance. `SessionCompactionPolicy::prepare_branch` defaults
+to `prepare`; Coding accumulates file operations, including the first over-budget inspected entry,
+but does not interpret extension-owned `fromHook` metadata as Coding metadata. File/tool-name policy
+remains in Coding. `scripts/compaction-current-oracle.mjs` executes the pinned current TypeScript
+source to generate preparation, serialization, overflow and branch evidence; its fixture records
+source hashes and the catalog-only shim for a missing unrelated legacy model data file.
 
 Normal assistant turns classify provider failures with the same current Pi transient/terminal
 rules. Numeric statuses and socket codes retain identifier boundaries, and subscription/plan quota

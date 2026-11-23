@@ -16,8 +16,15 @@ fn history_projection_preserves_compaction_metadata_and_retain_none_identity() {
     )
     .unwrap();
     let payload: CompactionEntry = serde_json::from_value(raw.clone()).unwrap();
+    // Preserve the imported record identity: its retain-none marker is self-referential.
     let record = store
-        .append_session_record(SessionEntry::Compaction(payload))
+        .append_entry(
+            pi_session::ProvisionedEntry {
+                id: raw["id"].as_str().unwrap().into(),
+                entry: SessionEntry::Compaction(payload),
+            },
+            pi_session::MAIN_LANE,
+        )
         .unwrap();
     let document = store.load().unwrap();
     let projected = session_document_entries_json(&document).unwrap();

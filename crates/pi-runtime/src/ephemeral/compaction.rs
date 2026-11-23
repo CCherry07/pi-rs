@@ -164,6 +164,8 @@ impl DetachedCompactor {
                 thinking_level: ThinkingLevel::Off,
                 thinking_budgets: None,
                 max_output_tokens: Some(summary_tokens),
+                cache_retention: None,
+                routing_session_id: None,
             },
             signal,
         )

@@ -32,6 +32,7 @@ impl Plugin for BlockingCompactionNotification {
         Ok(Some(SessionBeforeCompactResult {
             cancel: false,
             compaction: Some(CompactionEntry {
+                first_kept_entry_id: None,
                 from_hook: None,
                 system_message: None,
                 retained_entry_ids: Vec::new(),
@@ -62,7 +63,7 @@ async fn abort_during_compaction_notification_prevents_the_overflow_retry() {
     let release = Arc::new(Notify::new());
     let provider = ScriptedProviderPlugin::scripted([
         ScriptedTurn::Text("previous response".into()),
-        ScriptedTurn::Error("context window token length exceeded".into()),
+        ScriptedTurn::Error("context length exceeded".into()),
         ScriptedTurn::Text("unexpected retry".into()),
     ]);
     let requests = provider.provider();
@@ -84,8 +85,7 @@ async fn abort_during_compaction_notification_prevents_the_overflow_retry() {
     )
     .await
     .unwrap();
-    // Overflow compaction needs prior history; the current unsent user request
-    // alone must not be compacted away.
+    // Seed prior history so recovery exercises an incremental compaction.
     session.prompt("seed prior history").await.unwrap();
     let running = session.clone();
     let run = tokio::spawn(async move { running.prompt("recover this request").await });

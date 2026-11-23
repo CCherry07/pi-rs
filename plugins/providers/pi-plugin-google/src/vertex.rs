@@ -708,6 +708,7 @@ mod tests {
             thinking_level: ThinkingLevel::High,
             thinking_budgets: None,
             max_output_tokens: Some(100),
+            cache_retention: None,
             headers: BTreeMap::new(),
             sampling_params: BTreeMap::new(),
             session_id: None,

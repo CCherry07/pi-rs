@@ -301,6 +301,7 @@ impl AgentSession {
             executor: tokio::runtime::Handle::current(),
             session_dispatch_context,
             compaction_settings: Arc::new(RwLock::new(options.compaction)),
+            compaction_settings_resolver: options.compaction_settings_resolver,
             context_window: options.context_window,
             branch_summary_reserve_tokens: options.branch_summary_reserve_tokens.unwrap_or(16_384),
             lifecycle_state: Arc::new(AtomicU8::new(SESSION_OPEN)),

@@ -1,8 +1,5 @@
 use super::context::{PiPluginContext, context_failed, require_command, value, values};
-use crate::{
-    MAIN_LANE, QueueKind, SessionDocument, SessionEntryType, SessionRecord, build_context_entries,
-    current_session_context_tokens,
-};
+use crate::{MAIN_LANE, QueueKind, SessionDocument, SessionEntryType, SessionRecord};
 use async_trait::async_trait;
 use pi_core::{AbortSignal, AssistantMessage, CustomMessageContent, CustomMessageInput, Usage};
 use pi_plugin::{
@@ -127,32 +124,7 @@ impl SessionContextAccess for PiPluginContext {
     }
 
     fn context_usage(&self) -> Result<Option<pi_plugin::ContextUsage>, PluginContextError> {
-        let session = self.session()?;
-        let Some(context_window) = session.active_context_window() else {
-            return Ok(None);
-        };
-        let branch = session
-            .store()
-            .branch_entries()
-            .map_err(|error| PluginContextError::Failed(error.to_string()))?;
-        let context = session
-            .store()
-            .context()
-            .map_err(|error| PluginContextError::Failed(error.to_string()))?;
-        let tokens =
-            current_session_context_tokens(&branch, &context.messages).map(|usage| usage.tokens);
-        let percent = tokens.map(|tokens| {
-            if context_window == 0 {
-                0.0
-            } else {
-                tokens as f64 / context_window as f64 * 100.0
-            }
-        });
-        Ok(Some(pi_plugin::ContextUsage {
-            tokens,
-            context_window,
-            percent,
-        }))
+        self.session()?.context_usage().map_err(context_failed)
     }
 
     fn system_prompt(&self) -> Result<String, PluginContextError> {
@@ -242,17 +214,12 @@ impl SessionContextAccess for PiPluginContext {
     }
 
     fn session_context_entries(&self) -> Result<Vec<Value>, PluginContextError> {
-        let (_, document) = self.document()?;
-        let branch = document
-            .branch()
-            .map_err(|error| PluginContextError::Failed(error.to_string()))?
-            .into_iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        values(build_context_entries(
-            &branch,
-            &crate::SessionContextBuildOptions::default(),
-        ))
+        values(
+            self.session()?
+                .history()
+                .context_entries()
+                .map_err(context_failed)?,
+        )
     }
 
     fn session_header(&self) -> Result<Value, PluginContextError> {
@@ -442,6 +409,8 @@ impl SessionContextAccess for PiPluginContext {
                     thinking_level: request.thinking_level.unwrap_or(state.thinking_level),
                     thinking_budgets: runtime.agent().thinking_budgets(),
                     max_output_tokens: request.max_output_tokens,
+                    cache_retention: None,
+                    routing_session_id: None,
                 },
                 signal,
             )

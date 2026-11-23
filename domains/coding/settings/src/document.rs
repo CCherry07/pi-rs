@@ -59,6 +59,7 @@ pub(crate) fn decode_values(
     origin: Option<(SettingsScope, &Path)>,
     diagnostics: &mut Vec<SettingsDiagnostic>,
 ) -> SettingsValues {
+    let compaction_tokens = crate::CompactionTokenSettings::decode(document);
     SettingsValues {
         features: decode_features(document, origin, diagnostics),
         codemode: decode_codemode(document, origin, diagnostics),
@@ -103,7 +104,8 @@ pub(crate) fn decode_values(
         .unwrap_or_default(),
         steering_mode: queue_mode(document, "steeringMode", origin, diagnostics),
         follow_up_mode: queue_mode(document, "followUpMode", origin, diagnostics),
-        compaction: decode_compaction(document, origin, diagnostics),
+        compaction: decode_compaction(document, &compaction_tokens, origin, diagnostics),
+        compaction_tokens,
         branch_summary: decode_branch_summary(document, origin, diagnostics),
         retry: decode_retry(document, origin, diagnostics),
         default_project_trust: optional_enum(
@@ -237,6 +239,7 @@ fn decode_features(
 
 fn decode_compaction(
     document: &Map<String, Value>,
+    tokens: &crate::CompactionTokenSettings,
     origin: Option<(SettingsScope, &Path)>,
     diagnostics: &mut Vec<SettingsDiagnostic>,
 ) -> CompactionSettings {
@@ -246,10 +249,18 @@ fn decode_compaction(
     };
     CompactionSettings {
         enabled: optional_bool(object, "enabled", origin, diagnostics).unwrap_or(defaults.enabled),
-        reserve_tokens: optional_u64(object, "reserveTokens", origin, diagnostics)
-            .unwrap_or(defaults.reserve_tokens),
-        keep_recent_tokens: optional_u64(object, "keepRecentTokens", origin, diagnostics)
-            .unwrap_or(defaults.keep_recent_tokens),
+        reserve_tokens: tokens
+            .reserve_tokens(defaults.reserve_tokens, None)
+            .unwrap_or_else(|error| {
+                invalid(origin, error.to_string(), diagnostics);
+                defaults.reserve_tokens
+            }),
+        keep_recent_tokens: tokens
+            .keep_recent_tokens(defaults.keep_recent_tokens, None)
+            .unwrap_or_else(|error| {
+                invalid(origin, error.to_string(), diagnostics);
+                defaults.keep_recent_tokens
+            }),
     }
 }
 

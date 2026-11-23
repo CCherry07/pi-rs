@@ -240,6 +240,7 @@ async fn navigation_compaction_and_branch_summary_refresh_the_public_snapshot() 
     session.checkout(Some(&leaf)).await.unwrap();
     session
         .append_compaction(CompactionEntry {
+            first_kept_entry_id: None,
             from_hook: None,
             system_message: None,
             summary: "compacted root".into(),

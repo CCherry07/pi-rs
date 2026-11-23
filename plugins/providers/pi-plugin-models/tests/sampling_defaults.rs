@@ -65,6 +65,7 @@ async fn body(reasoning: bool, level: ThinkingLevel, explicit: Value) -> Value {
                 thinking_level: level,
                 thinking_budgets: None,
                 max_output_tokens: None,
+                cache_retention: None,
                 headers: BTreeMap::new(),
                 sampling_params: serde_json::from_value(explicit).unwrap(),
                 session_id: None,

@@ -245,6 +245,7 @@ impl Plugin for SessionControls {
         Ok(Some(pi_plugin::SessionBeforeCompactResult {
             cancel: self.cancel,
             compaction: (!self.cancel).then(|| pi_session::CompactionEntry {
+                first_kept_entry_id: None,
                 from_hook: None,
                 system_message: None,
                 retained_entry_ids: Vec::new(),

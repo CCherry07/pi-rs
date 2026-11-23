@@ -8,7 +8,9 @@ use crate::history::{
     SessionUsage, UsageAttribution,
 };
 
-use super::validation::validate_record_query;
+use super::validation::{
+    needs_ancestry_validation, validate_entry_ancestry, validate_record_query,
+};
 
 #[derive(Debug)]
 pub(crate) struct SessionState {
@@ -201,9 +203,9 @@ impl SessionState {
                 record.id
             )));
         }
-        if let SessionEntry::ContextEdit(edit) = &record.entry {
+        if needs_ancestry_validation(&record.entry) {
             let branch = self.branch_entries_at(record.parent_id.as_deref())?;
-            crate::history::projection::validate_context_edit(edit, &branch)?;
+            validate_entry_ancestry(record, &branch)?;
         }
         Ok(())
     }
@@ -232,7 +234,7 @@ impl SessionState {
 
         for mutation in mutations {
             if let SessionMutation::Entry { record, .. } = mutation
-                && let SessionEntry::ContextEdit(edit) = &record.entry
+                && needs_ancestry_validation(&record.entry)
             {
                 let mut path = Vec::new();
                 let mut current = record.parent_id.as_deref();
@@ -256,12 +258,12 @@ impl SessionState {
                     current = candidate.parent_id.as_deref();
                     if path.len() > self.entries.len() + mutations.len() {
                         return Err(HistoryError::InvalidEntry(
-                            "cyclic context edit ancestry".into(),
+                            "cyclic session entry ancestry".into(),
                         ));
                     }
                 }
                 path.reverse();
-                crate::history::projection::validate_context_edit(edit, &path)?;
+                validate_entry_ancestry(record, &path)?;
             }
         }
         let mut next_sequence = self.next_sequence();

@@ -10,7 +10,7 @@ use pi_core::{
     AbortSignal, ContentBlock, ContentMetadata, Message, ProviderId, ResponseMetadata,
     ResponseMetadataPatch, StopReason, StreamEvent, ToolCallId, Usage,
 };
-use pi_plugin::{ProviderError, ProviderRequest, ProviderStream};
+use pi_plugin::{CacheRetention, ProviderError, ProviderRequest, ProviderStream};
 use pi_provider::{HttpBodyStream, SseDecoder, TransportError};
 use pi_utils::time::unix_timestamp_ms as now_ms;
 use serde::Deserialize;
@@ -204,8 +204,10 @@ pub fn request_body(
                 .thinking_budgets
                 .and_then(|budgets| budgets.for_level(request.thinking_level))
                 .unwrap_or_else(|| thinking_budget(request.thinking_level))
-                .min(max_tokens.saturating_sub(1_024))
-                .max(1);
+                .min(max_tokens.saturating_sub(1_024));
+            // Pi uses thinkingBudgetTokens || 1024 at the wire boundary. Keep
+            // that zero fallback even when a tiny fitted ceiling leaves no room.
+            let budget = if budget == 0 { 1_024 } else { budget };
             body["thinking"] = json!({
                 "type": "enabled",
                 "budget_tokens": budget,
@@ -226,13 +228,14 @@ pub fn request_body(
     {
         body["temperature"] = temperature.clone();
     }
-    if cache_retention() != CacheRetention::None {
-        let cache_control =
-            if cache_retention() == CacheRetention::Long && compat.supports_long_cache_retention {
-                json!({"type": "ephemeral", "ttl": "1h"})
-            } else {
-                json!({"type": "ephemeral"})
-            };
+    if cache_retention(request) != CacheRetention::None {
+        let cache_control = if cache_retention(request) == CacheRetention::Long
+            && compat.supports_long_cache_retention
+        {
+            json!({"type": "ephemeral", "ttl": "1h"})
+        } else {
+            json!({"type": "ephemeral"})
+        };
         apply_cache_control(
             &mut system,
             &mut messages,
@@ -326,19 +329,14 @@ fn thinking_budget(level: pi_core::ThinkingLevel) -> u64 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CacheRetention {
-    None,
-    Short,
-    Long,
-}
-
-fn cache_retention() -> CacheRetention {
-    match std::env::var("PI_CACHE_RETENTION").as_deref() {
-        Ok("none") => CacheRetention::None,
-        Ok("long") => CacheRetention::Long,
-        _ => CacheRetention::Short,
-    }
+fn cache_retention(request: &ProviderRequest) -> CacheRetention {
+    request.cache_retention.unwrap_or_else(|| {
+        match std::env::var("PI_CACHE_RETENTION").as_deref() {
+            Ok("none") => CacheRetention::None,
+            Ok("long") => CacheRetention::Long,
+            _ => CacheRetention::Short,
+        }
+    })
 }
 
 fn apply_cache_control(
@@ -884,6 +882,7 @@ mod tests {
             thinking_level: ThinkingLevel::Off,
             thinking_budgets: None,
             max_output_tokens: None,
+            cache_retention: None,
             headers: Default::default(),
             sampling_params: Default::default(),
             session_id: None,
@@ -951,6 +950,7 @@ mod tests {
             thinking_level: ThinkingLevel::High,
             thinking_budgets: None,
             max_output_tokens: Some(100),
+            cache_retention: None,
             headers: Default::default(),
             sampling_params: Default::default(),
             session_id: None,
@@ -962,6 +962,71 @@ mod tests {
         );
         assert_eq!(body["tools"][0]["name"], "Read");
         assert_eq!(body["output_config"]["effort"], "high");
+    }
+
+    #[test]
+    fn request_cache_override_disables_all_anthropic_breakpoints() {
+        let mut req = ProviderRequest {
+            model: "claude".into(),
+            model_spec: None,
+            system_prompt: "summary".into(),
+            messages: vec![Message::User(UserMessage::text("history", 1))],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Off,
+            thinking_budgets: None,
+            max_output_tokens: Some(100),
+            cache_retention: Some(CacheRetention::None),
+            headers: Default::default(),
+            sampling_params: Default::default(),
+            session_id: Some("summary-route".into()),
+        };
+        for mode in [AnthropicMode::Standard, AnthropicMode::ClaudeCode] {
+            assert!(
+                !request_body(&req, mode)
+                    .unwrap()
+                    .to_string()
+                    .contains("cache_control")
+            );
+        }
+        req.cache_retention = Some(CacheRetention::Long);
+        assert_eq!(
+            request_body(&req, AnthropicMode::Standard).unwrap()["system"][0]["cache_control"]["ttl"],
+            "1h"
+        );
+    }
+
+    #[test]
+    fn thinking_budget_respects_fitted_output_ceiling_and_legacy_zero_fallback() {
+        let mut req = ProviderRequest {
+            model: "claude-3-7-sonnet".into(),
+            model_spec: None,
+            system_prompt: "summary".into(),
+            messages: vec![Message::User(UserMessage::text("history", 1))],
+            tools: vec![],
+            thinking_level: ThinkingLevel::High,
+            thinking_budgets: None,
+            max_output_tokens: None,
+            cache_retention: Some(CacheRetention::None),
+            headers: Default::default(),
+            sampling_params: Default::default(),
+            session_id: None,
+        };
+        // Anthropic's wire builder uses thinkingBudgetTokens || 1024, not max(1).
+        for (ceiling, expected) in [(20_000, 16_384), (4_096, 3_072), (1_024, 1_024), (1, 1_024)] {
+            req.max_output_tokens = Some(ceiling);
+            let body = request_body(&req, AnthropicMode::Standard).unwrap();
+            assert_eq!(body["max_tokens"], ceiling);
+            assert_eq!(body["thinking"]["budget_tokens"], expected);
+        }
+        req.max_output_tokens = Some(8_000);
+        req.thinking_budgets = Some(pi_core::ThinkingBudgets {
+            high: Some(0),
+            ..Default::default()
+        });
+        assert_eq!(
+            request_body(&req, AnthropicMode::Standard).unwrap()["thinking"]["budget_tokens"],
+            1_024
+        );
     }
 
     #[test]

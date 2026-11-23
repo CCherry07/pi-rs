@@ -29,6 +29,36 @@ pub(crate) fn validate_mutation_payload(value: &SessionMutation) -> Result<(), H
     }
 }
 
+pub(super) fn needs_ancestry_validation(entry: &SessionEntry) -> bool {
+    matches!(entry, SessionEntry::ContextEdit(_))
+        || matches!(entry, SessionEntry::Compaction(value) if value.first_kept_entry_id.is_some())
+}
+
+pub(super) fn validate_entry_ancestry(
+    record: &crate::history::SessionRecord,
+    path: &[crate::history::SessionRecord],
+) -> Result<(), HistoryError> {
+    match &record.entry {
+        SessionEntry::ContextEdit(edit) => {
+            crate::history::projection::validate_context_edit(edit, path)
+        }
+        SessionEntry::Compaction(value) => {
+            if let Some(id) = &value.first_kept_entry_id
+                && !path.iter().any(|entry| &entry.id == id)
+                // Imported Pi retain-none records use their own ID as the boundary.
+                && !(id == &record.id && value.retained_tail.is_empty())
+            {
+                return Err(HistoryError::InvalidEntry(format!(
+                    "compaction firstKeptEntryId {id} is not an ancestor of {}",
+                    record.id
+                )));
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 fn validate_entry_payload(entry: &SessionEntry) -> Result<(), HistoryError> {
     match entry {
         SessionEntry::Message(message) => validate_agent_message(&message.message),

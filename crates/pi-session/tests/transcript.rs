@@ -223,6 +223,7 @@ fn transcript_preserves_branch_compaction_and_native_inherited_context() {
     );
     store
         .append(SessionEntry::Compaction(CompactionEntry {
+            first_kept_entry_id: None,
             from_hook: None,
             system_message: None,
             summary: "summary".into(),

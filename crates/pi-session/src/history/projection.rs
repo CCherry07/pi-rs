@@ -318,6 +318,7 @@ pub fn project_session_entries(
                 source_entry: record.clone(),
                 messages,
             });
+            let mut retained = Vec::new();
             for (message, id) in tail.into_iter().zip(ids) {
                 let source = id
                     .as_deref()
@@ -327,11 +328,17 @@ pub fn project_session_entries(
                     || vec![message.clone()],
                     |edit| edit.apply(&message).into_iter().collect(),
                 );
-                output.push(ProjectedSessionEntry {
+                retained.push(ProjectedSessionEntry {
                     source_entry: source.clone(),
                     messages,
                 });
             }
+            output.extend(restore_invisible_retained_entries(
+                retained,
+                compaction.first_kept_entry_id.as_deref(),
+                &path[..end],
+                options,
+            ));
         } else {
             if let Some(edit) = edits.get(record.id.as_str()) {
                 messages = messages
@@ -342,6 +349,89 @@ pub fn project_session_entries(
             output.push(ProjectedSessionEntry {
                 source_entry: record.clone(),
                 messages,
+            });
+        }
+    }
+    output
+}
+
+/// Retained snapshots remain authoritative for model-visible context. An explicit
+/// cut also preserves invisible source identities (metadata, omissions, old
+/// checkpoints) needed by the next cut. Never infer a raw range for old records
+/// or impose raw ordering on an extension's unproven/reordered snapshots.
+fn restore_invisible_retained_entries(
+    retained: Vec<ProjectedSessionEntry>,
+    first_kept_id: Option<&str>,
+    path: &[SessionRecord],
+    options: &SessionContextBuildOptions,
+) -> Vec<ProjectedSessionEntry> {
+    let Some(start) = first_kept_id.and_then(|id| path.iter().position(|entry| entry.id == id))
+    else {
+        return retained;
+    };
+    let range = &path[start..];
+    let positions = range
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (entry.id.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    let mut previous = 0;
+    for entry in &retained {
+        let Some(&index) = positions.get(entry.source_entry.id.as_str()) else {
+            return retained;
+        };
+        if index < previous {
+            return retained;
+        }
+        previous = index;
+    }
+    let edits = path
+        .iter()
+        .filter_map(|entry| match &entry.entry {
+            SessionEntry::ContextEdit(edit) => Some((edit.target_id.as_str(), edit)),
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
+    let mut retained = retained.into_iter().peekable();
+    let mut output = Vec::new();
+    for source in range {
+        if retained
+            .peek()
+            .is_some_and(|entry| entry.source_entry.id == source.id)
+        {
+            while retained
+                .peek()
+                .is_some_and(|entry| entry.source_entry.id == source.id)
+            {
+                output.push(retained.next().expect("peeked retained entry"));
+            }
+            continue;
+        }
+        let invisible = match &source.entry {
+            SessionEntry::Message(message) => {
+                edits
+                    .get(source.id.as_str())
+                    .is_some_and(|edit| edit.replacement.is_none())
+                    || matches!(message.message.as_standard(), Some(Message::Assistant(value)) if value.stop_reason == StopReason::Deferred)
+            }
+            SessionEntry::CustomMessage(_) => edits
+                .get(source.id.as_str())
+                .is_some_and(|edit| edit.replacement.is_none()),
+            SessionEntry::Custom(custom) => {
+                !crate::history::provenance::is_seed(&source.entry)
+                    && !options.entry_projectors.contains_key(&custom.custom_type)
+            }
+            SessionEntry::BranchSummary(_) => false,
+            SessionEntry::Compaction(_)
+            | SessionEntry::ContextEdit(_)
+            | SessionEntry::ModelChange(_)
+            | SessionEntry::ThinkingLevelChange(_)
+            | SessionEntry::ActiveToolsChange(_) => true,
+        };
+        if invisible {
+            output.push(ProjectedSessionEntry {
+                source_entry: source.clone(),
+                messages: Vec::new(),
             });
         }
     }
@@ -856,6 +946,79 @@ mod tests {
     }
 
     #[test]
+    fn invisible_retention_requires_explicit_ordered_provenance_and_never_changes_snapshots() {
+        let path = vec![
+            record("a", 1, None, SessionEntry::message(user("a"))),
+            record(
+                "meta",
+                2,
+                Some("a"),
+                SessionEntry::Custom(CustomEntry {
+                    custom_type: "opaque".into(),
+                    data: None,
+                }),
+            ),
+            record("b", 3, Some("meta"), SessionEntry::message(user("b"))),
+        ];
+        let a = ProjectedSessionEntry {
+            source_entry: path[0].clone(),
+            messages: vec![user("snapshot a")],
+        };
+        let b = ProjectedSessionEntry {
+            source_entry: path[2].clone(),
+            messages: vec![user("snapshot b")],
+        };
+        let options = SessionContextBuildOptions::default();
+        let retained = vec![a.clone(), b.clone()];
+        let expanded =
+            restore_invisible_retained_entries(retained.clone(), Some("a"), &path, &options);
+        assert_eq!(
+            expanded
+                .iter()
+                .map(|entry| entry.source_entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "meta", "b"]
+        );
+        assert_eq!(
+            expanded
+                .into_iter()
+                .flat_map(|entry| entry.messages)
+                .collect::<Vec<_>>(),
+            [user("snapshot a"), user("snapshot b")]
+        );
+        for (snapshots, hint) in [
+            (retained.clone(), None),
+            (retained, Some("missing")),
+            (vec![b, a.clone()], Some("a")),
+        ] {
+            assert_eq!(
+                restore_invisible_retained_entries(snapshots.clone(), hint, &path, &options),
+                snapshots
+            );
+        }
+        // A hook can intentionally retain only a subset. Do not resurrect its omitted user.
+        let partial =
+            restore_invisible_retained_entries(vec![a.clone()], Some("a"), &path, &options);
+        assert_eq!(
+            partial
+                .into_iter()
+                .flat_map(|entry| entry.messages)
+                .collect::<Vec<_>>(),
+            [user("snapshot a")]
+        );
+        // Unknown custom projection is not evidence of invisibility; never call it again.
+        let mut options = options;
+        options.entry_projectors.insert(
+            "opaque".into(),
+            Arc::new(|_, _, _| panic!("must not reproject")),
+        );
+        assert_eq!(
+            restore_invisible_retained_entries(vec![a.clone()], Some("a"), &path, &options),
+            vec![a]
+        );
+    }
+
+    #[test]
     fn latest_compaction_materializes_retained_tail_and_preserves_full_path_state() {
         let path = vec![
             record("old", 1, None, SessionEntry::message(user("old"))),
@@ -864,6 +1027,7 @@ mod tests {
                 2,
                 Some("old"),
                 SessionEntry::Compaction(CompactionEntry {
+                    first_kept_entry_id: None,
                     from_hook: None,
                     system_message: None,
                     retained_entry_ids: Vec::new(),

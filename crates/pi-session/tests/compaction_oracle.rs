@@ -140,6 +140,7 @@ async fn live_compaction_captures_the_current_system_snapshot_at_its_committed_t
     let mut events = session.subscribe();
     session
         .append_compaction(CompactionEntry {
+            first_kept_entry_id: None,
             from_hook: None,
             system_message: None,
             summary: "".into(),

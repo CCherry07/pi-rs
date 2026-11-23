@@ -94,6 +94,7 @@ impl AgentSession {
                         Vec::new()
                     };
                     let mut compaction = CompactionEntry {
+                        first_kept_entry_id: value.first_kept_entry_id.clone(),
                         from_hook: Some(true),
                         system_message: crate::history::current_system_snapshot(&context.messages)?,
                         retained_entry_ids: Vec::new(),

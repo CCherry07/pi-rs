@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use pi_core::{AbortSignal, Message, ProviderId, ResponseMetadata, StreamEvent, ToolSpec, Usage};
 use pi_plugin::{
-    Provider, ProviderAvailability, ProviderCallContext, ProviderError, ProviderRequest,
-    ProviderStream,
+    CacheRetention, Provider, ProviderAvailability, ProviderCallContext, ProviderError,
+    ProviderRequest, ProviderStream,
 };
 use pi_provider::{
     HttpBodyStream, HttpTransport, ReqwestTransport, SseDecoder, TransportError, insert_header,
@@ -201,7 +201,7 @@ impl Provider for OpenAiResponsesCompatibleProvider {
         context: ProviderCallContext,
         signal: AbortSignal,
     ) -> Result<ProviderStream, ProviderError> {
-        let cache_retention = cache_retention();
+        let cache_retention = cache_retention(&request);
         let headers = self.headers(&request, cache_retention);
         let endpoint = request
             .model_spec
@@ -363,7 +363,7 @@ fn tools_with_compat(
 
 /// Projects a semantic request into an OpenAI Responses payload.
 pub fn request_body(request: &ProviderRequest) -> Result<Value, ProviderError> {
-    request_body_with_options(request, cache_retention(), false)
+    request_body_with_options(request, cache_retention(request), false)
 }
 
 fn request_body_with_options(
@@ -811,19 +811,14 @@ fn response_usage(response: &Value) -> Usage {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CacheRetention {
-    None,
-    Short,
-    Long,
-}
-
-fn cache_retention() -> CacheRetention {
-    match std::env::var("PI_CACHE_RETENTION").as_deref() {
-        Ok("none") => CacheRetention::None,
-        Ok("long") => CacheRetention::Long,
-        _ => CacheRetention::Short,
-    }
+fn cache_retention(request: &ProviderRequest) -> CacheRetention {
+    request.cache_retention.unwrap_or_else(|| {
+        match std::env::var("PI_CACHE_RETENTION").as_deref() {
+            Ok("none") => CacheRetention::None,
+            Ok("long") => CacheRetention::Long,
+            _ => CacheRetention::Short,
+        }
+    })
 }
 
 fn response_affinity_headers(
@@ -901,6 +896,7 @@ mod tests {
             thinking_level: ThinkingLevel::Off,
             thinking_budgets: None,
             max_output_tokens: None,
+            cache_retention: None,
             headers: BTreeMap::new(),
             sampling_params: BTreeMap::new(),
             session_id: Some("session-1".to_string()),

@@ -80,8 +80,8 @@ pub use plugin::{
 pub use prompt::{RenderedSystemPrompt, RunSystemPrompt, SystemPromptResolver};
 
 pub use provider::{
-    Provider, ProviderAvailability, ProviderCallContext, ProviderError, ProviderRequest,
-    ProviderStream, is_retryable_provider_error_message,
+    CacheRetention, Provider, ProviderAvailability, ProviderCallContext, ProviderError,
+    ProviderRequest, ProviderStream, is_retryable_provider_error_message,
 };
 pub use registry::{FrozenRegistries, RegistriesBuilder};
 pub use tool::{

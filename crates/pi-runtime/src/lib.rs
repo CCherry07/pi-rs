@@ -4,6 +4,7 @@ use pi_core::{WorkspaceSnapshot, WorkspaceSpec};
 mod ephemeral;
 mod models;
 mod prompt;
+mod summarization;
 
 pub use prompt::{
     DiagnosticKind, PreparedSystemPrompt, PromptContext, PromptOutput, ResourceDiagnostic,
@@ -72,6 +73,10 @@ pub struct RuntimeCompletionRequest {
     pub thinking_level: ThinkingLevel,
     pub thinking_budgets: Option<ThinkingBudgets>,
     pub max_output_tokens: Option<u64>,
+    /// Request-local cache override; absent preserves provider defaults.
+    pub cache_retention: Option<pi_plugin::CacheRetention>,
+    /// Explicit provider routing identity; absent preserves the parent session affinity.
+    pub routing_session_id: Option<String>,
 }
 
 /// A selection change prepared against one immutable runtime generation.
@@ -1687,7 +1692,10 @@ impl PiRuntime {
             let result = Self::complete_once(
                 &generation.agent,
                 self.cwd(),
-                self.agent.session_id(),
+                request
+                    .routing_session_id
+                    .clone()
+                    .or_else(|| self.agent.session_id()),
                 &selection,
                 &request,
                 signal.clone(),
@@ -1769,6 +1777,7 @@ impl PiRuntime {
                     thinking_level: request.thinking_level,
                     thinking_budgets: request.thinking_budgets,
                     max_output_tokens: request.max_output_tokens,
+                    cache_retention: request.cache_retention,
                     headers: Default::default(),
                     sampling_params: Default::default(),
                     session_id,
@@ -4154,6 +4163,8 @@ mod tests {
                 thinking_level: ThinkingLevel::Off,
                 thinking_budgets: None,
                 max_output_tokens: None,
+                cache_retention: None,
+                routing_session_id: None,
             },
             signal,
         ));
@@ -4205,6 +4216,8 @@ mod tests {
                     thinking_level: ThinkingLevel::Off,
                     thinking_budgets: None,
                     max_output_tokens: Some(2_048),
+                    cache_retention: None,
+                    routing_session_id: None,
                 },
                 signal,
             )

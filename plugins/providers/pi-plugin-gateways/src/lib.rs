@@ -325,6 +325,7 @@ mod tests {
                 thinking_level: ThinkingLevel::Off,
                 thinking_budgets: None,
                 max_output_tokens: None,
+                cache_retention: None,
                 headers: if id == "cloudflare-ai-gateway" {
                     BTreeMap::from([
                         ("Authorization".into(), "unwanted".into()),
@@ -402,6 +403,7 @@ mod tests {
                 thinking_level: ThinkingLevel::Off,
                 thinking_budgets: None,
                 max_output_tokens: None,
+                cache_retention: None,
                 headers: BTreeMap::new(),
                 sampling_params: BTreeMap::new(),
                 session_id: Some("session".into()),

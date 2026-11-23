@@ -520,7 +520,8 @@ fn apply_compat_headers(headers: &mut BTreeMap<String, String>, request: &Provid
             insert_header(headers, "anthropic-beta", &value);
         }
     }
-    if compat.send_session_affinity_headers
+    if request.cache_retention != Some(pi_plugin::CacheRetention::None)
+        && compat.send_session_affinity_headers
         && let Some(session_id) = &request.session_id
     {
         insert_header(headers, "x-session-affinity", session_id);
@@ -630,7 +631,7 @@ mod tests {
                 parameters:serde_json::json!({"type":"object","properties":{"optional":{"type":"string"}}}),
                 output_schema:None,constrained_sampling:Some(pi_core::ConstrainedSampling::JsonSchema {strict:*strict}),
                 execution_mode:pi_core::ToolExecutionMode::Parallel,prompt_snippet:None,prompt_guidelines:vec![],
-            }).collect(),thinking_level:ThinkingLevel::Off,thinking_budgets:None,max_output_tokens:Some(100),headers:BTreeMap::new(),sampling_params:BTreeMap::new(),session_id:session.map(str::to_string),
+            }).collect(),thinking_level:ThinkingLevel::Off,thinking_budgets:None,max_output_tokens:Some(100),cache_retention:None,headers:BTreeMap::new(),sampling_params:BTreeMap::new(),session_id:session.map(str::to_string),
         }
     }
 
@@ -856,6 +857,7 @@ mod tests {
             thinking_level: ThinkingLevel::Off,
             thinking_budgets: None,
             max_output_tokens: Some(4_096),
+            cache_retention: None,
             headers: BTreeMap::from([
                 ("x-api-key".to_string(), "request-key".to_string()),
                 ("X-Request".to_string(), "request".to_string()),

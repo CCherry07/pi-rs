@@ -862,6 +862,8 @@ mod tests {
                             thinking_level: ThinkingLevel::Off,
                             thinking_budgets: None,
                             max_output_tokens: Some(16),
+                            cache_retention: None,
+                            routing_session_id: None,
                         };
                         *capture.0.lock().unwrap() = None;
                         let (_, signal) = AbortHandle::new();

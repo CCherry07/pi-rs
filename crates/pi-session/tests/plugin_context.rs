@@ -388,6 +388,257 @@ impl Plugin for NativeContextProbe {
     }
 }
 
+fn metered_query_turn(tokens: u64) -> pi_test_support::ScriptedTurn {
+    use pi_core::{ResponseMetadata, StopReason, StreamEvent};
+    pi_test_support::ScriptedTurn::Events(vec![
+        StreamEvent::Start {
+            metadata: ResponseMetadata::new("scripted".into(), "test".into(), "scripted", 0),
+        },
+        StreamEvent::TextStart { content_index: 0 },
+        StreamEvent::TextDelta {
+            content_index: 0,
+            delta: "answer".into(),
+        },
+        StreamEvent::TextEnd {
+            content_index: 0,
+            text_signature: None,
+        },
+        StreamEvent::Done {
+            reason: StopReason::Stop,
+            usage: Usage {
+                input: tokens,
+                total_tokens: tokens,
+                ..Default::default()
+            },
+        },
+    ])
+}
+
+async fn history_query_session(
+    options: AgentSessionOptions,
+    turns: impl IntoIterator<Item = pi_test_support::ScriptedTurn>,
+) -> (
+    tempfile::TempDir,
+    Arc<pi_session::AgentSession>,
+    CommandContextParts,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let access = Arc::new(PiPluginContext::new(
+        PresentationMode::Print,
+        true,
+        PluginContextBinding::new(),
+    ));
+    let runtime = PiRuntime::builder()
+        .provider_plugin(ScriptedProviderPlugin::scripted(turns))
+        .agent_options(pi_agent::AgentOptions {
+            provider_id: "scripted".into(),
+            model_id: "test".into(),
+            ..Default::default()
+        })
+        .plugin_context(access.clone())
+        .build()
+        .unwrap();
+    let session = pi_session::AgentSession::create(
+        runtime,
+        directory.path().join("history-queries.jsonl"),
+        options,
+    )
+    .await
+    .unwrap();
+    access.bind_generation_session(session.clone());
+    let context = CommandContextParts::new(session.plugin_context(PluginContextScope::Command));
+    (directory, session, context)
+}
+
+fn read_history_queries(
+    session: &pi_session::AgentSession,
+    context: &CommandContextParts,
+) -> (Option<pi_plugin::ContextUsage>, Vec<serde_json::Value>) {
+    let document = session.history().shared_document().unwrap();
+    let revision = session.snapshot().revision;
+    let usage = context.session.context_usage().unwrap();
+    let entries = context.session.context_entries().unwrap();
+    assert!(Arc::ptr_eq(
+        &document,
+        &session.history().shared_document().unwrap()
+    ));
+    assert_eq!(session.snapshot().revision, revision);
+    (usage, entries)
+}
+
+#[tokio::test]
+async fn native_history_queries_preserve_usage_windows_and_compaction_checkpoints() {
+    for window in [None, Some(0), Some(1_000)] {
+        let mut options =
+            AgentSessionOptions::default().compaction(pi_session::CompactionSettings {
+                enabled: false,
+                ..Default::default()
+            });
+        options.context_window = window;
+        let (_directory, session, context) =
+            history_query_session(options, [metered_query_turn(120), metered_query_turn(240)])
+                .await;
+        let expected = |tokens: Option<u64>| {
+            window.map(|context_window| pi_plugin::ContextUsage {
+                tokens,
+                context_window,
+                percent: tokens.map(|tokens| {
+                    if context_window == 0 {
+                        0.0
+                    } else {
+                        tokens as f64 / context_window as f64 * 100.0
+                    }
+                }),
+            })
+        };
+        assert_eq!(session.active_context_window(), window);
+        assert_eq!(
+            read_history_queries(&session, &context).0,
+            expected(Some(0))
+        );
+
+        session.prompt("first input").await.unwrap();
+        assert_eq!(
+            read_history_queries(&session, &context).0,
+            expected(Some(120))
+        );
+        let retained_tail = session.history().context().unwrap().messages;
+        let checkpoint_id = session
+            .append_compaction(pi_session::CompactionEntry {
+                first_kept_entry_id: None,
+                from_hook: None,
+                system_message: None,
+                summary: "checkpoint".into(),
+                retained_tail,
+                retained_entry_ids: Vec::new(),
+                tokens_before: 120,
+                details: None,
+                usage: None,
+            })
+            .await
+            .unwrap();
+        let (usage, entries) = read_history_queries(&session, &context);
+        assert_eq!(usage, expected(None));
+        assert_eq!(
+            entries,
+            [
+                serde_json::to_value(session.history().get_entry(&checkpoint_id).unwrap(),)
+                    .unwrap()
+            ]
+        );
+
+        session.prompt("next input").await.unwrap();
+        let (usage, entries) = read_history_queries(&session, &context);
+        assert_eq!(usage, expected(Some(240)));
+        let branch = session.history().branch_entries().unwrap();
+        let checkpoint_index = branch
+            .iter()
+            .position(|entry| entry.id == checkpoint_id)
+            .unwrap();
+        assert_eq!(
+            entries,
+            branch[checkpoint_index..]
+                .iter()
+                .map(|entry| serde_json::to_value(entry).unwrap())
+                .collect::<Vec<_>>()
+        );
+
+        session.shutdown().await;
+        assert!(matches!(
+            context.session.context_usage(),
+            Err(pi_plugin::PluginContextError::Retired)
+        ));
+        assert!(matches!(
+            context.session.context_entries(),
+            Err(pi_plugin::PluginContextError::Retired)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn native_history_queries_keep_default_projection_with_custom_runtime_projectors() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut options = AgentSessionOptions::default()
+        .context_window(1_000)
+        .compaction(pi_session::CompactionSettings {
+            enabled: false,
+            ..Default::default()
+        });
+    let transform_calls = calls.clone();
+    options
+        .context
+        .entry_transforms
+        .push(Arc::new(move |entries| {
+            transform_calls.fetch_add(1, Ordering::SeqCst);
+            entries.to_vec()
+        }));
+    let projector_calls = calls.clone();
+    options.context.entry_projectors.insert(
+        "query-probe".into(),
+        Arc::new(move |_, _, _| {
+            projector_calls.fetch_add(1, Ordering::SeqCst);
+            vec![
+                pi_core::Message::User(pi_core::UserMessage::text("runtime-only".repeat(1_000), 0))
+                    .into(),
+            ]
+        }),
+    );
+    let (_directory, session, context) =
+        history_query_session(options, [metered_query_turn(120)]).await;
+    session.prompt("input").await.unwrap();
+    session
+        .append_custom_entry("query-probe", Some(serde_json::json!({"kept":true})))
+        .unwrap();
+    assert!(session.context_messages().unwrap().contains(
+        &pi_core::Message::User(pi_core::UserMessage::text("runtime-only".repeat(1_000), 0)).into()
+    ));
+    let calls_before_query = calls.load(Ordering::SeqCst);
+    assert!(calls_before_query > 0);
+
+    let (usage, entries) = read_history_queries(&session, &context);
+
+    assert_eq!(calls.load(Ordering::SeqCst), calls_before_query);
+    assert_eq!(
+        usage,
+        Some(pi_plugin::ContextUsage {
+            tokens: Some(120),
+            context_window: 1_000,
+            percent: Some(12.0),
+        })
+    );
+    assert_eq!(
+        entries,
+        session
+            .history()
+            .branch_entries()
+            .unwrap()
+            .iter()
+            .map(|entry| serde_json::to_value(entry).unwrap())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(entries.last().unwrap()["data"]["kept"], true);
+}
+
+#[tokio::test]
+async fn native_history_queries_preserve_unbound_errors() {
+    let epoch = pi_plugin::PluginContextEpoch::new(Arc::new(PiPluginContext::new(
+        PresentationMode::Print,
+        true,
+        PluginContextBinding::new(),
+    )));
+    let context = epoch.context();
+    assert!(matches!(
+        context.session.context_usage(),
+        Err(pi_plugin::PluginContextError::Unbound)
+    ));
+    assert!(matches!(
+        context.session.context_entries(),
+        Err(pi_plugin::PluginContextError::Unbound)
+    ));
+}
+
 #[tokio::test]
 async fn pi_plugin_context_binds_the_direct_native_plugin_view() {
     let directory = tempfile::tempdir().unwrap();

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use pi_core::{ContentBlock, Message, ModelSpec, ThinkingLevel, ToolSpec};
-use pi_plugin::ProviderRequest;
+use pi_plugin::{CacheRetention, ProviderRequest};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -288,21 +288,22 @@ pub(crate) fn request_body(request: &ProviderRequest) -> Result<Value, pi_plugin
         }
     }
     if compat.cache_control_format == Some(CacheControlFormat::Anthropic)
-        && cache_retention() != CacheRetention::None
+        && cache_retention(request) != CacheRetention::None
     {
-        let cache_control =
-            if cache_retention() == CacheRetention::Long && compat.supports_long_cache_retention {
-                json!({"type": "ephemeral", "ttl": "1h"})
-            } else {
-                json!({"type": "ephemeral"})
-            };
+        let cache_control = if cache_retention(request) == CacheRetention::Long
+            && compat.supports_long_cache_retention
+        {
+            json!({"type": "ephemeral", "ttl": "1h"})
+        } else {
+            json!({"type": "ephemeral"})
+        };
         apply_anthropic_cache_control(&mut messages, &mut tools, &cache_control);
         body["messages"] = Value::Array(messages);
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools);
         }
     }
-    match cache_retention() {
+    match cache_retention(request) {
         CacheRetention::None => {}
         CacheRetention::Short => {
             let is_openai = request
@@ -330,6 +331,9 @@ pub(crate) fn request_body(request: &ProviderRequest) -> Result<Value, pi_plugin
 }
 
 pub(crate) fn affinity_headers(request: &ProviderRequest) -> BTreeMap<String, String> {
+    if cache_retention(request) == CacheRetention::None {
+        return BTreeMap::new();
+    }
     let compat = ResolvedOpenAiCompletionsCompat::for_request(request);
     let Some(session_id) = request
         .session_id
@@ -839,19 +843,14 @@ fn has_tool_history(messages: &[Message]) -> bool {
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CacheRetention {
-    None,
-    Short,
-    Long,
-}
-
-fn cache_retention() -> CacheRetention {
-    match std::env::var("PI_CACHE_RETENTION").as_deref() {
-        Ok("none") => CacheRetention::None,
-        Ok("long") => CacheRetention::Long,
-        _ => CacheRetention::Short,
-    }
+fn cache_retention(request: &ProviderRequest) -> CacheRetention {
+    request.cache_retention.unwrap_or_else(|| {
+        match std::env::var("PI_CACHE_RETENTION").as_deref() {
+            Ok("none") => CacheRetention::None,
+            Ok("long") => CacheRetention::Long,
+            _ => CacheRetention::Short,
+        }
+    })
 }
 
 fn apply_anthropic_cache_control(
@@ -1066,6 +1065,7 @@ mod tests {
             thinking_level: pi_core::ThinkingLevel::Off,
             thinking_budgets: None,
             max_output_tokens: Some(123),
+            cache_retention: None,
             headers: Default::default(),
             sampling_params: std::collections::BTreeMap::from([(
                 "temperature".to_string(),
@@ -1103,6 +1103,7 @@ mod tests {
             thinking_level: pi_core::ThinkingLevel::Off,
             thinking_budgets: None,
             max_output_tokens: None,
+            cache_retention: None,
             headers: Default::default(),
             sampling_params: Default::default(),
             session_id: None,
@@ -1203,6 +1204,7 @@ mod tests {
             thinking_level: ThinkingLevel::High,
             thinking_budgets: None,
             max_output_tokens: Some(4_096),
+            cache_retention: None,
             headers: BTreeMap::new(),
             sampling_params: BTreeMap::new(),
             session_id: Some("session-1".to_string()),
@@ -1260,6 +1262,7 @@ mod tests {
                 ..pi_core::ThinkingBudgets::default()
             }),
             max_output_tokens: None,
+            cache_retention: None,
             headers: BTreeMap::new(),
             sampling_params: BTreeMap::new(),
             session_id: None,

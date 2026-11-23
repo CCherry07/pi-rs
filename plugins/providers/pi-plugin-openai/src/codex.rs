@@ -230,10 +230,15 @@ impl Provider for OpenAiCodexProvider {
 
     async fn stream(
         &self,
-        request: ProviderRequest,
+        mut request: ProviderRequest,
         context: ProviderCallContext,
         signal: AbortSignal,
     ) -> Result<ProviderStream, ProviderError> {
+        // Codex uses the cache identity for connection reuse and continuation too.
+        // A one-off uncached request must not reuse or poison the parent connection.
+        if request.cache_retention == Some(pi_plugin::CacheRetention::None) {
+            request.session_id = None;
+        }
         let grammar = crate::responses::grammar_properties(&request)?;
         let payload = context
             .before_provider_request(&signal, responses_request_body(&request)?)
@@ -928,6 +933,7 @@ mod tests {
             thinking_level: pi_core::ThinkingLevel::High,
             thinking_budgets: None,
             max_output_tokens: Some(123),
+            cache_retention: None,
             headers: BTreeMap::new(),
             sampling_params: BTreeMap::new(),
             session_id: None,
@@ -968,6 +974,7 @@ mod tests {
             thinking_level: pi_core::ThinkingLevel::Minimal,
             thinking_budgets: None,
             max_output_tokens: None,
+            cache_retention: None,
             headers: BTreeMap::new(),
             sampling_params: BTreeMap::new(),
             session_id: None,
@@ -1411,6 +1418,70 @@ mod tests {
         }
     }
 
+    #[allow(clippy::result_large_err)]
+    #[tokio::test]
+    async fn request_cache_override_disables_codex_connection_reuse() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (stream, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let mut socket =
+                    accept_hdr_async(stream, |request: &Request, response: Response| {
+                        assert_ne!(
+                            request
+                                .headers()
+                                .get("session-id")
+                                .unwrap()
+                                .to_str()
+                                .unwrap(),
+                            "session-1"
+                        );
+                        Ok(response)
+                    })
+                    .await
+                    .unwrap();
+                let message = socket.next().await.unwrap().unwrap();
+                let body: Value =
+                    serde_json::from_str(message.into_text().unwrap().as_str()).unwrap();
+                assert!(body.get("prompt_cache_key").is_none());
+                assert!(body.get("previous_response_id").is_none());
+                socket.send(WebSocketMessage::Text(json!({
+                    "type":"response.completed", "response":{"id":"summary", "status":"completed", "usage":{}}
+                }).to_string().into())).await.unwrap();
+            }
+        });
+        let transport = Arc::new(SseFallbackTransport {
+            calls: AtomicUsize::new(0),
+        });
+        let provider = OpenAiCodexProvider::with_transport_options(
+            CodexCredentials::from_access_token(jwt("acct-1")),
+            transport.clone(),
+            CodexTransportOptions {
+                transport: CodexTransport::WebsocketCached,
+                websocket_connect_timeout: Some(Duration::from_secs(2)),
+                websocket_idle_timeout: Some(Duration::from_secs(2)),
+                base_url: Some(format!("http://{address}/backend-api")),
+                ..CodexTransportOptions::default()
+            },
+        );
+        let context = ProviderCallContext::without_plugins(
+            "/workspace",
+            ProviderId::new(PROVIDER_ID),
+            "gpt-5.5".into(),
+        );
+        for _ in 0..2 {
+            let mut request = request_with_messages(vec![user_message("history")]);
+            request.cache_retention = Some(pi_plugin::CacheRetention::None);
+            collect_provider_events(&provider, request, context.clone()).await;
+        }
+        server.await.unwrap();
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+    }
+
     #[tokio::test]
     async fn websocket_failure_before_first_event_falls_back_to_sse_for_session() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1487,6 +1558,7 @@ mod tests {
             thinking_level: pi_core::ThinkingLevel::High,
             thinking_budgets: None,
             max_output_tokens: None,
+            cache_retention: None,
             headers: BTreeMap::new(),
             sampling_params: BTreeMap::new(),
             session_id: Some("session-1".to_string()),

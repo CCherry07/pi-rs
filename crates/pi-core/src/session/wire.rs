@@ -410,6 +410,10 @@ impl<'de> Deserialize<'de> for SystemMessageSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompactionEntry {
+    /// Exact source cut boundary, which may have no model-visible messages.
+    /// Older v4 checkpoints infer a boundary from retained snapshots instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_kept_entry_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_hook: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -638,6 +642,8 @@ pub struct FileOperations {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompactionPreparation {
+    /// Source entry selected by the cut algorithm, independently of visible retention.
+    pub first_kept_entry_id: Option<String>,
     pub messages_to_summarize: Vec<AgentMessage>,
     pub turn_prefix_messages: Vec<AgentMessage>,
     pub retained_tail: Vec<AgentMessage>,

@@ -28,8 +28,10 @@ pub fn request_body(request: &ProviderRequest) -> Result<Value, ProviderError> {
     let system_prompt = pi_core::SystemMessage::fold(&request.system_prompt, &request.messages);
     if !system_prompt.is_empty() {
         let mut system = vec![json!({"text": system_prompt})];
-        if model.is_some_and(supports_prompt_caching) {
-            system.push(json!({"cachePoint": {"type": "default"}}));
+        if request.cache_retention != Some(pi_plugin::CacheRetention::None)
+            && model.is_some_and(supports_prompt_caching)
+        {
+            system.push(cache_point(request));
         }
         body.insert("system".to_string(), Value::Array(system));
     }
@@ -91,6 +93,14 @@ pub fn request_body(request: &ProviderRequest) -> Result<Value, ProviderError> {
         body.insert("requestMetadata".to_string(), metadata.clone());
     }
     Ok(Value::Object(body))
+}
+
+fn cache_point(request: &ProviderRequest) -> Value {
+    let mut point = json!({"cachePoint": {"type": "default"}});
+    if request.cache_retention == Some(pi_plugin::CacheRetention::Long) {
+        point["cachePoint"]["ttl"] = json!("1h");
+    }
+    point
 }
 
 fn project_messages(request: &ProviderRequest) -> Vec<Value> {
@@ -193,14 +203,15 @@ fn project_messages(request: &ProviderRequest) -> Vec<Value> {
     if !pending_tool_results.is_empty() {
         push_message(&mut messages, "user", pending_tool_results);
     }
-    if model.is_some_and(supports_prompt_caching)
+    if request.cache_retention != Some(pi_plugin::CacheRetention::None)
+        && model.is_some_and(supports_prompt_caching)
         && let Some(last_user) = messages
             .iter_mut()
             .rev()
             .find(|message| message["role"] == "user")
         && let Some(content) = last_user["content"].as_array_mut()
     {
-        content.push(json!({"cachePoint": {"type": "default"}}));
+        content.push(cache_point(request));
     }
     messages
 }
@@ -306,7 +317,14 @@ fn additional_model_fields(request: &ProviderRequest) -> Option<Value> {
             ThinkingLevel::Medium => 8_192,
             ThinkingLevel::High | ThinkingLevel::XHigh | ThinkingLevel::Max => 16_384,
             ThinkingLevel::Off => 0,
-        });
+        })
+        .min(
+            request
+                .max_output_tokens
+                .unwrap_or(model.max_tokens)
+                .saturating_sub(1_024),
+        );
+    // Unlike Anthropic Messages, Bedrock preserves an explicitly clamped zero.
     Some(json!({
         "thinking": {
             "type": "enabled",
@@ -829,10 +847,54 @@ mod tests {
                 ..ThinkingBudgets::default()
             }),
             max_output_tokens: Some(20_000),
+            cache_retention: None,
             headers: BTreeMap::new(),
             sampling_params: BTreeMap::from([("temperature".to_string(), json!(0.2))]),
             session_id: None,
         }
+    }
+
+    #[test]
+    fn request_cache_override_disables_every_cache_point() {
+        let mut request = request();
+        request
+            .messages
+            .push(Message::User(pi_core::UserMessage::text("history", 1)));
+        request.cache_retention = Some(pi_plugin::CacheRetention::None);
+        assert!(
+            !request_body(&request)
+                .unwrap()
+                .to_string()
+                .contains("cachePoint")
+        );
+        request.cache_retention = Some(pi_plugin::CacheRetention::Long);
+        let body = request_body(&request).unwrap();
+        assert_eq!(body["system"][1]["cachePoint"]["ttl"], "1h");
+        assert_eq!(body["messages"][0]["content"][1]["cachePoint"]["ttl"], "1h");
+    }
+
+    #[test]
+    fn thinking_budget_respects_fitted_output_ceiling() {
+        let mut req = request();
+        req.model_spec.as_mut().unwrap().id = "anthropic.claude-3-7-sonnet".into();
+        req.model_spec.as_mut().unwrap().name = "Claude 3.7 Sonnet".into();
+        req.model = req.model_spec.as_ref().unwrap().id.clone();
+        req.thinking_budgets = None;
+        for (ceiling, expected) in [(20_000, 16_384), (4_096, 3_072), (1_024, 0), (1, 0)] {
+            req.max_output_tokens = Some(ceiling);
+            let body = request_body(&req).unwrap();
+            assert_eq!(body["inferenceConfig"]["maxTokens"], ceiling);
+            assert_eq!(
+                body["additionalModelRequestFields"]["thinking"]["budget_tokens"],
+                expected
+            );
+        }
+        req.max_output_tokens = None;
+        req.model_spec.as_mut().unwrap().max_tokens = 4_096;
+        assert_eq!(
+            request_body(&req).unwrap()["additionalModelRequestFields"]["thinking"]["budget_tokens"],
+            3_072
+        );
     }
 
     #[test]
