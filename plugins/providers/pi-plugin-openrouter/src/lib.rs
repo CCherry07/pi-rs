@@ -28,11 +28,33 @@ pub const OPENROUTER_PROVIDER_ID: &str = "openrouter";
 pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 pub struct OpenRouterPlugin {
-    provider: Arc<OpenRouterProvider>,
+    provider: Arc<dyn Provider>,
     models: Vec<pi_core::ModelSpec>,
 }
 
 impl OpenRouterPlugin {
+    pub fn with_credential_source(
+        mut self,
+        source: Arc<dyn pi_provider::CredentialSource>,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Self {
+        self.provider = Arc::new(pi_provider::CredentialProvider::new(
+            self.provider,
+            source,
+            move |credential| {
+                let key = credential
+                    .map(|credential| credential.secret.trim())
+                    .filter(|secret| !secret.is_empty())
+                    .map(str::to_owned);
+                Ok(Arc::new(OpenRouterProvider::with_transport(
+                    key,
+                    Arc::clone(&transport),
+                )?))
+            },
+        ));
+        self
+    }
+
     pub fn with_catalog(mut self, models: Vec<pi_core::ModelSpec>) -> Self {
         self.models = models;
         self
@@ -156,8 +178,55 @@ impl Provider for OpenRouterProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pi_core::AnyModelSpec;
+    use pi_provider::{CredentialKind, CredentialSource, ProviderCredential};
     use std::collections::BTreeMap;
-    use std::sync::Mutex;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[derive(Default)]
+    struct RotatingSource {
+        value: Mutex<Option<ProviderCredential>>,
+        checks: AtomicUsize,
+        resolves: AtomicUsize,
+    }
+    #[async_trait]
+    impl CredentialSource for RotatingSource {
+        async fn check(
+            &self,
+            _: &AbortSignal,
+        ) -> Result<Option<ProviderCredential>, ProviderError> {
+            self.checks.fetch_add(1, Ordering::SeqCst);
+            Ok(self.value.lock().unwrap().clone())
+        }
+        async fn resolve(
+            &self,
+            _: &AbortSignal,
+        ) -> Result<Option<ProviderCredential>, ProviderError> {
+            self.resolves.fetch_add(1, Ordering::SeqCst);
+            Ok(self.value.lock().unwrap().clone())
+        }
+    }
+
+    #[derive(Default)]
+    struct NoRequestTransport(AtomicUsize);
+    #[async_trait]
+    impl HttpTransport for NoRequestTransport {
+        async fn post_json(
+            &self,
+            _: &str,
+            _: &BTreeMap<String, String>,
+            _: &serde_json::Value,
+            _: AbortSignal,
+        ) -> Result<pi_provider::HttpResponse, pi_provider::TransportError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(pi_provider::TransportError::Request(
+                "unexpected request".into(),
+            ))
+        }
+    }
 
     type CapturedRequest = (String, BTreeMap<String, String>);
     #[derive(Default)]
@@ -174,6 +243,45 @@ mod tests {
             *self.0.lock().unwrap() = Some((url.into(), headers.clone()));
             Err(pi_provider::TransportError::Request("captured".into()))
         }
+    }
+
+    #[tokio::test]
+    async fn availability_rechecks_openrouter_credentials_without_requests() {
+        let source = Arc::new(RotatingSource::default());
+        let transport = Arc::new(NoRequestTransport::default());
+        let plugin = OpenRouterPlugin::new_with_transport(None, transport.clone())
+            .unwrap()
+            .with_credential_source(source.clone(), transport.clone());
+        let models = vec![AnyModelSpec::Chat(openrouter_models().remove(0))];
+
+        for (credential, expected) in [
+            (None, 0),
+            (
+                Some(ProviderCredential {
+                    secret: "present".into(),
+                    kind: CredentialKind::ApiKey,
+                    metadata: BTreeMap::new(),
+                }),
+                1,
+            ),
+            (None, 0),
+        ] {
+            *source.value.lock().unwrap() = credential;
+            let (_, signal) = pi_core::AbortHandle::new();
+            assert_eq!(
+                plugin
+                    .provider
+                    .filter_available_models(models.clone(), signal)
+                    .await
+                    .unwrap()
+                    .len(),
+                expected
+            );
+        }
+
+        assert_eq!(source.checks.load(Ordering::SeqCst), 3);
+        assert_eq!(source.resolves.load(Ordering::SeqCst), 0);
+        assert_eq!(transport.0.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

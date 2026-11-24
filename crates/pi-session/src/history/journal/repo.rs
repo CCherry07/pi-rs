@@ -177,10 +177,14 @@ fn read_header_for_listing(path: &Path) -> Option<SessionHeader> {
     let file = std::fs::File::open(path).ok()?;
     let mut line = String::new();
     BufReader::new(file).read_line(&mut line).ok()?;
+    let line = line.trim_end_matches(['\r', '\n']);
     let value: serde_json::Value =
-        serde_json::from_str(line.trim_end_matches(['\r', '\n'])).ok()?;
+        pi_core::json::from_str_with_max_depth(line, crate::history::SESSION_JSON_MAX_DEPTH)
+            .ok()?;
     validate_header_json_shape(&value, 1).ok()?;
-    let header: SessionHeader = serde_json::from_value(value).ok()?;
+    let header: SessionHeader =
+        pi_core::json::from_str_with_max_depth(line, crate::history::SESSION_JSON_MAX_DEPTH)
+            .ok()?;
     validate_header(&header).ok().map(|()| header)
 }
 

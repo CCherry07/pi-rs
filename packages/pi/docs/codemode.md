@@ -16,11 +16,13 @@ An optional first line sets the output token budget and deadline:
 // @options: {"max_output_tokens": 2000, "timeout_ms": 300000}
 ```
 
-The native Rust host defaults to a 60-second deadline, 10,000 output tokens, a 256 MiB VM heap, and at most 128 host calls. Give image generation a sufficient deadline because it can take minutes. The VM exposes no Node APIs, filesystem, network, timers, or module loading; use tools for I/O.
+Scripts have no default deadline. `timeout_ms`, when set, includes waiting for a worker and all tool calls; image generation can take minutes. The default output budget is 10,000 estimated tokens (four UTF-16 code units per token). Truncated text keeps its beginning and end, and the result names a temporary file containing the complete output. Images are retained independently of the text budget.
+
+The native Rust host uses a 256 MiB VM heap and a 1 MiB engine stack guard on an 8 MiB worker thread. Tool arguments, structured replies and stored values support 512 nested object/array levels (the root container counts as one); session persistence has separate envelope headroom. Scripts may produce at most 16 Mi UTF-16 code units of text/image data and 100,000 output items; store values allow 256 Ki JSON characters each and 1 Mi characters total (keys included). There is no additional source, call-count, argument, or reply quota. `PI_CODEMODE_MAX_WORKERS` selects a positive integral process-wide worker limit (default 2), read on each admission; waiting is cancellable and lasts at most 60 seconds. The VM exposes no Node APIs, filesystem, network, timers, or module loading; use tools for I/O.
 
 ## Models
 
-`models` reaches the model catalog and runs non-LLM models with the session's credentials: classifiers, which answer typed questions about JSON state and, for some models, images, and image models, which generate images. Chat models are listed but cannot be run from scripts. Use `models.getAvailableOfType(type)` to discover the configured classifier and image models.
+`models` reaches the model catalog and runs non-LLM models with the session's credentials: classifiers, which answer typed questions about JSON state and, for some models, images, and image models, which generate images. Chat models are listed but cannot be run from scripts. Use `models.getAvailableOfType(type)` to discover the configured classifier and image models. It checks current credentials/account filters without reloading the catalog, refreshing OAuth or running credential commands; availability does not guarantee a successful remote request.
 
 ```ts
 type ModelType = "chat" | "image" | "classifier";
@@ -40,7 +42,7 @@ interface ModelInfo {
 declare const models: {
   /** Every known model of a type, optionally for one provider. */
   getModelsOfType(type: ModelType, provider?: string): Promise<ModelInfo[]>;
-  /** Models of a type whose provider has working credentials. */
+  /** Models with current compatible credential configuration and account filters; no remote probe. */
   getAvailableOfType(type: ModelType, provider?: string): Promise<ModelInfo[]>;
   /** One catalog entry, or undefined. */
   getModelOfType(type: ModelType, provider: string, id: string): Promise<ModelInfo | undefined>;
@@ -162,7 +164,7 @@ interface ImagesResult {
   errorMessage?: string;
 }
 
-type TextBlock = { type: "text"; text: string };
+type TextBlock = { type: "text"; text: string; textSignature?: string };
 /** `data` is base64. */
 type ImageBlock = { type: "image"; data: string; mimeType: string };
 ```

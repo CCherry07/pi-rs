@@ -72,9 +72,11 @@ futures = "0.3.31"
 futures-core = "0.3.31"
 gcp_auth = "0.12.7"
 garde = { version = "0.22.0", features = ["derive"] }
+indexmap = { version = "2.14", features = ["serde"] }
 schemars = "1.2.1"
 serde = { version = "1.0.219", features = ["derive", "rc"] }
 serde_json = { version = "1.0.143", features = ["preserve_order"] }
+serde_stacker = "0.1"
 thiserror = "2.0.16"
 tokio = { version = "1.47.1", features = [
     "macros",
@@ -86,6 +88,7 @@ tokio-util = "0.7.16"
 dotenvy = "0.15"
 libloading = "0.8.9"
 toml = "0.8.23"
+url = "2.5"
 
 pi-core = { path = "crates/pi-core" }
 pi-plugin = { path = "crates/pi-plugin" }

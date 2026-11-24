@@ -7,6 +7,10 @@ mod projection;
 mod provenance;
 mod system_snapshot;
 mod types;
+
+/// Finite depth for complete v4 JSONL documents. This deliberately leaves ample envelope
+/// headroom around deep extension values while keeping generic session replay resource-bounded.
+pub(crate) const SESSION_JSON_MAX_DEPTH: usize = 1024;
 pub use journal::{
     EffectiveLaneConfiguration, ExactSessionIdResolution, JsonlSessionRepo, LaneOperationState,
     LaneReductionInput, LaneReductionResult, LaneState, LaneStepState, NewSessionTarget,

@@ -1,63 +1,45 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use pi_core::AbortSignal;
-use rquickjs::{Context, Ctx, Exception, Function, Object, Runtime};
-use serde_json::Value;
+use rquickjs::{Context, Ctx, Exception, Function, Object, Runtime, context::EvalOptions};
+use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{catalog::Catalog, models::ModelOperation, output::Output, source::Source};
 
-pub(crate) const MAX_CALLS: u32 = 128;
-pub(crate) const MAX_ARGUMENT_BYTES: usize = 1024 * 1024;
-pub(crate) const MAX_RESULT_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MEMORY_LIMIT: usize = 256 * 1024 * 1024;
+/// QuickJS's finite native-stack guard. The VM runs on an explicitly larger OS thread stack.
+pub(crate) const STACK_LIMIT: usize = 1024 * 1024;
+/// Native stack reserved for each bounded codemode worker thread.
+pub(crate) const WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
+/// Maximum object/array nesting accepted for one caller-controlled bridge value.
+pub(crate) const MAX_BRIDGE_VALUE_DEPTH: usize = 512;
+/// Fixed headroom for host envelopes around an accepted value.
+pub(crate) const MAX_BRIDGE_DOCUMENT_DEPTH: usize = MAX_BRIDGE_VALUE_DEPTH + 32;
 
 pub(crate) struct Request {
     pub id: u32,
     pub name: String,
     pub arguments: Value,
+    pub arguments_json: Option<String>,
     pub model_operation: Option<ModelOperation>,
+    pub discovery: bool,
 }
 
 pub(crate) struct Reply {
     pub id: u32,
-    pub result: Result<String, String>,
-    pub reservation: ReplyReservation,
-}
-
-/// Queued replies share a host-memory budget independent of the QuickJS heap.
-pub(crate) struct ReplyReservation {
-    bytes: usize,
-    total: Arc<AtomicUsize>,
-}
-
-impl ReplyReservation {
-    pub fn new(total: &Arc<AtomicUsize>, bytes: usize) -> Option<Self> {
-        let previous = total.fetch_add(bytes, Ordering::Relaxed);
-        if previous.saturating_add(bytes) > 32 * 1024 * 1024 {
-            total.fetch_sub(bytes, Ordering::Relaxed);
-            return None;
-        }
-        Some(Self {
-            bytes,
-            total: total.clone(),
-        })
-    }
-}
-
-impl Drop for ReplyReservation {
-    fn drop(&mut self) {
-        self.total.fetch_sub(self.bytes, Ordering::Relaxed);
-    }
+    /// None represents JavaScript undefined, distinct from JSON null.
+    pub result: Result<Option<String>, String>,
 }
 
 #[derive(Default)]
 pub(crate) struct Outcome {
+    /// Already formatted script/timeout/sandbox error, without the call summary.
     pub error: Option<String>,
     pub writes: Option<Value>,
 }
@@ -65,8 +47,6 @@ pub(crate) struct Outcome {
 struct State {
     pending: HashSet<u32>,
     outcome: Option<Outcome>,
-    calls: u32,
-    argument_bytes: usize,
 }
 
 pub(crate) struct VmInput {
@@ -78,8 +58,13 @@ pub(crate) struct VmInput {
     pub output: Arc<Mutex<Output>>,
     pub requests: UnboundedSender<Request>,
     pub replies: mpsc::Receiver<Reply>,
-    pub deadline: Instant,
+    pub deadline: Option<Instant>,
     pub memory_limit: usize,
+    pub models: bool,
+}
+
+fn expired(deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|deadline| Instant::now() >= deadline)
 }
 
 pub(crate) fn execute(input: VmInput) -> Outcome {
@@ -88,9 +73,9 @@ pub(crate) fn execute(input: VmInput) -> Outcome {
         Err(error) => Outcome {
             error: Some(
                 if input.signal.is_aborted() || input.parent_signal.is_aborted() {
-                    "Script cancelled".into()
-                } else if Instant::now() >= input.deadline {
-                    "Script timed out".into()
+                    "Script aborted: Execution aborted".into()
+                } else if expired(input.deadline) {
+                    timeout_error(input.source.timeout)
                 } else {
                     error
                 },
@@ -100,10 +85,66 @@ pub(crate) fn execute(input: VmInput) -> Outcome {
     }
 }
 
+pub(crate) fn timeout_error(timeout: Option<Duration>) -> String {
+    format!(
+        "Script timed out: Execution timed out after {} ms",
+        timeout.unwrap_or_default().as_millis()
+    )
+}
+
+fn optional_string(value: &rquickjs::Value<'_>) -> rquickjs::Result<Option<String>> {
+    if value.is_undefined() {
+        return Ok(None);
+    }
+    value
+        .as_string()
+        .ok_or_else(|| rquickjs::Error::new_from_js(value.type_name(), "string"))?
+        .to_string()
+        .map(Some)
+}
+
+fn parse_writes(raw: &str) -> Result<Value, String> {
+    // The writes envelope is shallow. Each JSON-text value receives the complete logical value
+    // budget independently, so bridge and session wrappers cannot reduce the accepted depth.
+    let entries: Vec<Vec<String>> = serde_json::from_str(raw).map_err(|error| error.to_string())?;
+    let mut set = serde_json::Map::new();
+    let mut delete = Vec::new();
+    for entry in entries {
+        match entry.as_slice() {
+            [key] => delete.push(key.clone()),
+            [key, value] => {
+                set.insert(
+                    key.clone(),
+                    pi_core::json::from_str_with_max_depth(value, MAX_BRIDGE_VALUE_DEPTH)
+                        .map_err(|error| error.to_string())?,
+                );
+            }
+            _ => return Err("Invalid store writes".into()),
+        }
+    }
+    Ok(json!({"set":set,"delete":delete}))
+}
+
+fn script_error(raw: &str) -> String {
+    let error: Value = serde_json::from_str(raw).unwrap_or_default();
+    error["stack"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            format!(
+                "{}: {}",
+                error["name"].as_str().unwrap_or("Error"),
+                error["message"]
+                    .as_str()
+                    .unwrap_or("The script threw a value that cannot be described")
+            )
+        })
+}
+
 fn execute_inner(input: &VmInput) -> Result<Outcome, String> {
     let runtime = Runtime::new().map_err(|e| e.to_string())?;
     runtime.set_memory_limit(input.memory_limit);
-    runtime.set_max_stack_size(256 * 1024);
+    runtime.set_max_stack_size(STACK_LIMIT);
     let completed = Arc::new(AtomicBool::new(false));
     let signal = input.signal.clone();
     let parent_signal = input.parent_signal.clone();
@@ -112,145 +153,185 @@ fn execute_inner(input: &VmInput) -> Result<Outcome, String> {
     runtime.set_interrupt_handler(Some(Box::new(move || {
         signal.is_aborted()
             || parent_signal.is_aborted()
-            || Instant::now() >= deadline
+            || expired(deadline)
             || is_complete.load(Ordering::Relaxed)
     })));
     let context = Context::full(&runtime).map_err(|e| e.to_string())?;
     let state = Rc::new(RefCell::new(State {
         pending: HashSet::new(),
         outcome: None,
-        calls: 0,
-        argument_bytes: 0,
     }));
     let initialization = context.with(|ctx| {
-        let call_state = state.clone();
+        let state = state.clone();
         let requests = input.requests.clone();
         let catalog = input.catalog.clone();
-        let request = Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>,
-                  id: u32,
-                  kind: String,
-                  name: rquickjs::String<'_>,
-                  args: rquickjs::String<'_>| {
-                let name = bounded_string(&ctx, name, 1024)?;
-                let model_operation = match kind.as_str() {
-                    "tool" => None,
-                    "model" => Some(ModelOperation::parse(&name).ok_or_else(|| {
-                        Exception::throw_message(&ctx, "Unknown model operation")
-                    })?),
-                    _ => return Err(Exception::throw_message(&ctx, "Unknown host operation")),
-                };
-                let arguments = bounded_string(
-                    &ctx,
-                    args,
-                    if model_operation.is_some() {
-                        MAX_RESULT_BYTES
-                    } else {
-                        MAX_ARGUMENT_BYTES
-                    },
-                )?;
-                let mut state = call_state.borrow_mut();
-                if state.outcome.is_some() || state.calls >= MAX_CALLS {
-                    return Err(Exception::throw_message(
-                        &ctx,
-                        "Script exceeds 128 tool calls or has completed",
-                    ));
-                }
-                if model_operation.is_none() && !catalog.contains(&name) {
-                    return Err(Exception::throw_message(
-                        &ctx,
-                        "Tool is outside this script's execution scope",
-                    ));
-                }
-                state.argument_bytes = state.argument_bytes.saturating_add(arguments.len());
-                if state.argument_bytes > 16 * 1024 * 1024 {
-                    return Err(Exception::throw_message(
-                        &ctx,
-                        "Tool arguments exceed the 16 MiB script budget",
-                    ));
-                }
-                let arguments = serde_json::from_str(&arguments).map_err(|e| {
-                    Exception::throw_message(&ctx, &format!("Invalid tool arguments: {e}"))
-                })?;
-                state.calls += 1;
-                state.pending.insert(id);
-                requests
-                    .send(Request {
-                        id,
-                        name,
-                        arguments,
-                        model_operation,
-                    })
-                    .map_err(|_| Exception::throw_message(&ctx, "Script was cancelled"))
-            },
-        )?;
         let output = input.output.clone();
-        let budget = input.source.output_bytes;
-        let emit = Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>, kind: String, value: rquickjs::String<'_>, mime: String| {
-                let value = value.to_cstring()?;
-                if value.len() > crate::source::MAX_OUTPUT_BYTES {
-                    return Err(Exception::throw_message(
-                        &ctx,
-                        "Script output exceeds 16 MiB",
-                    ));
-                }
-                output
-                    .lock()
-                    .map_err(|_| Exception::throw_message(&ctx, "Output state unavailable"))?
-                    .append(&kind, value.as_str(), &mime, budget)
-                    .map_err(|e| Exception::throw_message(&ctx, &e))
-            },
-        )?;
-        let final_state = state.clone();
-        let completed = completed.clone();
-        let complete = Function::new(
+        let complete = completed.clone();
+        let bridge = Function::new(
             ctx.clone(),
             move |ctx: Ctx<'_>,
-                  ok: bool,
-                  error: rquickjs::String<'_>,
-                  writes: rquickjs::String<'_>| {
-                let error = bounded_string(&ctx, error, 16 * 1024)?;
-                let writes = bounded_string(&ctx, writes, crate::store::MAX_STORE_BYTES)?;
-                let writes = if ok {
-                    Some(
-                        serde_json::from_str(&writes)
-                            .map_err(|_| Exception::throw_message(&ctx, "Invalid store writes"))?,
-                    )
-                } else {
-                    None
-                };
-                final_state.borrow_mut().outcome = Some(Outcome {
-                    error: (!ok).then_some(error),
-                    writes,
-                });
-                completed.store(true, Ordering::Relaxed);
+                  kind: String,
+                  a: rquickjs::Value<'_>,
+                  b: rquickjs::Value<'_>,
+                  c: rquickjs::Value<'_>| {
+                // The first terminal event wins. A caught exit/output-limit
+                // exception can execute more JS before an instruction interrupt.
+                // Such JS must never start a post-settlement host operation.
+                if state.borrow().outcome.is_some() {
+                    return Ok(());
+                }
+                let result = (|| -> rquickjs::Result<()> {
+                    let host_error = |message: &str| Exception::throw_message(&ctx, message);
+                    match kind.as_str() {
+                        "call" | "global" => {
+                            let id =
+                                a.as_int().ok_or_else(|| host_error("Invalid call id"))? as u32;
+                            let name = optional_string(&b)?
+                                .ok_or_else(|| host_error("Missing call name"))?;
+                            let arguments_json = optional_string(&c)?;
+                            let arguments = arguments_json
+                                .as_deref()
+                                .map(|json| {
+                                    pi_core::json::from_str_with_max_depth(
+                                        json,
+                                        MAX_BRIDGE_VALUE_DEPTH,
+                                    )
+                                })
+                                .transpose()
+                                .map_err(|e| host_error(&format!("Invalid tool arguments: {e}")))?
+                                .unwrap_or(Value::Null);
+                            let model_operation = if kind == "global" {
+                                name.strip_prefix("models.").and_then(ModelOperation::parse)
+                            } else {
+                                None
+                            };
+                            let discovery = kind == "global" && model_operation.is_none();
+                            if kind == "call" && !catalog.contains(&name) {
+                                return Err(host_error(
+                                    "Tool is outside this script's execution scope",
+                                ));
+                            }
+                            state.borrow_mut().pending.insert(id);
+                            requests
+                                .send(Request {
+                                    id,
+                                    name,
+                                    arguments,
+                                    arguments_json,
+                                    model_operation,
+                                    discovery,
+                                })
+                                .map_err(|_| host_error("Script was cancelled"))?;
+                        }
+                        "output" => {
+                            let kind = optional_string(&a)?.unwrap_or_default();
+                            let value = optional_string(&b)?.unwrap_or_default();
+                            let mime = optional_string(&c)?.unwrap_or_default();
+                            output
+                                .lock()
+                                .map_err(|_| host_error("Output state unavailable"))?
+                                .append(&kind, &value, &mime);
+                        }
+                        "done" => {
+                            let ok = a.as_bool().unwrap_or(false);
+                            let payload = optional_string(&b)?;
+                            let writes = if ok {
+                                Some(
+                                    parse_writes(&optional_string(&c)?.unwrap_or_default())
+                                        .map_err(|error| host_error(&error))?,
+                                )
+                            } else {
+                                None
+                            };
+                            if ok && let Some(payload) = payload.as_deref() {
+                                // Returned values cross JSON first, unlike text(). JSON strings
+                                // are unquoted for display; other JSON stays compact verbatim.
+                                let rendered = if payload.starts_with('"') {
+                                    serde_json::from_str::<String>(payload)
+                                        .map_err(|e| host_error(&e.to_string()))?
+                                } else {
+                                    // The immutable prelude produced this JSON. Do
+                                    // not impose serde's container depth cap merely
+                                    // to display an already-serialized return value.
+                                    payload.into()
+                                };
+                                output
+                                    .lock()
+                                    .map_err(|_| host_error("Output state unavailable"))?
+                                    .append("text", &rendered, "");
+                            }
+                            state.borrow_mut().outcome = Some(Outcome {
+                                error: (!ok)
+                                    .then(|| script_error(payload.as_deref().unwrap_or("{}"))),
+                                writes,
+                            });
+                            complete.store(true, Ordering::Relaxed);
+                        }
+                        _ => return Err(host_error("Unknown host operation")),
+                    }
+                    Ok(())
+                })();
+                // done() has already marked the prelude finished. Throwing a
+                // decoding error back into its ignored continuation would leave
+                // no outcome and no possible future progress (with no deadline).
+                // Treat every malformed bridge message as terminal, as the
+                // oracle host does, including UTF-16 values Rust cannot carry.
+                if let Err(error) = result {
+                    state.borrow_mut().outcome = Some(Outcome {
+                        error: Some(format!(
+                            "Script sandbox failed: Sandbox bridge broken: {}",
+                            describe_error(&ctx, error)
+                        )),
+                        writes: None,
+                    });
+                    complete.store(true, Ordering::Relaxed);
+                }
                 Ok::<(), rquickjs::Error>(())
             },
         )?;
-        let catalog = input.catalog.clone();
-        let query = Function::new(
-            ctx.clone(),
-            move |ctx: Ctx<'_>, kind: String, args: rquickjs::String<'_>| {
-                let args = bounded_string(&ctx, args, 16 * 1024)?;
-                catalog
-                    .query(&kind, &args)
-                    .map_err(|e| Exception::throw_message(&ctx, &e))
-            },
-        )?;
-        let prelude: Function = ctx.eval(include_str!("prelude.js"))?;
+        let mut options = EvalOptions::default();
+        options.filename = Some("codemode-prelude.js".into());
+        let prelude: Function = ctx.eval_with_options(include_str!("prelude.js"), options)?;
+        let globals: Vec<_> = [
+            "searchTools",
+            "describeTool",
+            "describeNamespace",
+            "models.getModelsOfType",
+            "models.getAvailableOfType",
+            "models.getModelOfType",
+            "models.classify",
+            "models.generateImages",
+        ]
+        .into_iter()
+        .filter(|name| input.models || !name.starts_with("models."))
+        .map(|name| json!({"name":name,"spread":true}))
+        .collect();
+        let store: serde_json::Map<String, Value> = input
+            .store
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(key, value)| {
+                pi_core::json::to_string_with_max_depth(value, MAX_BRIDGE_VALUE_DEPTH)
+                    .map(|json| (key.clone(), Value::String(json)))
+                    .map_err(|error| Exception::throw_message(&ctx, &error.to_string()))
+            })
+            .collect::<Result<_, _>>()?;
         let api: Object = prelude.call((
-            request,
-            emit,
-            complete,
-            query,
+            bridge,
             input.catalog.declarations.as_str(),
-            input.store.to_string(),
+            serde_json::to_string(&globals).unwrap(),
+            serde_json::to_string(&store).unwrap(),
         ))?;
         let run: Function = api.get("run")?;
-        run.call::<_, ()>((input.source.code.as_str(),))?;
+        let mut options = EvalOptions::default();
+        options.strict = false;
+        options.filename = Some("codemode.js".into());
+        let script: Function = ctx.eval_with_options(
+            format!("(async (tools, console) => {{{}\n}})", input.source.code),
+            options,
+        )?;
+        run.call::<_, ()>((script,))?;
         Ok::<_, rquickjs::Error>(rquickjs::Persistent::save(&ctx, api))
     });
     let api = match initialization {
@@ -267,13 +348,11 @@ fn execute_inner(input: &VmInput) -> Result<Outcome, String> {
             return Ok(outcome);
         }
         if input.signal.is_aborted() || input.parent_signal.is_aborted() {
-            return Err("Script cancelled".into());
+            return Err("Script aborted: Execution aborted".into());
         }
-        if Instant::now() >= input.deadline {
-            return Err("Script timed out".into());
+        if expired(input.deadline) {
+            return Err(timeout_error(input.source.timeout));
         }
-        // Poll outside each small batch: a promise-only loop may execute too few
-        // opcodes per job to trigger QuickJS's instruction interrupt promptly.
         for _ in 0..50 {
             match runtime.execute_pending_job() {
                 Ok(false) => break,
@@ -295,11 +374,17 @@ fn execute_inner(input: &VmInput) -> Result<Outcome, String> {
             continue;
         }
         if state.borrow().pending.is_empty() {
-            return Err("Script is stalled: no pending tool call can resolve its promise".into());
+            context
+                .with(|ctx| {
+                    let api = api.clone().restore(&ctx)?;
+                    let stalled: Function = api.get("stalled")?;
+                    stalled.call::<_, bool>(())
+                })
+                .map_err(|error| context.with(|ctx| describe_error(&ctx, error)))?;
+            continue;
         }
         match input.replies.recv_timeout(Duration::from_millis(10)) {
             Ok(reply) => {
-                let _reservation = reply.reservation;
                 state.borrow_mut().pending.remove(&reply.id);
                 context
                     .with(|ctx| {
@@ -307,7 +392,7 @@ fn execute_inner(input: &VmInput) -> Result<Outcome, String> {
                         let settle: Function = api.get("settle")?;
                         let (ok, payload) = match reply.result {
                             Ok(value) => (true, value),
-                            Err(error) => (false, error),
+                            Err(error) => (false, Some(error)),
                         };
                         settle.call::<_, ()>((reply.id, ok, payload))
                     })
@@ -315,36 +400,34 @@ fn execute_inner(input: &VmInput) -> Result<Outcome, String> {
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err("Script host disconnected".into());
+                return Err("Script sandbox failed: Script host disconnected".into());
             }
         }
     }
-}
-
-fn bounded_string(
-    ctx: &Ctx<'_>,
-    value: rquickjs::String<'_>,
-    limit: usize,
-) -> rquickjs::Result<String> {
-    let value = value.to_cstring()?;
-    if value.len() > limit {
-        return Err(Exception::throw_message(
-            ctx,
-            "Script value exceeds its byte limit",
-        ));
-    }
-    Ok(value.as_str().into())
 }
 
 fn describe_error(ctx: &Ctx<'_>, error: rquickjs::Error) -> String {
     if error.is_exception() {
         let value = ctx.catch();
         if let Some(exception) = value.as_exception() {
-            return exception
-                .message()
-                .unwrap_or_else(|| "QuickJS execution failed".into());
+            let name: String = exception.get("name").unwrap_or_else(|_| "Error".into());
+            let message = exception.message().unwrap_or_default();
+            let stack = exception.stack().unwrap_or_default();
+            let frames = stack
+                .lines()
+                .filter(|line| !line.trim().is_empty() && !line.contains("codemode-prelude.js"))
+                .collect::<Vec<_>>();
+            let head = if message.is_empty() {
+                name
+            } else {
+                format!("{name}: {message}")
+            };
+            return std::iter::once(head.as_str())
+                .chain(frames)
+                .collect::<Vec<_>>()
+                .join("\n");
         }
-        return "QuickJS execution failed".into();
+        return "Error: QuickJS execution failed".into();
     }
-    error.to_string()
+    format!("Script sandbox failed: {error}")
 }

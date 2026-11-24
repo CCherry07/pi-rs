@@ -23,10 +23,47 @@ const VERTEX_EXPRESS_BASE_URL: &str = "https://aiplatform.googleapis.com";
 const CLOUD_PLATFORM_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
 
 pub struct GoogleVertexPlugin {
-    provider: Arc<GoogleVertexCompatibleProvider>,
+    provider: Arc<dyn Provider>,
 }
 
 impl GoogleVertexPlugin {
+    /// Rebuild only the request adapter when credentials change. The supplied
+    /// source is authoritative; it can therefore be deterministic in embedders
+    /// and tests without consulting process-global ADC state.
+    pub fn with_credential_source(
+        mut self,
+        source: Arc<dyn pi_provider::CredentialSource>,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Self {
+        self.provider = Arc::new(pi_provider::CredentialProvider::new(
+            self.provider,
+            source,
+            move |credential| {
+                let (api_key, environment) = credential_parts(credential);
+                let config = GoogleVertexCompatibleConfig::from_values(api_key, environment)?;
+                Ok(Arc::new(GoogleVertexCompatibleProvider::with_transport(
+                    config,
+                    Arc::clone(&transport),
+                )?))
+            },
+        ));
+        self
+    }
+
+    /// Coding uses current Application Default Credentials in addition to its
+    /// stored credential source. This wrapper only inspects environment values
+    /// and credential-file presence; it never loads or refreshes an ADC token.
+    pub fn with_ambient_credential_source(
+        self,
+        source: Arc<dyn pi_provider::CredentialSource>,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Self {
+        self.with_credential_source(
+            Arc::new(GoogleVertexCredentialSource { inner: source }),
+            transport,
+        )
+    }
+
     pub fn discover() -> Result<Self, ProviderError> {
         Self::from_stored(None)
     }
@@ -154,22 +191,27 @@ impl GoogleVertexCompatibleConfig {
         api_key: Option<String>,
         overrides: BTreeMap<String, String>,
     ) -> Result<Self, ProviderError> {
+        let mut values = ambient_environment();
+        values.extend(overrides);
+        Self::from_values(api_key, values)
+    }
+
+    fn from_values(
+        api_key: Option<String>,
+        values: BTreeMap<String, String>,
+    ) -> Result<Self, ProviderError> {
         let config = Self {
             provider_id: ProviderId::new(GOOGLE_VERTEX_PROVIDER_ID),
             base_url: None,
-            api_key: api_key.and_then(normalize_api_key),
-            access_token: value(&overrides, "GOOGLE_CLOUD_ACCESS_TOKEN")
-                .or_else(|| value(&overrides, "GOOGLE_OAUTH_ACCESS_TOKEN"))
-                .or_else(|| env("GOOGLE_CLOUD_ACCESS_TOKEN"))
-                .or_else(|| env("GOOGLE_OAUTH_ACCESS_TOKEN")),
-            project: value(&overrides, "GOOGLE_CLOUD_PROJECT")
-                .or_else(|| value(&overrides, "GCLOUD_PROJECT"))
-                .or_else(|| env("GOOGLE_CLOUD_PROJECT"))
-                .or_else(|| env("GCLOUD_PROJECT")),
-            location: value(&overrides, "GOOGLE_CLOUD_LOCATION")
-                .or_else(|| env("GOOGLE_CLOUD_LOCATION")),
-            application_credentials: value(&overrides, "GOOGLE_APPLICATION_CREDENTIALS")
-                .or_else(|| env("GOOGLE_APPLICATION_CREDENTIALS"))
+            api_key: api_key
+                .and_then(normalize_api_key)
+                .or_else(|| value(&values, "GOOGLE_CLOUD_API_KEY")),
+            access_token: value(&values, "GOOGLE_CLOUD_ACCESS_TOKEN")
+                .or_else(|| value(&values, "GOOGLE_OAUTH_ACCESS_TOKEN")),
+            project: value(&values, "GOOGLE_CLOUD_PROJECT")
+                .or_else(|| value(&values, "GCLOUD_PROJECT")),
+            location: value(&values, "GOOGLE_CLOUD_LOCATION"),
+            application_credentials: value(&values, "GOOGLE_APPLICATION_CREDENTIALS")
                 .map(expand_user_path),
             headers: BTreeMap::new(),
             allow_adc: true,
@@ -548,6 +590,94 @@ fn adc_file_exists(explicit: Option<&Path>) -> bool {
         .any(|path| path.is_file())
 }
 
+struct GoogleVertexCredentialSource {
+    inner: Arc<dyn pi_provider::CredentialSource>,
+}
+
+#[async_trait]
+impl pi_provider::CredentialSource for GoogleVertexCredentialSource {
+    async fn check(
+        &self,
+        signal: &AbortSignal,
+    ) -> Result<Option<pi_provider::ProviderCredential>, ProviderError> {
+        let credential = self.inner.check(signal).await?;
+        if signal.is_aborted() {
+            return Err(ProviderError::Aborted);
+        }
+        Ok(with_ambient_vertex_credential(credential))
+    }
+
+    async fn resolve(
+        &self,
+        signal: &AbortSignal,
+    ) -> Result<Option<pi_provider::ProviderCredential>, ProviderError> {
+        let credential = self.inner.resolve(signal).await?;
+        if signal.is_aborted() {
+            return Err(ProviderError::Aborted);
+        }
+        Ok(with_ambient_vertex_credential(credential))
+    }
+}
+
+fn with_ambient_vertex_credential(
+    credential: Option<pi_provider::ProviderCredential>,
+) -> Option<pi_provider::ProviderCredential> {
+    let ambient = ambient_environment();
+    if let Some(mut credential) = credential {
+        let mut environment = ambient;
+        environment.extend(credential_environment(Some(&credential)));
+        credential
+            .metadata
+            .insert("env".to_string(), serde_json::json!(environment));
+        return Some(credential);
+    }
+    let config = GoogleVertexCompatibleConfig::from_values(None, ambient.clone()).ok()?;
+    let ready = config.api_key.is_some()
+        || (config.project.is_some()
+            && config.location.is_some()
+            && (config.access_token.is_some()
+                || adc_file_exists(config.application_credentials.as_deref())));
+    ready.then(|| pi_provider::ProviderCredential {
+        secret: config.api_key.unwrap_or_default(),
+        kind: pi_provider::CredentialKind::ApiKey,
+        metadata: BTreeMap::from([("env".to_string(), serde_json::json!(ambient))]),
+    })
+}
+
+fn credential_parts(
+    credential: Option<&pi_provider::ProviderCredential>,
+) -> (Option<String>, BTreeMap<String, String>) {
+    let api_key = credential
+        .map(|credential| credential.secret.trim())
+        .filter(|secret| !secret.is_empty())
+        .map(str::to_owned);
+    (api_key, credential_environment(credential))
+}
+
+fn credential_environment(
+    credential: Option<&pi_provider::ProviderCredential>,
+) -> BTreeMap<String, String> {
+    credential
+        .and_then(|credential| credential.metadata.get("env"))
+        .and_then(|environment| serde_json::from_value(environment.clone()).ok())
+        .unwrap_or_default()
+}
+
+fn ambient_environment() -> BTreeMap<String, String> {
+    [
+        "GOOGLE_CLOUD_API_KEY",
+        "GOOGLE_CLOUD_ACCESS_TOKEN",
+        "GOOGLE_OAUTH_ACCESS_TOKEN",
+        "GOOGLE_CLOUD_PROJECT",
+        "GCLOUD_PROJECT",
+        "GOOGLE_CLOUD_LOCATION",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+    ]
+    .into_iter()
+    .filter_map(|name| env(name).map(|value| (name.to_string(), value)))
+    .collect()
+}
+
 fn expand_user_path(value: String) -> PathBuf {
     if value == "~" {
         return std::env::var_os("HOME")
@@ -582,12 +712,17 @@ fn map_transport_error(error: TransportError) -> ProviderError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex as StdMutex;
+    use std::sync::{
+        Mutex as StdMutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use futures::{StreamExt, stream};
-    use pi_core::{AbortHandle, ModelId, StreamEvent, ThinkingLevel};
+    use pi_core::{AbortHandle, AnyModelSpec, ModelId, StreamEvent, ThinkingLevel};
     use pi_plugin::ProviderCallContext;
-    use pi_provider::{HttpResponse, TransportError};
+    use pi_provider::{
+        CredentialKind, CredentialSource, HttpResponse, ProviderCredential, TransportError,
+    };
     use serde_json::Value;
 
     use super::*;
@@ -654,6 +789,49 @@ mod tests {
     }
 
     #[derive(Default)]
+    struct RotatingSource {
+        value: StdMutex<Option<ProviderCredential>>,
+        checks: AtomicUsize,
+        resolves: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl CredentialSource for RotatingSource {
+        async fn check(
+            &self,
+            _: &AbortSignal,
+        ) -> Result<Option<ProviderCredential>, ProviderError> {
+            self.checks.fetch_add(1, Ordering::SeqCst);
+            Ok(self.value.lock().unwrap().clone())
+        }
+
+        async fn resolve(
+            &self,
+            _: &AbortSignal,
+        ) -> Result<Option<ProviderCredential>, ProviderError> {
+            self.resolves.fetch_add(1, Ordering::SeqCst);
+            Ok(self.value.lock().unwrap().clone())
+        }
+    }
+
+    #[derive(Default)]
+    struct NoRequestTransport(AtomicUsize);
+
+    #[async_trait]
+    impl HttpTransport for NoRequestTransport {
+        async fn post_json(
+            &self,
+            _: &str,
+            _: &BTreeMap<String, String>,
+            _: &Value,
+            _: AbortSignal,
+        ) -> Result<HttpResponse, TransportError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(TransportError::Request("unexpected request".into()))
+        }
+    }
+
+    #[derive(Default)]
     struct Capture {
         url: String,
         headers: BTreeMap<String, String>,
@@ -686,6 +864,56 @@ mod tests {
                 )])),
             })
         }
+    }
+
+    #[tokio::test]
+    async fn availability_rechecks_vertex_adc_without_requests_or_token_refresh() {
+        let credentials_path = std::env::temp_dir().join(format!(
+            "pi-rs-vertex-availability-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&credentials_path, "{}").unwrap();
+        let source = Arc::new(RotatingSource::default());
+        let transport = Arc::new(NoRequestTransport::default());
+        let plugin = GoogleVertexPlugin::new_with_transport(None, transport.clone())
+            .unwrap()
+            .with_credential_source(source.clone(), transport.clone());
+        let models = vec![AnyModelSpec::Chat(google_vertex_models().remove(0))];
+        let present = ProviderCredential {
+            secret: String::new(),
+            kind: CredentialKind::ApiKey,
+            metadata: BTreeMap::from([(
+                "env".into(),
+                serde_json::json!({
+                    "GOOGLE_CLOUD_PROJECT": "project",
+                    "GOOGLE_CLOUD_LOCATION": "us-central1",
+                    "GOOGLE_APPLICATION_CREDENTIALS": credentials_path,
+                }),
+            )]),
+        };
+
+        for (credential, expected) in [(None, 0), (Some(present), 1), (None, 0)] {
+            *source.value.lock().unwrap() = credential;
+            let (_, signal) = AbortHandle::new();
+            assert_eq!(
+                plugin
+                    .provider
+                    .filter_available_models(models.clone(), signal)
+                    .await
+                    .unwrap()
+                    .len(),
+                expected
+            );
+        }
+
+        assert_eq!(source.checks.load(Ordering::SeqCst), 3);
+        assert_eq!(source.resolves.load(Ordering::SeqCst), 0);
+        assert_eq!(transport.0.load(Ordering::SeqCst), 0);
+        std::fs::remove_file(credentials_path).unwrap();
     }
 
     #[tokio::test]

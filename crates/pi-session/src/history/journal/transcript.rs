@@ -41,7 +41,8 @@ struct CustomMutation<'a> {
 }
 
 pub(super) fn decode_custom_mutation(line: &[u8]) -> Result<SessionMutation, serde_json::Error> {
-    let custom: CustomMutation<'_> = serde_json::from_slice(line)?;
+    let custom: CustomMutation<'_> =
+        pi_core::json::from_slice_with_max_depth(line, crate::history::SESSION_JSON_MAX_DEPTH)?;
     // Native provenance participates in the default context. All other custom
     // state is for extension projectors/runtime restoration, never display.
     // RawValue scans JSON syntax without allocating the opaque payload tree.
@@ -51,7 +52,12 @@ pub(super) fn decode_custom_mutation(line: &[u8]) -> Result<SessionMutation, ser
     ) {
         custom
             .data
-            .map(|data| serde_json::from_str(data.get()))
+            .map(|data| {
+                pi_core::json::from_str_with_max_depth(
+                    data.get(),
+                    crate::history::SESSION_JSON_MAX_DEPTH,
+                )
+            })
             .transpose()?
     } else {
         None

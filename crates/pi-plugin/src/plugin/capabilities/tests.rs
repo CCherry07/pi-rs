@@ -202,7 +202,7 @@ async fn retired_model_operations_reject_before_validating_requests() {
     let classifier = crate::ClassifierContext {
         state: serde_json::Map::new(),
         images: Vec::new(),
-        questions: BTreeMap::new(),
+        questions: Default::default(),
     };
     assert!(matches!(
         context

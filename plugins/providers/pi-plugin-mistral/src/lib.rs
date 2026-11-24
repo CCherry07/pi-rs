@@ -32,10 +32,36 @@ pub const MISTRAL_PROVIDER_ID: &str = "mistral";
 pub const MISTRAL_BASE_URL: &str = "https://api.mistral.ai";
 
 pub struct MistralPlugin {
-    provider: Arc<MistralCompatibleProvider>,
+    provider: Arc<dyn Provider>,
 }
 
 impl MistralPlugin {
+    pub fn with_credential_source(
+        mut self,
+        source: Arc<dyn pi_provider::CredentialSource>,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Self {
+        self.provider = Arc::new(pi_provider::CredentialProvider::new(
+            self.provider,
+            source,
+            move |credential| {
+                let key = credential
+                    .map(|credential| credential.secret.trim())
+                    .filter(|secret| !secret.is_empty())
+                    .map(str::to_owned);
+                let config = key.map_or_else(
+                    || MistralCompatibleConfig::without_api_key(MISTRAL_BASE_URL),
+                    |key| MistralCompatibleConfig::new(MISTRAL_BASE_URL, key),
+                );
+                Ok(Arc::new(MistralCompatibleProvider::with_transport(
+                    config,
+                    Arc::clone(&transport),
+                )?))
+            },
+        ));
+        self
+    }
+
     pub fn discover() -> Result<Self, ProviderError> {
         Self::from_stored(None)
     }
@@ -907,14 +933,62 @@ fn map_transport_error(error: TransportError) -> ProviderError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use futures::{StreamExt, stream};
-    use pi_core::{AbortHandle, ModelId, ModelSpec, ToolSpec};
+    use pi_core::{AbortHandle, AnyModelSpec, ModelId, ModelSpec, ToolSpec};
     use pi_plugin::ProviderCallContext;
-    use pi_provider::{HttpResponse, TransportError};
+    use pi_provider::{
+        CredentialKind, CredentialSource, HttpResponse, ProviderCredential, TransportError,
+    };
 
     use super::*;
+
+    #[derive(Default)]
+    struct RotatingSource {
+        value: Mutex<Option<ProviderCredential>>,
+        checks: AtomicUsize,
+        resolves: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl CredentialSource for RotatingSource {
+        async fn check(
+            &self,
+            _: &AbortSignal,
+        ) -> Result<Option<ProviderCredential>, ProviderError> {
+            self.checks.fetch_add(1, Ordering::SeqCst);
+            Ok(self.value.lock().unwrap().clone())
+        }
+
+        async fn resolve(
+            &self,
+            _: &AbortSignal,
+        ) -> Result<Option<ProviderCredential>, ProviderError> {
+            self.resolves.fetch_add(1, Ordering::SeqCst);
+            Ok(self.value.lock().unwrap().clone())
+        }
+    }
+
+    #[derive(Default)]
+    struct NoRequestTransport(AtomicUsize);
+
+    #[async_trait]
+    impl HttpTransport for NoRequestTransport {
+        async fn post_json(
+            &self,
+            _: &str,
+            _: &BTreeMap<String, String>,
+            _: &Value,
+            _: AbortSignal,
+        ) -> Result<HttpResponse, TransportError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(TransportError::Request("unexpected request".into()))
+        }
+    }
 
     #[derive(Default)]
     struct Capture {
@@ -979,6 +1053,45 @@ mod tests {
             sampling_params: BTreeMap::new(),
             session_id: Some("session-1".to_string()),
         }
+    }
+
+    #[tokio::test]
+    async fn availability_rechecks_mistral_credentials_without_requests() {
+        let source = Arc::new(RotatingSource::default());
+        let transport = Arc::new(NoRequestTransport::default());
+        let plugin = MistralPlugin::new_with_transport(None, transport.clone())
+            .unwrap()
+            .with_credential_source(source.clone(), transport.clone());
+        let models = vec![AnyModelSpec::Chat(mistral_models().remove(0))];
+
+        for (credential, expected) in [
+            (None, 0),
+            (
+                Some(ProviderCredential {
+                    secret: "present".into(),
+                    kind: CredentialKind::ApiKey,
+                    metadata: BTreeMap::new(),
+                }),
+                1,
+            ),
+            (None, 0),
+        ] {
+            *source.value.lock().unwrap() = credential;
+            let (_, signal) = AbortHandle::new();
+            assert_eq!(
+                plugin
+                    .provider
+                    .filter_available_models(models.clone(), signal)
+                    .await
+                    .unwrap()
+                    .len(),
+                expected
+            );
+        }
+
+        assert_eq!(source.checks.load(Ordering::SeqCst), 3);
+        assert_eq!(source.resolves.load(Ordering::SeqCst), 0);
+        assert_eq!(transport.0.load(Ordering::SeqCst), 0);
     }
 
     #[test]

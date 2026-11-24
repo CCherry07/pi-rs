@@ -1,7 +1,7 @@
 //! llama-server classification reads label logits instead of generating a chat answer.
 //! The protocol follows legacy/pi's llama-cpp-classify implementation.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use futures::future::BoxFuture;
@@ -367,7 +367,7 @@ pub(super) async fn classify<'a>(
     model: &'a ClassifierModelSpec,
     context: &ClassifierContext,
     post: impl Fn(String, Value, bool) -> BoxFuture<'a, Result<Value, ProviderError>> + Send + Sync + 'a,
-) -> Result<BTreeMap<String, ClassifierAnswer>, ProviderError> {
+) -> Result<pi_core::ClassifierAnswers, ProviderError> {
     if !context.images.is_empty() {
         return Err(protocol(
             "llama.cpp classification does not support image input",
@@ -390,7 +390,7 @@ pub(super) async fn classify<'a>(
         root: base.strip_suffix("/v1").unwrap_or(base).to_owned(),
         post: Box::new(post),
     };
-    let mut answers = BTreeMap::new();
+    let mut answers = pi_core::ClassifierAnswers::new();
     // Shared prompt prefixes let llama-server reuse the cache between questions.
     for (id, question, rendered) in questions {
         answers.insert(

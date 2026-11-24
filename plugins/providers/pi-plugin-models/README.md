@@ -35,6 +35,27 @@ Only configure commands you trust. Do not embed tokens in command arguments or c
 that print diagnostics to stdout. Use a trusted wrapper if a helper needs to transform structured
 output into a raw credential, and keep its diagnostics free of secrets.
 
+## Catalog and availability
+
+Coding enables the complete specialized catalog at pinned legacy revision
+`0ab23c37b074252d04e31f5cfb99491f0613fb80`: 46 classifier and 63 image models across Cloudflare
+Workers AI, OpenAI, OpenCode, OpenRouter, TypeSafe and Vercel AI Gateway. The offline generator
+`scripts/sync-specialized-model-catalog.py` supports `--check`; normal builds need neither Node nor
+a legacy checkout. Typed entries preserve input limits, costs, headers, classifier context/compat
+and image output modalities, and do not replace chat models of the same provider/id.
+
+`ModelRuntime::query_available_models_of_type` checks current provider credentials and account
+filters without changing the generation catalog. Coding's stored-credential checks reread the
+auth file without refreshing OAuth, creating auth locks or executing command-backed keys. Commands
+count as configured; environment templates require their variables to be present. Availability is
+a local configuration check, not proof that a remote account can successfully call a model.
+Existing synchronous catalog APIs continue to expose a generation-time snapshot.
+
+Cloudflare specialized requests resolve account placeholders from current credential environment
+metadata, falling back to ambient environment; placeholder substitutions remain individual URL
+path segments. OpenAI Decisions excludes OAuth-only credentials. Copilot filters apply to current
+account metadata without removing models from the registered catalog.
+
 ## Configuration notes
 
 Set `contextWindow`, `maxTokens`, input capabilities, thinking and compatibility settings to match

@@ -9,7 +9,7 @@ import { createAllToolDefinitions } from "../legacy/pi/packages/coding-agent/src
 import { createCodemodeToolDefinition } from "../legacy/pi/packages/coding-agent/src/extensions/codemode/tool.ts";
 import { createToolSearchToolDefinition } from "../legacy/pi/packages/coding-agent/src/extensions/tool-search/tool.ts";
 import { buildSystemPrompt } from "../legacy/pi/packages/coding-agent/src/core/system-prompt.ts";
-import { createMcpResultSchema } from "../legacy/pi/packages/coding-agent/src/extensions/mcp/tools.ts";
+import { createMcpResultSchema } from "../legacy/pi/packages/mcp/src/result-schema.ts";
 import { getReadmePath, getDocsPath, getExamplesPath } from "../legacy/pi/packages/coding-agent/src/config.ts";
 
 const root = fileURLToPath(new URL("../", import.meta.url));

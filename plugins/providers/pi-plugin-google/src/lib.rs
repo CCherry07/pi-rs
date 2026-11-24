@@ -38,10 +38,40 @@ pub(crate) const GOOGLE_BASE_URL: &str = "https://generativelanguage.googleapis.
 
 /// Built-in Google AI Studio provider and current Pi Gemini catalog.
 pub struct GooglePlugin {
-    provider: Arc<GoogleCompatibleProvider>,
+    provider: Arc<dyn Provider>,
 }
 
 impl GooglePlugin {
+    /// Resolve credentials for availability and requests without rebuilding the
+    /// published provider catalog.
+    pub fn with_credential_source(
+        mut self,
+        source: Arc<dyn pi_provider::CredentialSource>,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Self {
+        self.provider = Arc::new(pi_provider::CredentialProvider::new(
+            self.provider,
+            source,
+            move |credential| {
+                let key = credential
+                    .map(|credential| credential.secret.trim())
+                    .filter(|secret| !secret.is_empty())
+                    .map(str::to_owned);
+                let config = key
+                    .map_or_else(
+                        || GoogleCompatibleConfig::without_api_key(GOOGLE_BASE_URL),
+                        |key| GoogleCompatibleConfig::new(GOOGLE_BASE_URL, key),
+                    )
+                    .provider_id(GOOGLE_PROVIDER_ID);
+                Ok(Arc::new(GoogleCompatibleProvider::with_transport(
+                    config,
+                    Arc::clone(&transport),
+                )?))
+            },
+        ));
+        self
+    }
+
     pub fn discover() -> Result<Self, ProviderError> {
         Self::from_stored(None)
     }
@@ -1024,9 +1054,57 @@ fn rewrite_schema_const(schema: &mut Value, name_map: bool) {
 #[cfg(test)]
 mod tests {
     use futures::{StreamExt, stream};
-    use pi_core::{AbortHandle, ModelId, ModelSpec, UserMessage};
+    use pi_core::{AbortHandle, AnyModelSpec, ModelId, ModelSpec, UserMessage};
+    use pi_provider::{CredentialKind, CredentialSource, ProviderCredential};
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use super::*;
+
+    #[derive(Default)]
+    struct RotatingSource {
+        value: Mutex<Option<ProviderCredential>>,
+        checks: AtomicUsize,
+        resolves: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl CredentialSource for RotatingSource {
+        async fn check(
+            &self,
+            _: &AbortSignal,
+        ) -> Result<Option<ProviderCredential>, ProviderError> {
+            self.checks.fetch_add(1, Ordering::SeqCst);
+            Ok(self.value.lock().unwrap().clone())
+        }
+
+        async fn resolve(
+            &self,
+            _: &AbortSignal,
+        ) -> Result<Option<ProviderCredential>, ProviderError> {
+            self.resolves.fetch_add(1, Ordering::SeqCst);
+            Ok(self.value.lock().unwrap().clone())
+        }
+    }
+
+    #[derive(Default)]
+    struct NoRequestTransport(AtomicUsize);
+
+    #[async_trait]
+    impl HttpTransport for NoRequestTransport {
+        async fn post_json(
+            &self,
+            _: &str,
+            _: &BTreeMap<String, String>,
+            _: &Value,
+            _: AbortSignal,
+        ) -> Result<pi_provider::HttpResponse, TransportError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(TransportError::Request("unexpected request".into()))
+        }
+    }
 
     fn request() -> ProviderRequest {
         let mut model = ModelSpec::new(
@@ -1144,6 +1222,45 @@ mod tests {
             configured.provider.availability(),
             ProviderAvailability::Available
         ));
+    }
+
+    #[tokio::test]
+    async fn availability_rechecks_google_credentials_without_requests() {
+        let source = Arc::new(RotatingSource::default());
+        let transport = Arc::new(NoRequestTransport::default());
+        let plugin = GooglePlugin::new_with_transport(None, transport.clone())
+            .unwrap()
+            .with_credential_source(source.clone(), transport.clone());
+        let models = vec![AnyModelSpec::Chat(google_models().remove(0))];
+
+        for (credential, expected) in [
+            (None, 0),
+            (
+                Some(ProviderCredential {
+                    secret: "present".into(),
+                    kind: CredentialKind::ApiKey,
+                    metadata: BTreeMap::new(),
+                }),
+                1,
+            ),
+            (None, 0),
+        ] {
+            *source.value.lock().unwrap() = credential;
+            let (_, signal) = AbortHandle::new();
+            assert_eq!(
+                plugin
+                    .provider
+                    .filter_available_models(models.clone(), signal)
+                    .await
+                    .unwrap()
+                    .len(),
+                expected
+            );
+        }
+
+        assert_eq!(source.checks.load(Ordering::SeqCst), 3);
+        assert_eq!(source.resolves.load(Ordering::SeqCst), 0);
+        assert_eq!(transport.0.load(Ordering::SeqCst), 0);
     }
 
     #[test]

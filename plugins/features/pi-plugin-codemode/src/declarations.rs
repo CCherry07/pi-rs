@@ -102,11 +102,11 @@ fn describe_fields(schema: &Value, root: &Value, depth: usize) -> Option<String>
     }
     let properties = schema.get("properties")?.as_object()?;
     let required = required_names(schema);
-    let fields = properties
-        .iter()
+    let fields = object_entries(properties)
+        .into_iter()
         .map(|(name, field)| {
             let field = follow_ref(field, root);
-            let nested = field.get("const").map(Value::to_string).or_else(|| {
+            let nested = field.get("const").map(json_stringify).or_else(|| {
                 (depth > 0)
                     .then(|| describe_fields(field, root, depth - 1))
                     .flatten()
@@ -260,10 +260,10 @@ fn to_type(schema: &Value, context: &mut SchemaContext<'_>) -> String {
         return rendered;
     }
     if let Some(value) = object.get("const") {
-        return value.to_string();
+        return json_stringify(value);
     }
     if let Some(values) = object.get("enum").and_then(Value::as_array) {
-        return union(values.iter().map(Value::to_string));
+        return union(values.iter().map(json_stringify));
     }
     if let Some(variants) = object
         .get("anyOf")
@@ -357,7 +357,7 @@ fn object_type(schema: &Value, context: &mut SchemaContext<'_>) -> String {
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
-    properties.sort_by_key(|(name, _)| *name);
+    properties.sort_by(|(left, _), (right, _)| left.encode_utf16().cmp(right.encode_utf16()));
     let required = required_names(schema);
     let mut members = properties
         .iter()
@@ -502,14 +502,14 @@ fn constraint_tags(property: &Value) -> String {
                         }
                     })
             {
-                tags.push(format!("@{keyword} {value}"));
+                tags.push(format!("@{keyword} {}", json_stringify(value)));
             }
         } else {
             let mut seen = HashSet::new();
             for value in values {
                 let text = match value {
                     Value::String(text) => text.clone(),
-                    Value::Number(number) => number.to_string(),
+                    Value::Number(_) => json_stringify(value),
                     _ => continue,
                 };
                 if seen.insert(text.clone()) {
@@ -525,7 +525,7 @@ fn constraint_tags(property: &Value) -> String {
         tags.push("@uniqueItems".into());
     }
     if let Some(value) = object.get("default").filter(|value| !value.is_null()) {
-        tags.push(format!("@default {value}"));
+        tags.push(format!("@default {}", json_stringify(value)));
     }
     if object.get("deprecated") == Some(&Value::Bool(true)) {
         tags.push("@deprecated".into());
@@ -544,10 +544,81 @@ fn constraint_tags(property: &Value) -> String {
         .join(" ")
 }
 
+/// JavaScript enumerates array-index object keys first, then other keys in insertion order.
+fn object_entries(object: &serde_json::Map<String, Value>) -> Vec<(&String, &Value)> {
+    let index = |key: &str| {
+        key.parse::<u32>()
+            .ok()
+            .filter(|value| *value != u32::MAX && value.to_string() == key)
+    };
+    let mut entries = object.iter().collect::<Vec<_>>();
+    entries.sort_by(|(left, _), (right, _)| match (index(left), index(right)) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+    entries
+}
+
+/// Match JSON.stringify's Number formatting and object-key enumeration, not serde's Rust numbers.
+pub(crate) fn json_stringify(value: &Value) -> String {
+    match value {
+        Value::Number(number) => ryu_js::Buffer::new()
+            .format(number.as_f64().unwrap_or(f64::NAN))
+            .to_owned(),
+        Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(json_stringify)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        Value::Object(object) => format!(
+            "{{{}}}",
+            object_entries(object)
+                .into_iter()
+                .map(|(key, value)| {
+                    format!("{}:{}", Value::String(key.clone()), json_stringify(value))
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        _ => value.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn declarations_use_javascript_numbers_utf16_sort_and_object_enumeration() {
+        assert_eq!(schema_to_type(&json!({"const":1.0}), None), "1");
+        assert_eq!(
+            schema_to_type(
+                &json!({"type":"object","properties":{"n":{"type":"number","minimum":1.0,"default":1e2}}}),
+                None
+            ),
+            "{\n  // @minimum 1 @default 100\n  n?: number;\n}"
+        );
+        assert_eq!(
+            schema_to_type(
+                &json!({"properties":{"\u{e000}":{"type":"string"},"😀":{"type":"boolean"}}}),
+                None
+            ),
+            "{ \"😀\"?: boolean; \"\u{e000}\"?: string; }"
+        );
+        let schema =
+            json!({"type":"object","properties":{"10":{"type":"string"},"2":{"type":"boolean"}}});
+        assert_eq!(describe_output("x", Some(&schema)), "`{ 2?, 10? }`");
+        assert_eq!(
+            json_stringify(&json!([1e20, 1e21, 1e-6, 1e-7, -0.0])),
+            "[100000000000000000000,1e+21,0.000001,1e-7,0]"
+        );
+    }
 
     #[test]
     fn renders_types_and_schema_constraints_like_pi() {

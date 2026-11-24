@@ -23,6 +23,8 @@ pub struct CodemodeOptions {
     pub mode: CodemodeMode,
     pub inline_budget: usize,
     pub docs_path: PathBuf,
+    /// Expose the generation-bound model catalog and non-chat operations to scripts.
+    pub models: bool,
 }
 
 impl Default for CodemodeOptions {
@@ -31,6 +33,7 @@ impl Default for CodemodeOptions {
             mode: CodemodeMode::On,
             inline_budget: DEFAULT_CODEMODE_INLINE_BUDGET,
             docs_path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("codemode.md"),
+            models: false,
         }
     }
 }
@@ -41,10 +44,16 @@ pub(crate) const PROMPT_SNIPPET: &str = "Run JavaScript that calls other tools";
 pub(crate) const PROMPT_GUIDELINE: &str = "Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls.";
 
 fn describe_globals(options: &CodemodeOptions) -> String {
-    format!(
-        "Globals:\n- `text(value)`, `image(dataUrlOrImageBlock)`, `console.log(...)`, and top-level `return` add output; `exit()` ends the script. With several text items, each starts with a `==> text N/M <==` line, and `console` lines follow the other output in one `<console_output>` block. `image()` also saves the image to a temp file and the result names its path.\n- `store(key, value)` and `load(key)` keep JSON values across codemode calls.\n- `ALL_TOOLS`, `await searchTools(query, {{ limit?, namespace? }})`, `await describeTool(name)`, `await describeNamespace(name)`: find unlisted tools, such as MCP tools.\n- `models`: classifiers and image generation. Read {} first.",
-        options.docs_path.to_string_lossy().replace('\\', "/")
-    )
+    let mut description = String::from(
+        "Globals:\n- `text(value)`, `image(dataUrlOrImageBlock)`, `console.log(...)`, and top-level `return` add output; `exit()` ends the script. With several text items, each starts with a `==> text N/M <==` line, and `console` lines follow the other output in one `<console_output>` block. `image()` also saves the image to a temp file and the result names its path.\n- `store(key, value)` and `load(key)` keep JSON values across codemode calls.\n- `ALL_TOOLS`, `await searchTools(query, { limit?, namespace? })`, `await describeTool(name)`, `await describeNamespace(name)`: find unlisted tools, such as MCP tools.",
+    );
+    if options.models {
+        description.push_str(&format!(
+            "\n- `models`: classifiers and image generation. Read {} first.",
+            options.docs_path.to_string_lossy().replace('\\', "/")
+        ));
+    }
+    description
 }
 
 struct CatalogEntry {
@@ -85,8 +94,18 @@ pub(crate) fn description(tools: &[ToolInfo], options: &CodemodeOptions) -> Stri
     if groups.is_empty() {
         return sections.join("\n\n");
     }
+    let collator =
+        icu_collator::Collator::try_new(icu_locale::locale!("en-US").into(), Default::default())
+            .expect("compiled English collation data");
+    let mut groups = groups.into_iter().collect::<Vec<_>>();
+    groups.sort_by(|(left, _), (right, _)| match (left, right) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (Some(left), Some(right)) => collator.compare(left, right),
+    });
     let shown = select_catalog(
-        groups.values().map(|(_, entries)| entries.as_slice()),
+        groups.iter().map(|(_, (_, entries))| entries.as_slice()),
         options.inline_budget,
     );
     let mut tool_sections = vec!["Nested tools:".to_string()];
@@ -217,6 +236,7 @@ mod tests {
                     name: name.into(),
                     description: Some(format!("{name} tools")),
                     instructions: Some("Namespace instructions".into()),
+                    aliases: Vec::new(),
                 }),
                 ..ToolDiscovery::default()
             },
@@ -257,6 +277,19 @@ mod tests {
         assert!(description.contains("// Path to inspect."));
         assert!(description.contains("- Read the instructions first."));
         assert!(description.contains("Promise<string>"));
+    }
+
+    #[test]
+    fn model_access_is_opt_in_and_namespaces_use_locale_order() {
+        assert!(!description(&[], &CodemodeOptions::default()).contains("`models`"));
+        let options = CodemodeOptions {
+            models: true,
+            inline_budget: 0,
+            ..Default::default()
+        };
+        assert!(description(&[], &options).contains("`models`"));
+        let description = description(&[tool("z", Some("Z")), tool("a", Some("a"))], &options);
+        assert!(description.find("## a").unwrap() < description.find("## Z").unwrap());
     }
 
     #[test]

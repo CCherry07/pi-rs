@@ -135,6 +135,7 @@ impl GenerationComponents<'_> {
                     },
                     inline_budget: config.runtime_settings.codemode.inline_budget,
                     docs_path: crate::prompt::documentation_root().join("docs/codemode.md"),
+                    models: true,
                 };
                 move || ConfiguredCodemodePlugin::new(options.clone())
             })

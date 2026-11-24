@@ -122,6 +122,12 @@ async fn manifest_tool_registers_and_dispatches_through_the_public_tool_interfac
                     }),
                     prompt_snippet: Some("Greet a person".to_string()),
                     prompt_guidelines: vec!["Use the greet tool when asked.".to_string()],
+                    namespace: Some(pi_plugin::ToolNamespace {
+                        name: "greetings".into(),
+                        aliases: vec!["hello-world".into()],
+                        description: None,
+                        instructions: Some("Be polite.".into()),
+                    }),
                     execution_mode: ToolExecutionMode::Sequential,
                 }],
                 commands: Vec::new(),
@@ -139,6 +145,16 @@ async fn manifest_tool_registers_and_dispatches_through_the_public_tool_interfac
     let (_, registries) = RegistriesBuilder::new()
         .register_plugins(generation.plugins())
         .unwrap();
+    let namespace = registries
+        .tool_discovery("greet")
+        .unwrap()
+        .namespace
+        .as_ref()
+        .unwrap();
+    assert_eq!(namespace.name, "greetings");
+    assert_eq!(namespace.aliases, ["hello-world"]);
+    assert_eq!(namespace.description, None);
+    assert_eq!(namespace.instructions.as_deref(), Some("Be polite."));
     let tool = registries.tool("greet").expect("registered JS tool");
     let spec = tool.spec();
     assert_eq!(spec.execution_mode, pi_core::ToolExecutionMode::Sequential);

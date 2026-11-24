@@ -16,6 +16,7 @@ export type {
   PiModelRegistry,
   PiReadonlySessionManager,
   PiToolDefinition,
+  PiToolNamespace,
   PiToolResult,
 } from "./extension-api.js";
 

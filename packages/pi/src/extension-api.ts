@@ -122,6 +122,13 @@ export interface PiToolResult {
   terminate?: boolean;
 }
 
+export interface PiToolNamespace {
+  name: string;
+  aliases?: readonly string[];
+  description?: string;
+  instructions?: string;
+}
+
 export interface PiToolDefinition<TInput = Record<string, unknown>> {
   renderCall?: import("./extension-ui-transcript.js").ToolRenderers["renderCall"];
   renderResult?: import("./extension-ui-transcript.js").ToolRenderers["renderResult"];
@@ -131,6 +138,7 @@ export interface PiToolDefinition<TInput = Record<string, unknown>> {
   parameters: Record<string, unknown>;
   promptSnippet?: string;
   promptGuidelines?: string[];
+  namespace?: PiToolNamespace;
   executionMode?: ToolExecutionMode;
   prepareArguments?(input: TInput, context?: PiExtensionContext): TInput | Promise<TInput>;
   execute(

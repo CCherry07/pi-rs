@@ -26,10 +26,47 @@ pub const AZURE_PROVIDER_ID: &str = "azure-openai-responses";
 const DEFAULT_API_VERSION: &str = "v1";
 
 pub struct AzureOpenAiPlugin {
-    provider: Arc<AzureOpenAiResponsesProvider>,
+    provider: Arc<dyn Provider>,
+    canonical_provider: Arc<dyn Provider>,
 }
 
 impl AzureOpenAiPlugin {
+    pub fn with_credential_source(
+        mut self,
+        source: Arc<dyn pi_provider::CredentialSource>,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Self {
+        self.provider = credential_provider(
+            Arc::clone(&self.provider),
+            Arc::clone(&source),
+            Arc::clone(&transport),
+            AZURE_PROVIDER_ID,
+        );
+        self.canonical_provider = credential_provider(
+            Arc::clone(&self.canonical_provider),
+            source,
+            transport,
+            "azure",
+        );
+        self
+    }
+
+    /// Read the canonical `azure` credential first, retaining the historical
+    /// Rust provider id as a fallback for existing auth stores.
+    pub fn with_credential_sources(
+        self,
+        canonical: Arc<dyn pi_provider::CredentialSource>,
+        compatibility: Arc<dyn pi_provider::CredentialSource>,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Self {
+        self.with_credential_source(
+            Arc::new(FirstCredentialSource {
+                sources: [canonical, compatibility],
+            }),
+            transport,
+        )
+    }
+
     pub fn discover() -> Result<Self, ProviderError> {
         Self::from_stored(None)
     }
@@ -56,10 +93,18 @@ impl AzureOpenAiPlugin {
         transport: Arc<dyn HttpTransport>,
     ) -> Result<Self, ProviderError> {
         let config = AzureOpenAiResponsesConfig::from_environment(api_key)?;
+        let provider = Arc::new(AzureOpenAiResponsesProvider::with_transport(
+            config.clone(),
+            Arc::clone(&transport),
+        )?);
+        let mut canonical = config;
+        canonical.provider_id = "azure".into();
+        let canonical_provider = Arc::new(AzureOpenAiResponsesProvider::with_transport(
+            canonical, transport,
+        )?);
         Ok(Self {
-            provider: Arc::new(AzureOpenAiResponsesProvider::with_transport(
-                config, transport,
-            )?),
+            provider,
+            canonical_provider,
         })
     }
 }
@@ -72,12 +117,7 @@ impl ProviderPlugin for AzureOpenAiPlugin {
 
     fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_plugin::Result<()> {
         context.register_provider(self.provider.clone())?;
-        let mut config = self.provider.config.clone();
-        config.provider_id = "azure".into();
-        context.register_provider(Arc::new(AzureOpenAiResponsesProvider {
-            config,
-            transport: self.provider.transport.clone(),
-        }))?;
+        context.register_provider(self.canonical_provider.clone())?;
         for model in azure_openai_models() {
             let mut canonical = model.clone();
             canonical.provider = "azure".into();
@@ -86,6 +126,61 @@ impl ProviderPlugin for AzureOpenAiPlugin {
         }
         Ok(())
     }
+}
+
+struct FirstCredentialSource {
+    sources: [Arc<dyn pi_provider::CredentialSource>; 2],
+}
+
+#[async_trait]
+impl pi_provider::CredentialSource for FirstCredentialSource {
+    async fn check(
+        &self,
+        signal: &AbortSignal,
+    ) -> Result<Option<pi_provider::ProviderCredential>, ProviderError> {
+        for source in &self.sources {
+            if let Some(credential) = source.check(signal).await? {
+                return Ok(Some(credential));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn resolve(
+        &self,
+        signal: &AbortSignal,
+    ) -> Result<Option<pi_provider::ProviderCredential>, ProviderError> {
+        for source in &self.sources {
+            if let Some(credential) = source.resolve(signal).await? {
+                return Ok(Some(credential));
+            }
+        }
+        Ok(None)
+    }
+}
+
+fn credential_provider(
+    initial: Arc<dyn Provider>,
+    source: Arc<dyn pi_provider::CredentialSource>,
+    transport: Arc<dyn HttpTransport>,
+    provider_id: &'static str,
+) -> Arc<dyn Provider> {
+    Arc::new(pi_provider::CredentialProvider::new(
+        initial,
+        source,
+        move |credential| {
+            let key = credential
+                .map(|credential| credential.secret.trim())
+                .filter(|secret| !secret.is_empty())
+                .map(str::to_owned);
+            let mut config = AzureOpenAiResponsesConfig::from_environment(key)?;
+            config.provider_id = provider_id.into();
+            Ok(Arc::new(AzureOpenAiResponsesProvider::with_transport(
+                config,
+                Arc::clone(&transport),
+            )?))
+        },
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -260,7 +355,9 @@ impl Provider for AzureOpenAiResponsesProvider {
     }
 
     fn availability(&self) -> ProviderAvailability {
-        if self.config.api_key.is_some() && self.config.base_url.is_some() {
+        // Legacy model availability is an authentication check. Endpoint
+        // configuration is validated only when a request is dispatched.
+        if self.config.api_key.is_some() {
             ProviderAvailability::Available
         } else {
             ProviderAvailability::MissingCredentials
@@ -450,15 +547,63 @@ fn map_transport_error(error: TransportError) -> ProviderError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use futures::{StreamExt, stream};
-    use pi_core::{AbortHandle, ModelId, ModelSpec, StreamEvent, ThinkingLevel};
+    use pi_core::{AbortHandle, AnyModelSpec, ModelId, ModelSpec, StreamEvent, ThinkingLevel};
     use pi_plugin::ProviderCallContext;
-    use pi_provider::{HttpResponse, TransportError};
+    use pi_provider::{
+        CredentialKind, CredentialSource, HttpResponse, ProviderCredential, TransportError,
+    };
     use serde_json::Value;
 
     use super::*;
+
+    #[derive(Default)]
+    struct RotatingSource {
+        value: Mutex<Option<ProviderCredential>>,
+        checks: AtomicUsize,
+        resolves: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl CredentialSource for RotatingSource {
+        async fn check(
+            &self,
+            _: &AbortSignal,
+        ) -> Result<Option<ProviderCredential>, ProviderError> {
+            self.checks.fetch_add(1, Ordering::SeqCst);
+            Ok(self.value.lock().unwrap().clone())
+        }
+
+        async fn resolve(
+            &self,
+            _: &AbortSignal,
+        ) -> Result<Option<ProviderCredential>, ProviderError> {
+            self.resolves.fetch_add(1, Ordering::SeqCst);
+            Ok(self.value.lock().unwrap().clone())
+        }
+    }
+
+    #[derive(Default)]
+    struct NoRequestTransport(AtomicUsize);
+
+    #[async_trait]
+    impl HttpTransport for NoRequestTransport {
+        async fn post_json(
+            &self,
+            _: &str,
+            _: &BTreeMap<String, String>,
+            _: &Value,
+            _: AbortSignal,
+        ) -> Result<HttpResponse, TransportError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(TransportError::Request("unexpected request".into()))
+        }
+    }
 
     #[derive(Default)]
     struct Capture {
@@ -493,6 +638,45 @@ mod tests {
                 )])),
             })
         }
+    }
+
+    #[tokio::test]
+    async fn availability_rechecks_azure_credentials_without_requests() {
+        let source = Arc::new(RotatingSource::default());
+        let transport = Arc::new(NoRequestTransport::default());
+        let plugin = AzureOpenAiPlugin::new_with_transport(None, transport.clone())
+            .unwrap()
+            .with_credential_source(source.clone(), transport.clone());
+        let models = vec![AnyModelSpec::Chat(azure_openai_models().remove(0))];
+
+        for (credential, expected) in [
+            (None, 0),
+            (
+                Some(ProviderCredential {
+                    secret: "present".into(),
+                    kind: CredentialKind::ApiKey,
+                    metadata: BTreeMap::new(),
+                }),
+                1,
+            ),
+            (None, 0),
+        ] {
+            *source.value.lock().unwrap() = credential;
+            let (_, signal) = AbortHandle::new();
+            assert_eq!(
+                plugin
+                    .canonical_provider
+                    .filter_available_models(models.clone(), signal)
+                    .await
+                    .unwrap()
+                    .len(),
+                expected
+            );
+        }
+
+        assert_eq!(source.checks.load(Ordering::SeqCst), 3);
+        assert_eq!(source.resolves.load(Ordering::SeqCst), 0);
+        assert_eq!(transport.0.load(Ordering::SeqCst), 0);
     }
 
     #[test]

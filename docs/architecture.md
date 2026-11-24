@@ -1723,16 +1723,18 @@ Rust extends models.json entries with `type: "classifier" | "image"` (omitted me
 while preserving existing chat configuration. The plugin registers these per-type catalogs and
 supports `typesafe-system-one`, `cloudflare-workers-ai-system-one`, `openai-decisions`,
 `llama-cpp-classify` and `openrouter-images`. Its optional built-in specialized catalog contains
-selected TypeSafe/OpenAI/OpenRouter entries. Coding enables that catalog and injects request-time
-`CredentialSource` adapters; environment or stored API keys can enable the entries without changing
-chat selection. OpenAI Decisions rejects OAuth credentials. Local llama.cpp can run without a key.
-Cloudflare requires an explicit account route; it has no default specialized entries.
-Provider errors preserve billed usage even if response parsing fails. The specialized paths reuse
+all 46 classifier and 63 image records from the pinned legacy revision;
+`scripts/sync-specialized-model-catalog.py --check` verifies the checked-in offline fixture. Coding
+enables it and injects provider-owned `CredentialSource` adapters, including sources for custom
+provider IDs, without changing chat selection. Supported input limits, costs, headers, classifier
+context/compat and image output modalities survive typed registration. OpenAI Decisions rejects
+OAuth-only credentials. Local llama.cpp can run without a key. Cloudflare account placeholders
+resolve per request from stored credential environment metadata or ambient configuration, with
+path-segment encoding; scripts cannot override canonical request routes.
+Provider errors preserve billed usage even if response parsing fails. The specialized paths retain
 Rust's configured HTTP retry policy, rather than Pi's classifier-specific retry defaults and
-Decisions 504 exclusion. Availability remains a credential-configuration snapshot instead of Pi's
-async credential resolution on queries. Classifier maps retain Rust's deterministic key ordering,
-including llama.cpp label assignment, rather than JS insertion order. These are deliberate Rust
-configuration/transport/catalog differences; the script methods and provider payloads follow Pi.
+Decisions 504 exclusion. Classifier maps, including llama.cpp label assignment, preserve insertion
+order. The extended file format and shared transport policy remain intentional Rust differences.
 
 Radius is intentionally not projected through this static routing path. `oauth: "radius"` requires
 one provider-owned OAuth, persisted remote-catalog, and `pi-messages` lifecycle; until that deep
@@ -2175,9 +2177,11 @@ Asynchronous catalog registration remains future work. The script executor is de
 `plugins/features/pi-plugin-codemode` provides the independent `CodemodePlugin`. The coding product
 registers it through a generation factory as a default builtin, and explicit `defaultTools` selections
 can omit it; MCP's configured auto-activation may append it at session startup as described above.
-The tool accepts `{ "code": "..." }`; scripts run as an async JavaScript function body
-with top-level `await` and `return`. Both standalone and Node delivery adapters use the same Rust
-host and embedded QuickJS engine. General JS/TS extensions still use the separate Node host.
+The tool accepts `{ "code": "..." }` (additional fields are ignored), or raw JavaScript through
+its provider grammar. Scripts run in a globally evaluated async arrow with `tools` and `console`
+parameters, top-level `await`/`return`, and ordinary non-strict JavaScript unless the script opts
+into strict mode. Both standalone and Node delivery adapters use the same Rust host and embedded
+QuickJS engine. General JS/TS extensions still use the separate Node host.
 
 `pi-plugin::ToolContext` exposes a scoped nested catalog and `execute_tool` capability. The Agent
 scheduler supplies active direct tools and visible deferred tools from the captured immutable
@@ -2193,16 +2197,23 @@ parallel tools and gives sequential tools exclusive execution. Catalog and assis
 shared within the batch so ordinary tools do not each clone the full schema catalog.
 
 Nested calls emit parent tool updates, without adding standalone tool-result messages to history.
-Codemode retains bounded call summaries in the outer result's details and sums nested usage there.
-Only explicit script output enters model-visible content. The new `Tool::structured_output` method
+Codemode retains call summaries in the outer result's details and sums nested usage there. Unlike
+Pi's JavaScript Session, which accounts for nested tools separately and returns only model usage,
+the Rust host charges nested work exactly once through the outer result or interruption ledger;
+it does not add standalone nested transcript messages. Only explicit script output enters
+model-visible content. The `Tool::structured_output` method
 opts into a structured script result after hooks; the default joins text content. MCP opts in with
 the complete `CallToolResult` minus top-level `_meta`, including remote error objects. Transport,
 validation and blocked-call failures reject the script promise. Resource tools opt in with their
 listing/read payloads. This preserves existing private details and the Pi v4 session wire format.
 
 The feature owns `tools`, `ALL_TOOLS`, `searchTools`, `describeTool`, `describeNamespace`,
-`models`, `text`, `image`, `console`, `exit`, `store` and `load`. Search reuses the generic BM25 implementation;
-namespace descriptions expose negotiated instructions. Successful store changes append ordinary
+`text`, `image`, `console`, `exit`, `store` and `load`. Coding enables the optional `models` facade;
+the plain plugin leaves it absent. Tool identifiers use first-registration-wins collisions, and
+namespace lookup normalizes names and registered aliases. Search reuses the generic BM25
+implementation; namespace descriptions expose negotiated instructions. The frozen JavaScript
+prelude owns observable helper semantics and protects shared intrinsics from script mutation.
+Successful store changes append ordinary
 `codemode-store` custom entries (`set` and `delete`), reconstructed only from the selected branch.
 Failed or cancelled scripts keep partial output and do not commit their store changes. Reload
 rebuilds executable state; a fresh VM is used for every script.
@@ -2214,7 +2225,26 @@ selectors and session model values remain unchanged. `ClassifierModelSpec`, `Ima
 frozen in the same `ModelRuntime`. Typed catalog replacements validate before publication; there
 is no additional plugin lifecycle. Provider implementations may support `classify` and
 `generate_images` independently of chat streaming. Default implementations report unsupported
-operations. Credentials and headers remain inside provider adapters.
+operations. Credentials and headers remain inside provider adapters. Typed catalog queries and
+nested-tool inventories retain registration order; existing sorted chat/catalog presentation APIs
+remain sorted. Classifier questions, choice criteria, answers and probability maps preserve insertion
+order through typed native interfaces. These public-layout changes require the existing exact-build
+native-plugin fingerprint check and rebuilding native plugins. Optional tool namespace metadata,
+including aliases, crosses the JavaScript extension manifest without changing tool exposure policy.
+
+The model facade delegates availability and inference to the native host.
+`ModelRuntime::query_available_models_of_type` concurrently checks each selected provider's complete
+catalog through `Provider::filter_available_models`, then projects approved identities back onto
+canonical registered metadata in registration order. Queries are cancellable and never mutate the
+immutable generation catalog. Synchronous availability APIs remain generation-time snapshots for
+existing selection callers. Coding credential checks reread local configuration without OAuth
+refresh, auth locks, credential-command execution or remote requests; refresh-capable custom
+`CredentialSource` implementations must override the read-only `check` seam. Credential addition,
+removal and account-filter changes take effect on the next query. Copilot availability filters no
+longer destructively narrow registration; OpenAI Decisions excludes OAuth-only credentials.
+Typed contexts preserve supported fields, including image text signatures, but reject malformed
+known metadata and do not forward arbitrary JavaScript properties. Catalog fixtures and fake-auth/
+transport regressions supplement the executable codemode facade oracle; none require real credentials.
 
 Codemode's `models.classify` and `models.generateImages` validate structured input, resolve only
 the supplied provider/id against canonical host metadata, and call those provider capabilities.
@@ -2227,21 +2257,46 @@ invocation-scoped `ToolContext::record_usage` ledger supplies completed usage wh
 replaces the parent with an abort result, without duplicating normal accounting. Generated image
 blocks require explicit `image(block)` output; otherwise the script result includes a reminder.
 
-The native QuickJS runtime runs in a blocking worker with heap/stack limits and an interrupt
-handler for cancellation and deadlines. It exposes no Node, filesystem, network, timer or module
-loader globals. A global two-worker admission limit and bounded source, output, call count,
-arguments, replies and store constrain host allocations as well as VM memory. Calls unawaited at
-script completion are cancelled. This is an embedded engine, not OS process or WASM isolation;
-interrupt-unaware native engine operations can delay worker cleanup. Worker permits remain held
-until cleanup finishes. The default script timeout is 60 seconds and may be overridden by a
-first-line `// @options:` directive.
+The native QuickJS runtime uses a 256 MiB heap, a 1 MiB engine stack guard and an explicit 8 MiB
+OS worker-thread stack, with an interrupt handler for cancellation and deadlines. The existing
+blocking task joins that native thread; the worker permit stays in the thread until VM cleanup,
+so cancellation cannot detach it or admit replacement work prematurely. It exposes no Node, filesystem, network,
+timer or module loader globals. The process-wide worker limit defaults to two and reads
+`PI_CODEMODE_MAX_WORKERS` dynamically on admission/release; waiters are FIFO and cancellable.
+Admission waits at most 60 seconds, or the script's explicit deadline when shorter. Scripts have
+no default execution deadline; an explicit first-line `timeout_ms` includes admission and nested
+calls. Worker permits remain held until native cleanup finishes. Unawaited calls are started,
+then cancelled when the script settles, retaining the existing result-hook cleanup boundary.
 
-Deliberate first-version differences from current Pi are native QuickJS rather than QuickJS WASM,
-one nested level, fixed resource caps, JSON tool input rather than provider raw-source grammar,
-schema descriptions rather than complete TypeScript declarations, and bounded output without a
-full-output temporary file. Token budgets use an approximate UTF-8 byte allowance. Codemode
-loadout modes are not exposed.
-These limits are documented by the feature; generic runtimes contain no codemode/MCP name policy.
+The previous Rust-only source, call-count, argument, reply and catalog quotas are removed.
+The prelude enforces the oracle's 16 Mi UTF-16 output-character and 100,000-item production limits,
+plus 256 Ki JSON characters per stored value and 1 Mi total including keys. Output formatting
+happens after settlement: adjacent text joins, console output follows text/images, failures include
+script stacks and call summaries, and headers report wall time. The token budget counts UTF-16
+units at four per estimated token, preserves text head/tail and writes complete formatted text to
+a temporary file exposed through `details.fullOutputPath`. Images do not consume the text budget;
+image signatures determine MIME type and saved-path labels are added after truncation. On/Only
+loadout modes and TypeScript declarations share the same rendering policy as discovery.
+
+The executable oracle is fixed at legacy Pi `0ab23c37b074252d04e31f5cfb99491f0613fb80`, covering
+coding-agent codemode and `packages/codemode`. Native session-store persistence, disk reopen/resume
+and selected-branch replay are tested separately; the standalone JavaScript durable sandbox API
+is not reproduced. Native QuickJS rather
+than QuickJS-WASM remains a deliberate architecture difference: engine versions, intrinsics,
+engine-generated diagnostics/stack formatting and host timezone are not promised identical.
+Interrupt-unaware native engine operations may delay cleanup, and the heap guard is not an RSS
+or OS-isolation boundary. Rust JSON bridge values require Unicode scalar strings. Tool arguments,
+structured replies and store values support 512 object/array levels (root container depth one);
+shallow bridge wrappers get independent headroom. `pi-core::json` checks structural depth before
+disabling serde's default recursion guard, then uses stack-growing decoding/encoding. Session
+JSONL decode, validation, encode and snapshots opt into a separate 1024-level document bound,
+retaining the v4 wire format and branch/lazy-persistence semantics. Other JSON boundaries retain
+serde's default guard. Over-limit arguments/store writes and bridge decode failures are terminal
+sandbox outcomes, including after the prelude reports done. Serialized object/array return output
+avoids a redundant host decode. Exact V8 diagnostic wording and lossless lone-surrogate transport
+are accepted non-goals; invalid `@options` JSON keeps the Rust parser's diagnostic suffix. These
+representation/diagnostic differences are explicit, not an engine-parity claim.
+Generic runtimes contain no codemode/MCP name policy.
 
 ## Core contracts
 

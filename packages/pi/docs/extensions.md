@@ -12,7 +12,9 @@ generation. Within one extension, registering the same tool or command name agai
 extension's earlier definition. Across extensions, the first tool name wins. Repeated command names
 retain their logical name and receive ordered invocation names such as `name:1` and `name:2`. Rust
 continues to reject ordinary registry duplicates; only the JavaScript adapter performs this
-compatibility normalization.
+compatibility normalization. Registered tools may supply `namespace: { name, aliases?,
+description?, instructions? }`. The Node adapter preserves this metadata for native discovery
+and codemode namespace lookup; it does not change the tool's exposure policy.
 
 `pi.on(...)` returns an idempotent unsubscribe function. Every hook dispatch starts from a
 generation-local callback snapshot in extension load order, then subscription order within each

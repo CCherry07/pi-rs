@@ -141,6 +141,13 @@ const hookManifestSchema = z.strictObject({
   callbackId: z.string(),
 })
 
+export const toolNamespaceSchema = z.strictObject({
+  name: z.string(),
+  aliases: z.array(z.string()).optional(),
+  description: z.string().optional(),
+  instructions: z.string().optional(),
+})
+
 const toolManifestSchema = z.strictObject({
   callbackId: z.string(),
   prepareCallbackId: z.string().optional(),
@@ -150,6 +157,7 @@ const toolManifestSchema = z.strictObject({
   parameters: jsonObjectSchema,
   promptSnippet: z.string().optional(),
   promptGuidelines: z.array(z.string()),
+  namespace: toolNamespaceSchema.optional(),
   executionMode: toolExecutionModeSchema,
 })
 

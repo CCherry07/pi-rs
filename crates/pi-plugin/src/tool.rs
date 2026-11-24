@@ -18,10 +18,15 @@ pub enum ToolExposure {
     Deferred,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ToolNamespace {
     pub name: String,
+    /// Alternative names used by discovery, compared as script identifiers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
 }
 
@@ -405,6 +410,59 @@ mod tests {
         ) -> Result<ToolResult, ToolError> {
             unreachable!("capability queries must not execute tools")
         }
+    }
+
+    struct NamedTool(&'static str);
+    #[async_trait]
+    impl Tool for NamedTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: self.0.into(),
+                ..ReachingTool.spec()
+            }
+        }
+        async fn execute(
+            &self,
+            _: ToolContext,
+            _: ToolCallId,
+            _: Value,
+            _: ToolUpdateSink,
+        ) -> Result<ToolResult, ToolError> {
+            unreachable!("catalog query")
+        }
+    }
+
+    #[test]
+    fn nested_catalog_keeps_registration_order_through_restrictions() {
+        let mut builder = crate::RegistriesBuilder::new();
+        for name in ["foo_bar", "foo-bar", "other"] {
+            builder
+                .register_tool("tools".into(), Arc::new(NamedTool(name)))
+                .unwrap();
+        }
+        let frozen = builder.freeze();
+        let active = vec!["foo-bar".into(), "foo_bar".into()];
+        for view in [
+            frozen.restrict_tools(&active).unwrap(),
+            frozen.with_allowed_tools(&active),
+            frozen.scope_tool_execution(&active, "test"),
+        ] {
+            assert_eq!(
+                view.nested_tools(&active)
+                    .iter()
+                    .map(|tool| tool.spec.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["foo_bar", "foo-bar"]
+            );
+        }
+        assert_eq!(
+            frozen
+                .all_tool_specs()
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            ["foo-bar", "foo_bar", "other"]
+        );
     }
 
     #[test]

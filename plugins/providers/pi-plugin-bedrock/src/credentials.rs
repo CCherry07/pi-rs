@@ -17,6 +17,7 @@ const CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 pub struct AwsCredentialSettings {
     pub values: BTreeMap<String, String>,
     pub prefer_profile: bool,
+    pub allow_default_files: bool,
 }
 
 impl AwsCredentialSettings {
@@ -36,6 +37,11 @@ impl AwsCredentialSettings {
             "AWS_CONTAINER_CREDENTIALS_FULL_URI",
             "AWS_WEB_IDENTITY_TOKEN_FILE",
             "AWS_ROLE_ARN",
+            "AWS_REGION",
+            "AWS_DEFAULT_REGION",
+            "AWS_BEARER_TOKEN_BEDROCK",
+            "AWS_BEDROCK_BASE_URL",
+            "AWS_BEDROCK_SKIP_AUTH",
         ] {
             if let Ok(value) = std::env::var(name)
                 && !value.trim().is_empty()
@@ -43,14 +49,26 @@ impl AwsCredentialSettings {
                 values.insert(name.to_string(), value);
             }
         }
-        values.extend(
-            overrides
-                .into_iter()
-                .filter(|(_, value)| !value.trim().is_empty()),
-        );
+        values.extend(overrides);
+        Self::from_values_with_defaults(values, prefer_profile, true)
+    }
+
+    pub fn from_values(values: BTreeMap<String, String>, prefer_profile: bool) -> Self {
+        Self::from_values_with_defaults(values, prefer_profile, false)
+    }
+
+    pub fn from_values_with_defaults(
+        values: BTreeMap<String, String>,
+        prefer_profile: bool,
+        allow_default_files: bool,
+    ) -> Self {
         Self {
-            values,
+            values: values
+                .into_iter()
+                .filter(|(_, value)| !value.trim().is_empty())
+                .collect(),
             prefer_profile,
+            allow_default_files,
         }
     }
 
@@ -73,10 +91,11 @@ impl AwsCredentialSettings {
     }
 
     pub fn profile_region(&self) -> Result<Option<String>, ProviderError> {
-        let path = self
-            .get("AWS_CONFIG_FILE")
-            .map(PathBuf::from)
-            .or_else(|| home_dir().map(|home| home.join(".aws/config")));
+        let path = self.get("AWS_CONFIG_FILE").map(PathBuf::from).or_else(|| {
+            self.allow_default_files
+                .then(|| home_dir().map(|home| home.join(".aws/config")))
+                .flatten()
+        });
         let Some(path) = path else {
             return Ok(None);
         };
@@ -105,7 +124,11 @@ impl AwsCredentialSettings {
     fn shared_credentials_path(&self) -> Option<PathBuf> {
         self.get("AWS_SHARED_CREDENTIALS_FILE")
             .map(PathBuf::from)
-            .or_else(|| home_dir().map(|home| home.join(".aws/credentials")))
+            .or_else(|| {
+                self.allow_default_files
+                    .then(|| home_dir().map(|home| home.join(".aws/credentials")))
+                    .flatten()
+            })
     }
 }
 

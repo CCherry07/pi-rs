@@ -3,6 +3,9 @@ use std::sync::Arc;
 
 use crate::{ModelId, ModelSpec, PluginId, Provider, ProviderAvailability, ProviderId};
 
+#[cfg(test)]
+mod tests;
+
 type ModelKey = (ProviderId, ModelId);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +20,9 @@ pub struct ModelRuntime {
     providers: HashMap<ProviderId, (PluginId, Arc<dyn Provider>)>,
     models: HashMap<ModelKey, (PluginId, ModelSpec)>,
     typed_models: HashMap<(crate::ModelType, ProviderId, ModelId), (PluginId, crate::AnyModelSpec)>,
+    provider_order: Vec<ProviderId>,
+    model_order: Vec<ModelKey>,
+    typed_model_order: Vec<(crate::ModelType, ProviderId, ModelId)>,
 }
 
 impl ModelRuntime {
@@ -27,11 +33,17 @@ impl ModelRuntime {
             (crate::ModelType, ProviderId, ModelId),
             (PluginId, crate::AnyModelSpec),
         >,
+        provider_order: Vec<ProviderId>,
+        model_order: Vec<ModelKey>,
+        typed_model_order: Vec<(crate::ModelType, ProviderId, ModelId)>,
     ) -> Self {
         Self {
             providers,
             models,
             typed_models,
+            provider_order,
+            model_order,
+            typed_model_order,
         }
     }
 
@@ -108,25 +120,31 @@ impl ModelRuntime {
         model_type: crate::ModelType,
         provider: Option<&ProviderId>,
     ) -> Vec<crate::AnyModelSpec> {
-        let mut models = if model_type == crate::ModelType::Chat {
-            self.models()
-                .into_iter()
-                .map(crate::AnyModelSpec::Chat)
-                .collect::<Vec<_>>()
-        } else {
-            self.typed_models
-                .values()
-                .filter(|(_, model)| model.model_type() == model_type)
-                .map(|(_, model)| model.clone())
-                .collect()
-        };
-        models.retain(|model| provider.is_none_or(|provider| model.provider() == provider));
-        models.sort_by(|left, right| {
-            left.provider()
-                .cmp(right.provider())
-                .then_with(|| left.id().cmp(right.id()))
-        });
-        models
+        self.provider_order
+            .iter()
+            .filter(|candidate| provider.is_none_or(|provider| *candidate == provider))
+            .flat_map(|provider| {
+                if model_type == crate::ModelType::Chat {
+                    self.model_order
+                        .iter()
+                        .filter(|(candidate, _)| candidate == provider)
+                        .filter_map(|key| {
+                            self.models
+                                .get(key)
+                                .map(|(_, model)| crate::AnyModelSpec::Chat(model.clone()))
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    self.typed_model_order
+                        .iter()
+                        .filter(|(kind, candidate, _)| *kind == model_type && candidate == provider)
+                        .filter_map(|key| {
+                            self.typed_models.get(key).map(|(_, model)| model.clone())
+                        })
+                        .collect()
+                }
+            })
+            .collect()
     }
 
     pub fn available_models_of_type(
@@ -144,6 +162,79 @@ impl ModelRuntime {
             .collect()
     }
 
+    /// Authenticates providers once per query, then applies their filters to the
+    /// canonical frozen catalog. Provider checks run concurrently, in registration
+    /// order; a cancelled query drops every outstanding check.
+    pub async fn query_available_models_of_type(
+        &self,
+        model_type: crate::ModelType,
+        provider: Option<&ProviderId>,
+        signal: crate::AbortSignal,
+    ) -> Result<Vec<crate::AnyModelSpec>, crate::ProviderError> {
+        if signal.is_aborted() {
+            return Err(crate::ProviderError::Aborted);
+        }
+        let checks = self
+            .provider_order
+            .iter()
+            .filter(|id| provider.is_none_or(|selected| *id == selected))
+            .filter_map(|id| {
+                self.providers
+                    .get(id)
+                    .map(|(_, implementation)| (id, implementation))
+            })
+            .map(|(id, implementation)| {
+                let signal = signal.clone();
+                async move {
+                    // Authentication precedes the requested type filter, as in Pi.
+                    let models = [
+                        crate::ModelType::Chat,
+                        crate::ModelType::Classifier,
+                        crate::ModelType::Image,
+                    ]
+                    .into_iter()
+                    .flat_map(|kind| self.models_of_type(kind, Some(id)))
+                    .collect();
+                    let available = implementation
+                        .filter_available_models(models, signal)
+                        .await?;
+                    let identities = available
+                        .into_iter()
+                        .map(|model| {
+                            (
+                                model.model_type(),
+                                model.provider().clone(),
+                                model.id().clone(),
+                            )
+                        })
+                        .collect::<std::collections::HashSet<_>>();
+                    Ok::<_, crate::ProviderError>(
+                        self.models_of_type(model_type, Some(id))
+                            .into_iter()
+                            .filter(|model| {
+                                identities.contains(&(
+                                    model_type,
+                                    model.provider().clone(),
+                                    model.id().clone(),
+                                ))
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                }
+            });
+        match futures::future::select(
+            Box::pin(signal.wait()),
+            Box::pin(futures::future::try_join_all(checks)),
+        )
+        .await
+        {
+            futures::future::Either::Left(_) => Err(crate::ProviderError::Aborted),
+            futures::future::Either::Right((result, _)) => {
+                Ok(result?.into_iter().flatten().collect())
+            }
+        }
+    }
+
     pub fn resolve_available_reference(
         &self,
         current_provider: &ProviderId,
@@ -156,7 +247,11 @@ impl ModelRuntime {
     fn model_is_available(&self, model: &ModelSpec) -> bool {
         self.providers
             .get(&model.provider)
-            .is_some_and(|(_, provider)| provider.availability().is_available())
+            .is_some_and(|(_, provider)| {
+                provider
+                    .model_availability(&crate::AnyModelSpec::Chat(model.clone()))
+                    .is_available()
+            })
     }
 
     pub fn provider_statuses(&self) -> Vec<ProviderStatus> {

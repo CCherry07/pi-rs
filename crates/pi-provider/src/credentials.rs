@@ -19,6 +19,8 @@ pub enum CredentialKind {
 /// Secret-bearing request data. Deliberately does not implement Debug.
 #[derive(Clone, PartialEq)]
 pub struct ProviderCredential {
+    /// Empty for environment-only ambient credentials. API-key adapters must
+    /// treat an empty secret as absent; ambient adapters can use `metadata.env`.
     pub secret: String,
     pub kind: CredentialKind,
     pub metadata: BTreeMap<String, serde_json::Value>,
@@ -26,6 +28,16 @@ pub struct ProviderCredential {
 
 #[async_trait]
 pub trait CredentialSource: Send + Sync {
+    /// Read authentication state for an availability query. Sources with OAuth
+    /// refresh or other request-only work must override this read-only path.
+    /// Plain API-key sources may reuse their resolution implementation.
+    async fn check(
+        &self,
+        signal: &AbortSignal,
+    ) -> Result<Option<ProviderCredential>, ProviderError> {
+        self.resolve(signal).await
+    }
+
     async fn resolve(
         &self,
         signal: &AbortSignal,
@@ -74,6 +86,21 @@ impl Provider for CredentialProvider {
     fn availability(&self) -> ProviderAvailability {
         self.initial.availability()
     }
+    fn model_availability(&self, model: &pi_core::AnyModelSpec) -> ProviderAvailability {
+        self.initial.model_availability(model)
+    }
+
+    async fn filter_available_models(
+        &self,
+        models: Vec<pi_core::AnyModelSpec>,
+        signal: AbortSignal,
+    ) -> Result<Vec<pi_core::AnyModelSpec>, ProviderError> {
+        let credential = self.source.check(&signal).await?;
+        // Do not replace the live connection cache during a read-only query.
+        let provider = (self.factory)(credential.as_ref())?;
+        provider.filter_available_models(models, signal).await
+    }
+
     async fn stream(
         &self,
         request: ProviderRequest,
@@ -114,14 +141,26 @@ mod tests {
     use pi_core::{AbortHandle, ModelId, ThinkingLevel};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    struct Source(Arc<Mutex<Option<ProviderCredential>>>);
+    struct Source {
+        credential: Arc<Mutex<Option<ProviderCredential>>>,
+        checks: AtomicUsize,
+        resolutions: AtomicUsize,
+    }
     #[async_trait]
     impl CredentialSource for Source {
+        async fn check(
+            &self,
+            _: &AbortSignal,
+        ) -> Result<Option<ProviderCredential>, ProviderError> {
+            self.checks.fetch_add(1, Ordering::SeqCst);
+            Ok(self.credential.lock().unwrap().clone())
+        }
         async fn resolve(
             &self,
             _: &AbortSignal,
         ) -> Result<Option<ProviderCredential>, ProviderError> {
-            Ok(self.0.lock().unwrap().clone())
+            self.resolutions.fetch_add(1, Ordering::SeqCst);
+            Ok(self.credential.lock().unwrap().clone())
         }
     }
     type Observations = Arc<Mutex<Vec<(String, usize)>>>;
@@ -158,6 +197,11 @@ mod tests {
             })
         };
         let source = Arc::new(Mutex::new(credential("old")));
+        let resolver = Arc::new(Source {
+            credential: source.clone(),
+            checks: AtomicUsize::new(0),
+            resolutions: AtomicUsize::new(0),
+        });
         let observations: Observations = Arc::default();
         let output = observations.clone();
         let initial = Arc::new(Connection {
@@ -165,17 +209,13 @@ mod tests {
             requests: AtomicUsize::new(0),
             observations: observations.clone(),
         });
-        let provider = CredentialProvider::new(
-            initial,
-            Arc::new(Source(source.clone())),
-            move |credential| {
-                Ok(Arc::new(Connection {
-                    key: credential.unwrap().secret.clone(),
-                    requests: AtomicUsize::new(0),
-                    observations: output.clone(),
-                }))
-            },
-        );
+        let provider = CredentialProvider::new(initial, resolver.clone(), move |credential| {
+            Ok(Arc::new(Connection {
+                key: credential.unwrap().secret.clone(),
+                requests: AtomicUsize::new(0),
+                observations: output.clone(),
+            }))
+        });
         for key in ["old", "old", "new"] {
             *source.lock().unwrap() = credential(key);
             let (_, signal) = AbortHandle::new();
@@ -201,7 +241,24 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            // A read-only query may build a temporary adapter but must not reset
+            // the request connection's session-local state or refresh tokens.
+            assert_eq!(
+                provider
+                    .filter_available_models(
+                        vec![pi_core::AnyModelSpec::Chat(pi_core::ModelSpec::new(
+                            "test", "model", "Model", "test"
+                        ))],
+                        AbortHandle::new().1,
+                    )
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
         }
+        assert_eq!(resolver.checks.load(Ordering::SeqCst), 3);
+        assert_eq!(resolver.resolutions.load(Ordering::SeqCst), 3);
         assert_eq!(
             *observations.lock().unwrap(),
             vec![("old".into(), 1), ("old".into(), 2), ("new".into(), 1)]

@@ -30,6 +30,7 @@ impl RegistriesBuilder {
                 model.id()
             )));
         }
+        self.typed_model_order.push(key.clone());
         self.typed_models.insert(key, (owner, model));
         Ok(())
     }
@@ -46,14 +47,11 @@ impl RegistriesBuilder {
                 .map(AnyModelSpec::Chat)
                 .collect();
         }
-        let mut models = self
-            .typed_models
+        self.typed_model_order
             .iter()
-            .filter(|((kind, candidate, _), _)| *kind == model_type && candidate == provider)
-            .map(|(_, (_, model))| model.clone())
-            .collect::<Vec<_>>();
-        models.sort_by(|left, right| left.id().cmp(right.id()));
-        models
+            .filter(|(kind, candidate, _)| *kind == model_type && candidate == provider)
+            .filter_map(|key| self.typed_models.get(key).map(|(_, model)| model.clone()))
+            .collect()
     }
 
     pub(crate) fn replace_provider_models_of_type(
@@ -104,11 +102,12 @@ impl RegistriesBuilder {
         }
         self.typed_models
             .retain(|(kind, candidate, _), _| *kind != model_type || candidate != &provider);
+        self.typed_model_order
+            .retain(|(kind, candidate, _)| *kind != model_type || candidate != &provider);
         for model in models {
-            self.typed_models.insert(
-                (model_type, provider.clone(), model.id().clone()),
-                (owner.clone(), model),
-            );
+            let key = (model_type, provider.clone(), model.id().clone());
+            self.typed_model_order.push(key.clone());
+            self.typed_models.insert(key, (owner.clone(), model));
         }
         Ok(())
     }
@@ -218,6 +217,47 @@ mod tests {
     }
 
     #[test]
+    fn typed_queries_preserve_catalog_order_without_changing_sorted_chat_apis() {
+        let mut builder = builder();
+        for id in ["z", "a"] {
+            builder
+                .register_model("models".into(), ModelSpec::new("catalog", id, id, "chat"))
+                .unwrap();
+            builder
+                .register_model_of_type("models".into(), classifier(id))
+                .unwrap();
+        }
+        let frozen = builder.freeze();
+        let runtime = frozen.model_runtime();
+        for kind in [ModelType::Chat, ModelType::Classifier] {
+            assert_eq!(
+                runtime
+                    .models_of_type(kind, None)
+                    .iter()
+                    .map(|model| model.id().as_str())
+                    .collect::<Vec<_>>(),
+                ["z", "a"]
+            );
+            assert_eq!(
+                runtime
+                    .available_models_of_type(kind, None)
+                    .iter()
+                    .map(|model| model.id().as_str())
+                    .collect::<Vec<_>>(),
+                ["z", "a"]
+            );
+        }
+        assert_eq!(
+            runtime
+                .models()
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "z"]
+        );
+    }
+
+    #[test]
     fn typed_registration_requires_provider_and_unique_per_type_identity() {
         let owner = PluginId::new("models");
         let mut missing = RegistriesBuilder::new();
@@ -276,7 +316,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             builder.models_for_provider_of_type(ModelType::Classifier, &provider),
-            vec![classifier("a"), classifier("b")]
+            vec![classifier("b"), classifier("a")]
         );
         assert_eq!(
             builder.models_for_provider_of_type(ModelType::Image, &provider),

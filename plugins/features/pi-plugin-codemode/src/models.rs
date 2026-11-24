@@ -88,6 +88,7 @@ impl ModelRequest {
         context: &ToolContext,
         operation: ModelOperation,
         arguments: &Value,
+        docs_path: &std::path::Path,
     ) -> Result<Self, ToolError> {
         let args = arguments
             .as_array()
@@ -95,34 +96,69 @@ impl ModelRequest {
         match operation {
             ModelOperation::List | ModelOperation::Available => Ok(Self::List {
                 kind: model_type(args.first())?,
-                provider: optional_provider(args.get(1))?,
+                provider: optional_provider(args.get(1))?.filter(|provider| {
+                    !matches!(operation, ModelOperation::Available) || !provider.as_str().is_empty()
+                }),
                 available: matches!(operation, ModelOperation::Available),
             }),
-            ModelOperation::Find => Ok(Self::Find {
-                kind: model_type(args.first())?,
-                provider: required_string(args.get(1), "provider")?.into(),
-                model_id: required_string(args.get(2), "model ID")?.into(),
-            }),
+            ModelOperation::Find => {
+                let (Some(provider), Some(id)) = (
+                    args.get(1).and_then(Value::as_str),
+                    args.get(2).and_then(Value::as_str),
+                ) else {
+                    return Err(invalid(format!(
+                        "models.getModelOfType(type, provider, id) expects three strings, got ({}). The provider and the id are separate arguments, for example models.getModelOfType(\"classifier\", \"typesafe\", \"jev-latest\").",
+                        args.iter()
+                            .map(|value| describe_value(Some(value)))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )));
+                };
+                Ok(Self::Find {
+                    kind: model_type(args.first())?,
+                    provider: provider.into(),
+                    model_id: id.into(),
+                })
+            }
             ModelOperation::Classify | ModelOperation::Images => {
-                let model = args
-                    .first()
-                    .ok_or_else(|| invalid("a model with provider and id is required"))?;
-                let provider =
-                    ProviderId::new(required_string(model.get("provider"), "model.provider")?);
-                let model_id = ModelId::new(required_string(model.get("id"), "model.id")?);
+                let model = args.first();
                 let kind = if matches!(operation, ModelOperation::Classify) {
                     ModelType::Classifier
                 } else {
                     ModelType::Image
                 };
+                let hint = format!(
+                    "List the {} models you can use with models.getAvailableOfType(\"{}\").",
+                    kind_name(kind),
+                    kind_name(kind)
+                );
+                let (Some(provider), Some(id)) = (
+                    model
+                        .and_then(|model| model.get("provider"))
+                        .and_then(Value::as_str),
+                    model
+                        .and_then(|model| model.get("id"))
+                        .and_then(Value::as_str),
+                ) else {
+                    let undefined_hint = if model.is_none_or(Value::is_null) {
+                        " models.getModelOfType() returns undefined for an unknown provider or id."
+                    } else {
+                        ""
+                    };
+                    return Err(invalid(format!(
+                        "models.{}() expects {} model as its first argument, got {}.{undefined_hint} {hint}",
+                        operation.name(),
+                        with_article(kind),
+                        describe_value(model)
+                    )));
+                };
+                let provider = ProviderId::new(provider);
+                let model_id = ModelId::new(id);
                 // Validate against the frozen catalogue. Extra fields on the
                 // supplied object are deliberately ignored, as in Pi.
-                if context
-                    .models
-                    .model_of_type(kind, &provider, &model_id)?
-                    .is_none()
-                {
-                    for other in [ModelType::Chat, ModelType::Classifier, ModelType::Image] {
+                let resolved = context.models.model_of_type(kind, &provider, &model_id)?;
+                let Some(resolved) = resolved else {
+                    for other in [ModelType::Chat, ModelType::Image, ModelType::Classifier] {
                         if other != kind
                             && context
                                 .models
@@ -130,50 +166,31 @@ impl ModelRequest {
                                 .is_some()
                         {
                             return Err(invalid(format!(
-                                "{provider}/{model_id} is a {} model; models.{} requires a {} model",
-                                kind_name(other),
-                                operation.name(),
-                                kind_name(kind)
+                                "\"{provider}/{model_id}\" is {} model, not {} model. {hint}",
+                                with_article(other),
+                                with_article(kind)
                             )));
                         }
                     }
                     return Err(invalid(format!(
-                        "Unknown {} model {provider}/{model_id}; use models.getAvailableOfType({})",
-                        kind_name(kind),
-                        json!(kind_name(kind))
+                        "Unknown {} model \"{provider}/{model_id}\". {hint}",
+                        kind_name(kind)
                     )));
-                }
-                let input = args
-                    .get(1)
-                    .filter(|value| value.is_object())
-                    .ok_or_else(|| invalid("a context object is required"))?;
+                };
+                // Use the canonical host identity, never transport fields supplied by the script.
+                let provider = resolved.provider().clone();
+                let model_id = resolved.id().clone();
+                let input = args.get(1);
                 // Validation precedes both call rows and provider admission.
                 if matches!(operation, ModelOperation::Classify) {
-                    // serde structs also accept sequences; the script contract
-                    // requires bool criteria to be an object with named labels.
-                    if input
-                        .get("questions")
-                        .and_then(Value::as_object)
-                        .is_some_and(|questions| {
-                            questions.values().any(|question| {
-                                question["type"] == "bool" && !question["criteria"].is_object()
-                            })
-                        })
-                    {
-                        return Err(invalid(
-                            "bool criteria must be {true: string, false: string}",
-                        ));
-                    }
-                    let parsed: ClassifierContext = serde_json::from_value(input.clone()).map_err(|_| invalid("models.classify expects { state: object, images?: image[], questions: {id: {type, instructions, criteria}} }"))?;
-                    parsed.validate().map_err(invalid)?;
+                    let parsed = classifier_context(input, docs_path)?;
                     Ok(Self::Classifier {
                         provider,
                         model_id,
                         input: parsed,
                     })
                 } else {
-                    let parsed: ImagesContext = serde_json::from_value(input.clone()).map_err(|_| invalid("models.generateImages expects { input: [{type: 'text', text}, ...image blocks] }"))?;
-                    parsed.validate().map_err(invalid)?;
+                    let parsed = images_context(input, docs_path)?;
                     Ok(Self::Images {
                         provider,
                         model_id,
@@ -203,7 +220,8 @@ impl ModelCalls {
                 let models = if available {
                     context
                         .models
-                        .available_models_of_type(kind, provider.as_ref())?
+                        .query_available_models_of_type(kind, provider.as_ref(), signal)
+                        .await?
                 } else {
                     context.models.models_of_type(kind, provider.as_ref())?
                 };
@@ -307,7 +325,10 @@ fn model_type(value: Option<&Value>) -> Result<ModelType, ToolError> {
         Some("chat") => Ok(ModelType::Chat),
         Some("classifier") => Ok(ModelType::Classifier),
         Some("image") => Ok(ModelType::Image),
-        _ => Err(invalid("model type must be chat, classifier, or image")),
+        _ => Err(invalid(format!(
+            "Unknown model type {}. Use \"chat\", \"image\", or \"classifier\".",
+            stringify_optional(value)
+        ))),
     }
 }
 
@@ -317,6 +338,219 @@ fn kind_name(kind: ModelType) -> &'static str {
         ModelType::Classifier => "classifier",
         ModelType::Image => "image",
     }
+}
+
+fn with_article(kind: ModelType) -> &'static str {
+    match kind {
+        ModelType::Chat => "a chat",
+        ModelType::Classifier => "a classifier",
+        ModelType::Image => "an image",
+    }
+}
+
+fn stringify_optional(value: Option<&Value>) -> String {
+    value.map_or_else(|| "undefined".into(), crate::declarations::json_stringify)
+}
+
+fn describe_value(value: Option<&Value>) -> String {
+    match value {
+        None => "undefined".into(),
+        Some(Value::Null) => "null".into(),
+        Some(Value::String(_)) => "a string".into(),
+        Some(Value::Bool(_)) => "a boolean".into(),
+        Some(Value::Number(_)) => "a number".into(),
+        Some(Value::Array(values)) => if values.is_empty() {
+            "an empty array"
+        } else {
+            "an array"
+        }
+        .into(),
+        Some(Value::Object(fields)) if fields.is_empty() => "{}".into(),
+        Some(Value::Object(fields)) => format!(
+            "{{ {}{} }}",
+            fields
+                .keys()
+                .take(6)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", "),
+            if fields.len() > 6 { ", ..." } else { "" }
+        ),
+    }
+}
+
+const CLASSIFIER_CONTEXT_SHAPE: &str = "{ state: { ... }, images?: [{ type: \"image\", data: <base64>, mimeType }], questions: { <id>: { type: \"choice\", instructions, criteria: { <label>: <meaning> } } | { type: \"score\", instructions, criteria: [<lowest level>, ..., <highest level>] } | { type: \"bool\", instructions, criteria: { true: <meaning>, false: <meaning> } } } }";
+
+fn classifier_context(
+    input: Option<&Value>,
+    docs_path: &std::path::Path,
+) -> Result<ClassifierContext, ToolError> {
+    let fail = |problem: String| {
+        invalid(format!(
+            "models.classify() {problem}. Expected context: {CLASSIFIER_CONTEXT_SHAPE}. See \"Classify\" in {}.",
+            docs_path.to_string_lossy().replace('\\', "/")
+        ))
+    };
+    let context = input.and_then(Value::as_object).ok_or_else(|| {
+        fail(format!(
+            "expects a context object as its second argument, got {}",
+            describe_value(input)
+        ))
+    })?;
+    let state = context
+        .get("state")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            fail(format!(
+                "context.state must be an object, got {}",
+                describe_value(context.get("state"))
+            ))
+        })?;
+    let mut images = Vec::new();
+    if let Some(value) = context.get("images") {
+        let values = value.as_array().ok_or_else(|| {
+            fail(format!(
+                "context.images must be an array, got {}",
+                describe_value(Some(value))
+            ))
+        })?;
+        for (index, image) in values.iter().enumerate() {
+            if !is_image(image) {
+                return Err(fail(format!(
+                    "context.images[{index}] must be an image block, got {}",
+                    describe_value(Some(image))
+                )));
+            }
+            images.push(image_block(image));
+        }
+    }
+    let questions = context
+        .get("questions")
+        .and_then(Value::as_object)
+        .filter(|questions| !questions.is_empty())
+        .ok_or_else(|| {
+            fail(format!(
+                "context.questions must map question IDs to questions, got {}",
+                describe_value(context.get("questions"))
+            ))
+        })?;
+    for (id, question) in questions {
+        let at = format!("context.questions.{id}");
+        let question = question.as_object().ok_or_else(|| {
+            fail(format!(
+                "{at} must be a question object, got {}",
+                describe_value(Some(question))
+            ))
+        })?;
+        if !question.get("instructions").is_some_and(Value::is_string) {
+            return Err(fail(format!("{at}.instructions must be a string")));
+        }
+        let criteria = question.get("criteria");
+        match question.get("type").and_then(Value::as_str) {
+            Some("choice") => {
+                if !criteria.and_then(Value::as_object).is_some_and(|values| {
+                    !values.is_empty() && values.values().all(Value::is_string)
+                }) {
+                    return Err(fail(format!(
+                        "{at} is a \"choice\" question, so criteria must map each label to its meaning"
+                    )));
+                }
+            }
+            Some("score") => {
+                if !criteria
+                    .and_then(Value::as_array)
+                    .is_some_and(|values| !values.is_empty() && values.iter().all(Value::is_string))
+                {
+                    return Err(fail(format!(
+                        "{at} is a \"score\" question, so criteria must list the levels as strings, lowest first"
+                    )));
+                }
+            }
+            Some("bool") => {
+                if !criteria.is_some_and(|value| {
+                    value.get("true").is_some_and(Value::is_string)
+                        && value.get("false").is_some_and(Value::is_string)
+                }) {
+                    return Err(fail(format!(
+                        "{at} is a \"bool\" question, so criteria must be {{ true: string, false: string }}"
+                    )));
+                }
+            }
+            _ => {
+                return Err(fail(format!(
+                    "{at}.type must be \"choice\", \"score\", or \"bool\", got {}",
+                    stringify_optional(question.get("type"))
+                )));
+            }
+        }
+    }
+    // Project only the documented model inputs. Session ContentBlock metadata has
+    // stronger types and must not reject irrelevant properties on a script block.
+    serde_json::from_value(json!({"state":state,"images":images,"questions":questions}))
+        .map_err(|error| invalid(error.to_string()))
+}
+
+fn is_image(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("image")
+        && value.get("data").is_some_and(Value::is_string)
+        && value.get("mimeType").is_some_and(Value::is_string)
+}
+
+fn image_block(value: &Value) -> Value {
+    json!({"type":"image", "data":value["data"], "mimeType":value["mimeType"]})
+}
+
+fn images_context(
+    input: Option<&Value>,
+    docs_path: &std::path::Path,
+) -> Result<ImagesContext, ToolError> {
+    let fail = |problem: String| {
+        invalid(format!(
+            "models.generateImages() {problem}. Expected context: {{ input: [{{ type: \"text\", text: <prompt> }}, ...optional {{ type: \"image\", data: <base64>, mimeType }} references] }}. See \"Generate images\" in {}.",
+            docs_path.to_string_lossy().replace('\\', "/")
+        ))
+    };
+    let context = input.and_then(Value::as_object).ok_or_else(|| {
+        fail(format!(
+            "expects a context object as its second argument, got {}",
+            describe_value(input)
+        ))
+    })?;
+    let values = context
+        .get("input")
+        .and_then(Value::as_array)
+        .filter(|values| !values.is_empty())
+        .ok_or_else(|| {
+            fail(format!(
+                "context.input must be a non-empty array of blocks, got {}",
+                describe_value(context.get("input"))
+            ))
+        })?;
+    let mut blocks = Vec::new();
+    for (index, block) in values.iter().enumerate() {
+        if block.get("type").and_then(Value::as_str) == Some("text")
+            && block.get("text").is_some_and(Value::is_string)
+        {
+            let mut projected = json!({"type":"text", "text":block["text"]});
+            if let Some(signature) = block.get("textSignature") {
+                if !signature.is_string() {
+                    return Err(fail(format!(
+                        "context.input[{index}].textSignature must be a string"
+                    )));
+                }
+                projected["textSignature"] = signature.clone();
+            }
+            blocks.push(projected);
+        } else if is_image(block) {
+            blocks.push(image_block(block));
+        } else {
+            return Err(fail(format!(
+                "context.input[{index}] must be a text or image block, got {}",
+                describe_value(Some(block))
+            )));
+        }
+    }
+    serde_json::from_value(json!({"input":blocks})).map_err(|error| invalid(error.to_string()))
 }
 
 fn optional_provider(value: Option<&Value>) -> Result<Option<ProviderId>, ToolError> {
@@ -338,4 +572,95 @@ fn to_value(value: impl Serialize) -> Result<Value, ToolError> {
 
 fn invalid(message: impl Into<String>) -> ToolError {
     ToolError::InvalidArguments(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn message(error: ToolError) -> String {
+        let ToolError::InvalidArguments(message) = error else {
+            panic!("expected argument error")
+        };
+        message
+    }
+
+    #[test]
+    fn empty_provider_means_all_only_for_available_queries() {
+        let (_, signal) = pi_core::AbortHandle::new();
+        let context = ToolContext::standalone(std::env::temp_dir(), signal);
+        for (operation, expected) in [
+            (ModelOperation::List, Some("")),
+            (ModelOperation::Available, None),
+        ] {
+            let request = ModelRequest::prepare(
+                &context,
+                operation,
+                &json!(["classifier", ""]),
+                Path::new("codemode.md"),
+            )
+            .unwrap();
+            let ModelRequest::List { provider, .. } = request else {
+                panic!("catalog query")
+            };
+            assert_eq!(provider.as_ref().map(ProviderId::as_str), expected);
+        }
+    }
+
+    #[test]
+    fn validation_reports_specific_shape_and_documentation() {
+        let docs = Path::new("docs/codemode.md");
+        let error = message(classifier_context(Some(&json!({"state":{},"questions":{"q":{"type":"choice","instructions":"","criteria":[]}}})), docs).unwrap_err());
+        assert!(error.starts_with("models.classify() context.questions.q is a \"choice\" question, so criteria must map each label to its meaning. Expected context:"));
+        assert!(error.ends_with("See \"Classify\" in docs/codemode.md."));
+        let error = message(
+            images_context(Some(&json!({"input":[{"type":"text","text":3}]})), docs).unwrap_err(),
+        );
+        assert!(error.starts_with("models.generateImages() context.input[0] must be a text or image block, got { type, text }."));
+        assert_eq!(
+            message(model_type(None).unwrap_err()),
+            "Unknown model type undefined. Use \"chat\", \"image\", or \"classifier\"."
+        );
+    }
+
+    #[test]
+    fn documented_inputs_preserve_valid_metadata_without_weakening_session_blocks() {
+        let docs = Path::new("codemode.md");
+        let input = images_context(
+            Some(&json!({"input":[{"type":"text","text":"draw","textSignature":"signed"}]})),
+            docs,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(input).unwrap(),
+            json!({"input":[{"type":"text","text":"draw","textSignature":"signed"}]})
+        );
+        let error = message(
+            images_context(
+                Some(&json!({"input":[{"type":"text","text":"draw","textSignature":42}]})),
+                docs,
+            )
+            .unwrap_err(),
+        );
+        assert!(error.starts_with(
+            "models.generateImages() context.input[0].textSignature must be a string."
+        ));
+        let context = classifier_context(
+            Some(&json!({"state":{},"questions":{
+                "z":{"type":"choice","instructions":"","criteria":{"z":"last","a":"first"}},
+                "a":{"type":"bool","instructions":"","criteria":{"true":"yes","false":"no"}}
+            }})),
+            Path::new("codemode.md"),
+        )
+        .unwrap();
+        assert_eq!(
+            context
+                .questions
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["z", "a"]
+        );
+    }
 }

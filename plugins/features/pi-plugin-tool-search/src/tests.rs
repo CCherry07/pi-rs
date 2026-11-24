@@ -191,6 +191,7 @@ fn ranking_matches_pi_exact_names_coverage_and_name_weight() {
 fn namespace_text_and_whole_local_names_influence_ranking() {
     let namespace = ToolNamespace {
         name: "mcp__peekaboo".into(),
+        aliases: Vec::new(),
         description: Some("macOS desktop tools".into()),
         instructions: Some("Peekaboo controls macOS apps by app name.".into()),
     };

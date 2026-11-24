@@ -5,6 +5,7 @@ mod assistant_stream;
 mod context_usage;
 mod events;
 mod ids;
+pub mod json;
 mod message;
 mod model;
 mod model_operations;
@@ -33,9 +34,9 @@ pub use model::{
     ModelSpec, ResponseMetadata, StopReason, ThinkingBudgets, ThinkingLevel,
 };
 pub use model_operations::{
-    AnyModelSpec, ClassifierAnswer, ClassifierBoolCriteria, ClassifierContext, ClassifierModelSpec,
-    ClassifierQuestion, ClassifierResult, ImageModelSpec, ImagesContext, ImagesResult,
-    ModelCallStopReason, ModelType,
+    AnyModelSpec, ClassifierAnswer, ClassifierAnswers, ClassifierBoolCriteria, ClassifierContext,
+    ClassifierModelSpec, ClassifierQuestion, ClassifierResult, ImageModelSpec, ImagesContext,
+    ImagesResult, ModelCallStopReason, ModelType,
 };
 pub use stream::{ContentMetadata, ResponseMetadataPatch, StreamEvent};
 pub use tool::{

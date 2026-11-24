@@ -29,6 +29,7 @@ use pi_plugin_openai::{
 #[cfg(test)]
 use pi_provider::ReqwestTransport;
 use pi_provider::{HttpTransport, insert_header};
+use serde_json::Value;
 
 use crate::config::{PreparedModel, PreparedOverride, PreparedProvider};
 use crate::resolver::{ConfigValueResolver, ResolveError};
@@ -45,6 +46,7 @@ pub(crate) struct ModelsJsonProvider {
 struct ResolvedRequestConfig {
     api_key: Option<String>,
     headers: BTreeMap<String, String>,
+    provider_env: BTreeMap<String, String>,
 }
 
 impl ModelsJsonProvider {
@@ -128,12 +130,26 @@ impl ModelsJsonProvider {
                 None => None,
             },
         };
-        if use_credential_source
-            && api_key.is_none()
-            && let Some(source) = &self.credentials
-        {
-            let credential = source.source.resolve(signal).await?;
-            if model.is_some_and(|model| model.spec.api == "openai-decisions")
+        let mut provider_env = BTreeMap::new();
+        if use_credential_source && let Some(source) = &self.credentials {
+            let credential = if api_key.is_none() {
+                source.source.resolve(signal).await?
+            } else {
+                // Routing metadata may still be needed with an explicit key,
+                // but an unused OAuth credential must not be refreshed.
+                source.source.check(signal).await?
+            };
+            if let Some(env) = credential
+                .as_ref()
+                .and_then(|value| value.metadata.get("env"))
+                .and_then(Value::as_object)
+            {
+                provider_env.extend(env.iter().filter_map(|(key, value)| {
+                    value.as_str().map(|value| (key.clone(), value.to_owned()))
+                }));
+            }
+            if api_key.is_none()
+                && model.is_some_and(|model| model.spec.api == "openai-decisions")
                 && credential
                     .as_ref()
                     .is_some_and(|value| value.kind == pi_provider::CredentialKind::OAuth)
@@ -142,7 +158,11 @@ impl ModelsJsonProvider {
                     "OpenAI Decisions requires an API key; OAuth is not supported".into(),
                 ));
             }
-            api_key = credential.map(|value| value.secret);
+            if api_key.is_none() {
+                api_key = credential
+                    .map(|value| value.secret)
+                    .filter(|key| !key.trim().is_empty());
+            }
         }
         if self.configured.auth_header.unwrap_or(false) && api_key.is_none() {
             return Err(ProviderError::Failure(format!(
@@ -170,7 +190,11 @@ impl ModelsJsonProvider {
                 insert_header(&mut headers, name, value);
             }
         }
-        Ok(ResolvedRequestConfig { api_key, headers })
+        Ok(ResolvedRequestConfig {
+            api_key,
+            headers,
+            provider_env,
+        })
     }
 
     async fn resolve_header_set(
@@ -228,6 +252,7 @@ impl ModelsJsonProvider {
             transport: self.transport.as_ref(),
             context,
             headers,
+            provider_env: resolved.provider_env,
             signal,
         })
     }
@@ -309,7 +334,15 @@ impl Provider for ModelsJsonProvider {
 
     fn model_availability(&self, model: &pi_core::AnyModelSpec) -> ProviderAvailability {
         if model.model_type() == pi_core::ModelType::Chat {
-            return self.availability();
+            return if self.configured.runtime_api_key.is_none() && self.configured.api_key.is_none()
+            {
+                self.fallback.as_ref().map_or_else(
+                    || self.availability(),
+                    |provider| provider.model_availability(model),
+                )
+            } else {
+                self.availability()
+            };
         }
         if matches!(model, pi_core::AnyModelSpec::Classifier(model)
             if model.api == "llama-cpp-classify" && model.base_url.as_deref().is_some_and(|url| !url.is_empty()) && !self.configured.auth_header.unwrap_or(false))
@@ -324,6 +357,66 @@ impl Provider for ModelsJsonProvider {
         } else {
             ProviderAvailability::MissingCredentials
         }
+    }
+
+    async fn filter_available_models(
+        &self,
+        models: Vec<pi_core::AnyModelSpec>,
+        signal: AbortSignal,
+    ) -> Result<Vec<pi_core::AnyModelSpec>, ProviderError> {
+        if signal.is_aborted() {
+            return Err(ProviderError::Aborted);
+        }
+        let credential = match &self.credentials {
+            Some(source) => source.source.check(&signal).await?,
+            None => None,
+        };
+        let configured = self.configured.runtime_api_key.is_some()
+            || self
+                .configured
+                .api_key
+                .as_deref()
+                .is_some_and(|key| self.resolver.is_configured(key));
+        let inherited = match &self.fallback {
+            Some(fallback) => {
+                fallback
+                    .filter_available_models(models.clone(), signal)
+                    .await?
+            }
+            None => vec![],
+        };
+        Ok(models.into_iter().filter(|model| {
+            let base_url = match model {
+                pi_core::AnyModelSpec::Chat(spec) => spec.base_url.as_deref(),
+                pi_core::AnyModelSpec::Classifier(spec) => spec.base_url.as_deref(),
+                pi_core::AnyModelSpec::Image(spec) => spec.base_url.as_deref(),
+            };
+            for name in ["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_GATEWAY_ID"] {
+                if base_url.is_some_and(|url| url.contains(&format!("{{{name}}}"))) {
+                    let configured_env = credential.as_ref().and_then(|value| value.metadata.get("env")).and_then(|env| env.get(name)).and_then(Value::as_str);
+                    let value = configured_env.map(str::to_owned).or_else(|| std::env::var(name).ok());
+                    if value.is_none_or(|value| value.is_empty()) { return false; }
+                }
+            }
+            let oauth = credential.as_ref().is_some_and(|value| value.kind == pi_provider::CredentialKind::OAuth);
+            // This protocol rejects subscription tokens even when the chat
+            // provider is available. Never leak those tokens into its catalog.
+            if !configured && oauth && matches!(model, pi_core::AnyModelSpec::Classifier(spec) if spec.api == "openai-decisions") {
+                return false;
+            }
+            if configured {
+                return true;
+            }
+            if model.model_type() == pi_core::ModelType::Chat {
+                return if self.fallback.is_some() {
+                    inherited.iter().any(|candidate| candidate.model_type() == model.model_type() && candidate.id() == model.id())
+                } else {
+                    credential.as_ref().is_some_and(|value| !value.secret.trim().is_empty())
+                };
+            }
+            credential.as_ref().is_some_and(|value| !value.secret.trim().is_empty()) || matches!(model, pi_core::AnyModelSpec::Classifier(spec)
+                if spec.api == "llama-cpp-classify" && spec.base_url.as_deref().is_some_and(|url| !url.is_empty()) && !self.configured.auth_header.unwrap_or(false))
+        }).collect())
     }
 
     async fn classify(
@@ -366,7 +459,13 @@ impl Provider for ModelsJsonProvider {
         Self::apply_model_defaults(api, model, &mut request);
         let cost = model.map(|model| model.spec.cost.clone());
         let resolved = self
-            .resolve_request_config(&request.model, model, model_override, false, &signal)
+            .resolve_request_config(
+                &request.model,
+                model,
+                model_override,
+                self.fallback.is_none(),
+                &signal,
+            )
             .await?;
         let request_headers = std::mem::take(&mut request.headers);
         request.headers = resolved.headers;
@@ -757,6 +856,7 @@ mod tests {
             headers: BTreeMap::from([("X-Provider".to_string(), "provider".to_string())]),
             auth_header: Some(false),
             models: vec![PreparedModel {
+                catalog_headers: BTreeMap::new(),
                 kind: pi_core::ModelType::Chat,
                 output: Vec::new(),
                 id: ModelId::new("model"),
@@ -843,6 +943,7 @@ mod tests {
             headers: BTreeMap::from([("X-Provider".to_string(), "provider".to_string())]),
             auth_header: Some(true),
             models: vec![PreparedModel {
+                catalog_headers: BTreeMap::new(),
                 kind: pi_core::ModelType::Chat,
                 output: Vec::new(),
                 id: ModelId::new("custom-claude"),
@@ -931,6 +1032,7 @@ mod tests {
             headers: BTreeMap::from([("X-Provider".to_string(), "provider".to_string())]),
             auth_header: Some(false),
             models: vec![PreparedModel {
+                catalog_headers: BTreeMap::new(),
                 kind: pi_core::ModelType::Chat,
                 output: Vec::new(),
                 id: ModelId::new("grok-custom"),
@@ -1018,6 +1120,7 @@ mod tests {
             headers: BTreeMap::new(),
             auth_header: Some(false),
             models: vec![PreparedModel {
+                catalog_headers: BTreeMap::new(),
                 kind: pi_core::ModelType::Chat,
                 output: Vec::new(),
                 id: ModelId::new("gemma-4-31b-it"),
@@ -1120,6 +1223,7 @@ mod tests {
                 headers: BTreeMap::new(),
                 auth_header: Some(false),
                 models: vec![PreparedModel {
+                    catalog_headers: BTreeMap::new(),
                     kind: pi_core::ModelType::Chat,
                     output: Vec::new(),
                     id: ModelId::new("custom-model"),
@@ -1212,6 +1316,7 @@ mod tests {
             headers: BTreeMap::new(),
             auth_header: Some(false),
             models: vec![PreparedModel {
+                catalog_headers: BTreeMap::new(),
                 kind: pi_core::ModelType::Chat,
                 output: Vec::new(),
                 id: ModelId::new("model"),

@@ -13,6 +13,7 @@ native = ["dep:schemars", "serde_json/preserve_order"]
 pi-core.workspace = true
 async-trait.workspace = true
 futures-core.workspace = true
+futures.workspace = true
 pi-plugin-macros.workspace = true
 schemars = { workspace = true, optional = true }
 serde.workspace = true

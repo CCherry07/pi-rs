@@ -18,6 +18,12 @@ pub(crate) enum ResolveError {
 pub(crate) struct ConfigValueResolver {}
 
 impl ConfigValueResolver {
+    /// Pi treats commands as configured without running them during availability
+    /// checks. Literal templates are available only while every variable is set.
+    pub fn is_configured(&self, configured: &str) -> bool {
+        configured.starts_with('!') || resolve_template(configured).is_ok()
+    }
+
     pub async fn resolve(
         &self,
         configured: &str,

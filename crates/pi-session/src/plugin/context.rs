@@ -367,7 +367,8 @@ pub(super) fn context_failed(error: impl std::fmt::Display) -> PluginContextErro
 }
 
 pub(super) fn value<T: Serialize>(value: T) -> Result<Value, PluginContextError> {
-    serde_json::to_value(value).map_err(context_failed)
+    pi_core::json::to_value_with_max_depth(&value, crate::history::SESSION_JSON_MAX_DEPTH)
+        .map_err(context_failed)
 }
 
 pub(super) fn values<T: Serialize>(items: T) -> Result<Vec<Value>, PluginContextError> {

@@ -54,6 +54,19 @@ impl ModelsContextAccess for PiPluginContext {
             .available_models_of_type(model_type, provider))
     }
 
+    async fn query_available_models_of_type(
+        &self,
+        model_type: pi_core::ModelType,
+        provider: Option<&ProviderId>,
+        signal: pi_core::AbortSignal,
+    ) -> Result<Vec<pi_core::AnyModelSpec>, PluginContextError> {
+        self.session()?
+            .runtime()
+            .query_available_models_of_type(model_type, provider, signal)
+            .await
+            .map_err(context_failed)
+    }
+
     async fn classify_model(
         &self,
         provider: ProviderId,

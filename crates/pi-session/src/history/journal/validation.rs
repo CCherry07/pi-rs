@@ -6,7 +6,7 @@ use crate::history::{
 };
 
 fn validate_json(value: &impl serde::Serialize) -> Result<(), HistoryError> {
-    serde_json::to_value(value)
+    pi_core::json::to_vec_with_max_depth(value, crate::history::SESSION_JSON_MAX_DEPTH)
         .map(|_| ())
         .map_err(|error| HistoryError::InvalidPayload(error.to_string()))
 }

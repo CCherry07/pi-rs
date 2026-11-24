@@ -130,6 +130,7 @@ pub fn shell_tool_spec(
             "output":{"type":"string","description":"Combined stdout and stderr, possibly truncated"},
             "truncated":{"type":"boolean"},
             "full_output_path":{"type":"string","description":"Full output, when truncated"},
+            "full_output_error":{"type":"string","description":"Why the full output could not be saved, when truncated and saving failed"},
             "exit_code":{"type":"number"}, "wall_time_seconds":{"type":"number"}
         }, "required":["output","truncated","exit_code","wall_time_seconds"]
     }));

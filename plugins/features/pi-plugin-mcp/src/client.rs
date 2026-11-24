@@ -369,6 +369,7 @@ impl McpToolSet {
             },
             namespace: Some(ToolNamespace {
                 name: "mcp_resources".into(),
+                aliases: Vec::new(),
                 description: Some("Resources provided by MCP servers".into()),
                 instructions: Some(
                     self.inner
@@ -696,6 +697,7 @@ impl Plugin for McpToolPlugin {
                     },
                     namespace: Some(ToolNamespace {
                         name: format!("mcp__{}", identifier_component(&tool.server.name)),
+                        aliases: vec![tool.server.name.clone()],
                         description: tool.server.policy.description.clone(),
                         instructions: tool.server.instructions.clone(),
                     }),
@@ -1048,6 +1050,15 @@ mod tests {
                 .instructions
                 .as_deref(),
             Some("Echo server usage guidance.")
+        );
+        assert_eq!(
+            registry.tool_infos()[0]
+                .discovery
+                .namespace
+                .as_ref()
+                .unwrap()
+                .aliases,
+            ["fixture-server"]
         );
         for enabled in [true, true, false] {
             let patch = driver

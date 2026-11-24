@@ -550,21 +550,31 @@ async fn mcp_objects_remain_inside_script_and_hidden_tools_remain_unavailable() 
             throw new Error("MCP result projection changed");
         }
         for (const name of ["mcp__docs__hidden", "codemode", "tool_search"]) {
-            if (typeof tools[name] !== "undefined") throw new Error("Unexpected nested tool " + name);
+            if (name in tools) throw new Error("Unexpected nested tool " + name);
+            // Pi's missing-tool proxy throws on property access. Membership is
+            // the supported capability check; probing cannot dispatch a tool.
+            try {
+                void tools[name];
+                throw new Error("Unexpected readable tool " + name);
+            } catch (error) {
+                if (error.name !== "TypeError" || !error.message.includes("does not exist")) throw error;
+            }
         }
         text({answer: reply.structuredContent.answer,
             intermediateBytes: reply.content[0].text.length,
             hasTransportMeta: "_meta" in reply,
-            hidden: typeof tools.mcp__docs__hidden,
-            recursive: typeof tools.codemode,
-            modelOnly: typeof tools.tool_search});
+            hidden: "mcp__docs__hidden" in tools,
+            recursive: "codemode" in tools,
+            modelOnly: "tool_search" in tools});
     "#,
         )
         .await;
     let text = output(&result);
     assert!(!result.is_error, "{text}");
     assert!(text.contains("42"));
-    assert!(text.contains("undefined"));
+    for field in ["hidden", "recursive", "modelOnly"] {
+        assert!(text.contains(&format!("\"{field}\":false")), "{text}");
+    }
     assert!(!text.contains("large intermediate data"));
     assert!(text.contains("false"));
     assert_eq!(fixture.remote_calls.lock().unwrap().len(), 1);
@@ -644,5 +654,95 @@ async fn only_successful_store_writes_survive_branch_navigation_reload_and_resum
     assert!(!deleted.is_error, "{}", output(&deleted));
     fixture.session.reload().await.unwrap();
     assert!(output(&fixture.run("text(typeof load('value')); ").await).contains("undefined"));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn depth_limit_store_values_survive_selected_branch_reload_and_disk_resume() {
+    let mut fixture = Fixture::new().await;
+    let store = |leaf: &str| {
+        format!(
+            r#"
+                let value = {leaf};
+                for (let index = 0; index < 512; index++) value = {{next: value}};
+                store("deep", value);
+                let node = load("deep");
+                let depth = 0;
+                while (node && typeof node === "object") {{ depth++; node = node.next; }}
+                text({{depth, leaf: node}});
+            "#,
+            leaf = serde_json::to_string(leaf).unwrap(),
+        )
+    };
+    let load = r#"
+        let node = load("deep");
+        let depth = 0;
+        while (node && typeof node === "object") { depth++; node = node.next; }
+        text({depth, leaf: node});
+    "#;
+
+    let result = fixture.run(&store("base")).await;
+    assert!(!result.is_error, "{}", output(&result));
+    assert!(output(&result).contains(r#"{"depth":512,"leaf":"base"}"#));
+    let base_leaf = fixture.session.current().history().leaf_id().unwrap();
+
+    let result = fixture.run(&store("side")).await;
+    assert!(!result.is_error, "{}", output(&result));
+    let side_leaf = fixture.session.current().history().leaf_id().unwrap();
+
+    fixture
+        .session
+        .current()
+        .checkout(Some(&base_leaf))
+        .await
+        .unwrap();
+    fixture.session.reload().await.unwrap();
+    let result = fixture.run(load).await;
+    assert!(!result.is_error, "{}", output(&result));
+    assert!(output(&result).contains(r#"{"depth":512,"leaf":"base"}"#));
+
+    let path = fixture.session.current().history().path().to_path_buf();
+    fixture
+        .pi
+        .sessions()
+        .close_session(&fixture.session)
+        .await
+        .unwrap();
+    fixture.session = fixture
+        .pi
+        .sessions()
+        .open_session(&path, Default::default())
+        .await
+        .unwrap();
+    let result = fixture.run(load).await;
+    assert!(!result.is_error, "{}", output(&result));
+    assert!(output(&result).contains(r#"{"depth":512,"leaf":"base"}"#));
+
+    fixture
+        .session
+        .current()
+        .checkout(Some(&side_leaf))
+        .await
+        .unwrap();
+    fixture.session.reload().await.unwrap();
+    let result = fixture.run(load).await;
+    assert!(!result.is_error, "{}", output(&result));
+    assert!(output(&result).contains(r#"{"depth":512,"leaf":"side"}"#));
+
+    fixture
+        .pi
+        .sessions()
+        .close_session(&fixture.session)
+        .await
+        .unwrap();
+    fixture.session = fixture
+        .pi
+        .sessions()
+        .open_session(&path, Default::default())
+        .await
+        .unwrap();
+    let result = fixture.run(load).await;
+    assert!(!result.is_error, "{}", output(&result));
+    assert!(output(&result).contains(r#"{"depth":512,"leaf":"side"}"#));
     fixture.shutdown().await;
 }

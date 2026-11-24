@@ -77,7 +77,7 @@ pub(super) fn payload(model_id: &str, context: &ClassifierContext) -> Result<Val
 pub(super) fn answers(
     body: &Value,
     context: &ClassifierContext,
-) -> Result<BTreeMap<String, ClassifierAnswer>, ProviderError> {
+) -> Result<pi_core::ClassifierAnswers, ProviderError> {
     let raw = body["answers"]
         .as_array()
         .ok_or_else(|| failure("returned an unexpected response"))?;

@@ -21,10 +21,33 @@ pub(crate) struct OperationClient<'a> {
     pub transport: &'a dyn HttpTransport,
     pub context: &'a ProviderCallContext,
     pub headers: BTreeMap<String, String>,
+    pub provider_env: BTreeMap<String, String>,
     pub signal: AbortSignal,
 }
 
 impl OperationClient<'_> {
+    fn base_url(&self, base: &str) -> Result<String, ProviderError> {
+        let mut base = base.trim_end_matches('/').to_owned();
+        for name in ["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_GATEWAY_ID"] {
+            let placeholder = format!("{{{name}}}");
+            if base.contains(&placeholder) {
+                let value = self
+                    .provider_env
+                    .get(name)
+                    .cloned()
+                    .or_else(|| std::env::var(name).ok())
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| invalid(format!("missing {name}")))?;
+                // Preserve path-segment identity instead of accepting an injected route.
+                let mut url =
+                    url::Url::parse("https://routing.invalid/").expect("valid static URL");
+                url.path_segments_mut().expect("HTTP URL").push(&value);
+                base = base.replace(&placeholder, url.path().trim_start_matches('/'));
+            }
+        }
+        Ok(base)
+    }
+
     async fn post(
         &self,
         url: String,
@@ -81,18 +104,19 @@ pub(crate) async fn classify(
         api: model.api.clone(),
         provider: model.provider.clone(),
         model: model.id.clone(),
-        answers: BTreeMap::new(),
+        answers: Default::default(),
         usage: None,
         stop_reason: ModelCallStopReason::Stop,
         error_message: None,
         timestamp_ms: now_ms(),
     };
     let call = async {
-        let base = model
-            .base_url
-            .as_deref()
-            .ok_or_else(|| invalid("classifier model requires baseUrl"))?
-            .trim_end_matches('/');
+        let base = client.base_url(
+            model
+                .base_url
+                .as_deref()
+                .ok_or_else(|| invalid("classifier model requires baseUrl"))?,
+        )?;
         if model.api == "llama-cpp-classify" {
             return llama::classify(&model, &input, |url, payload, observe| {
                 Box::pin(client.post(url, payload, observe))

@@ -149,6 +149,35 @@ impl AgentMessage {
         }
     }
 
+    /// Stack-safe variant for a wire owner that has already chosen a finite document-depth policy.
+    #[doc(hidden)]
+    pub fn from_shared_raw_json_with_max_depth(
+        source: Arc<Vec<u8>>,
+        range: Range<usize>,
+        max_depth: usize,
+    ) -> Result<Self, SessionWireError> {
+        let raw = OriginalMessage::shared_raw_str(&source, &range).ok_or_else(|| {
+            SessionWireError::InvalidPayload("agent message source range is invalid".to_string())
+        })?;
+        match crate::json::from_str_with_max_depth::<Message>(raw, max_depth) {
+            Ok(
+                message @ (Message::System(_)
+                | Message::User(_)
+                | Message::Assistant(_)
+                | Message::ToolResult(_)),
+            ) => Ok(Self(Arc::new(AgentMessageKind::Standard {
+                message,
+                original: Some(OriginalMessage::SharedRaw { source, range }),
+                display_text_cache: OnceLock::new(),
+            }))),
+            Ok(Message::Custom(_)) | Err(_) => {
+                let value = crate::json::from_str_with_max_depth(raw, max_depth)
+                    .map_err(|error| SessionWireError::InvalidPayload(error.to_string()))?;
+                Self::custom(value)
+            }
+        }
+    }
+
     pub fn role(&self) -> &str {
         match self.0.as_ref() {
             AgentMessageKind::Standard {

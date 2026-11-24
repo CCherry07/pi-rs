@@ -394,6 +394,106 @@ async fn stock_typed_catalogs_use_stored_credentials_without_replacing_chat_mode
     fixture.shutdown().await;
 }
 
+#[tokio::test]
+async fn availability_rereads_credentials_without_reloading_or_refreshing_oauth() {
+    let fixture = Fixture::configured(|base| model_config(base, "judge"), None).await;
+    let code = r#"
+        return {
+            registered: (await models.getModelsOfType("classifier", "unavailable")).map(m => m.id),
+            available: (await models.getAvailableOfType("classifier", "unavailable")).map(m => m.id),
+            openai: (await models.getAvailableOfType("classifier", "openai")).map(m => m.id)
+        };
+    "#;
+    let first = returned(&fixture.run(code).await);
+    assert_eq!(first["registered"], json!(["locked"]));
+    assert_eq!(first["available"], json!([]));
+    let path = fixture.directory.path().join("agent/auth.json");
+    fs::write(
+        &path,
+        json!({
+            "unavailable": {"type":"api_key","key":"test-only-new-key"},
+            "openai": {"type":"api_key","key":"test-only-openai"}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let second = returned(&fixture.run(code).await);
+    assert_eq!(second["available"], json!(["locked"]));
+    assert!(
+        second["openai"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id == "gpt-6-luna")
+    );
+    // An expired subscription is recognizable without any token refresh. It
+    // must not make the API-key-only Decisions models available.
+    let oauth = json!({"openai": {
+        "type":"oauth","access":"test-only-expired","refresh":"must-not-refresh",
+        "expires":0,"clientId":"test-only-client"
+    }})
+    .to_string();
+    fs::write(&path, &oauth).unwrap();
+    let third = returned(&fixture.run(code).await);
+    assert_eq!(third["registered"], first["registered"]);
+    assert_eq!(third["available"], json!([]));
+    assert_eq!(third["openai"], json!([]));
+    assert_eq!(fs::read_to_string(&path).unwrap(), oauth);
+    assert!(!path.with_extension("json.lock").exists());
+    assert!(fixture.state.requests.lock().unwrap().is_empty());
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn copilot_availability_updates_filters_without_removing_registered_models() {
+    let credentials = |ids: Value| {
+        json!({"github-copilot": {
+            "type":"oauth","access":"test-only-copilot","refresh":"must-not-refresh", "expires":0,
+            "availableModelIds":ids
+        }})
+    };
+    let fixture = Fixture::configured(
+        |base| model_config(base, "judge"),
+        Some(credentials(json!(["gemini-3.8-flash"]))),
+    )
+    .await;
+    let code = r#"return {
+        registered: (await models.getModelsOfType('chat','github-copilot')).map(m => m.id),
+        available: (await models.getAvailableOfType('chat','github-copilot')).map(m => m.id)
+    };"#;
+    let first = returned(&fixture.run(code).await);
+    let registered: std::collections::BTreeSet<_> = first["registered"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id.as_str().unwrap().to_owned())
+        .collect();
+    let expected = pi_plugin_copilot::github_copilot_models()
+        .into_iter()
+        .map(|model| model.id.to_string())
+        .collect();
+    assert_eq!(registered, expected);
+    assert!(registered.contains("gpt-5.6-sol")); // Registered but denied by this account.
+    assert_eq!(first["available"], json!(["gemini-3.8-flash"]));
+    let path = fixture.directory.path().join("agent/auth.json");
+    fs::write(&path, credentials(json!([])).to_string()).unwrap();
+    let second = returned(&fixture.run(code).await);
+    assert_eq!(second["registered"], first["registered"]);
+    assert_eq!(second["available"], json!([]));
+    fs::write(&path, credentials(json!(null)).to_string()).unwrap();
+    let third = returned(&fixture.run(code).await);
+    assert_eq!(third["available"], third["registered"]);
+    fs::write(&path, credentials(json!(["gpt-5.6-sol"])).to_string()).unwrap();
+    let rotated = returned(&fixture.run(code).await);
+    assert_eq!(rotated["registered"], first["registered"]);
+    assert_eq!(rotated["available"], json!(["gpt-5.6-sol"]));
+    fixture.session.reload().await.unwrap();
+    assert_eq!(returned(&fixture.run(code).await), rotated);
+    assert!(!path.with_extension("json.lock").exists());
+    assert!(fixture.state.requests.lock().unwrap().is_empty());
+    fixture.shutdown().await;
+}
+
 fn model_config(base: &str, classifier_id: &str) -> Value {
     json!({"providers":{
         "fixture":{"baseUrl":format!("{base}/v1"),"api":"openai-completions","apiKey":"fixture",

@@ -38,6 +38,7 @@ import {
   parseHostOperation,
   parseJson,
   toolExecutionModeSchema,
+  toolNamespaceSchema,
 } from './extension-protocol.js'
 
 const require = createRequire(import.meta.url)
@@ -68,6 +69,7 @@ const toolDefinitionSchema = z.looseObject({
   parameters: z.unknown(),
   promptSnippet: z.string().optional(),
   promptGuidelines: z.array(z.string()).optional(),
+  namespace: toolNamespaceSchema.optional(),
   executionMode: toolExecutionModeSchema.optional(),
   prepareArguments: callableSchema.optional(),
   execute: callableSchema,
@@ -250,6 +252,7 @@ interface ToolDefinition {
   parameters: unknown
   promptSnippet?: string
   promptGuidelines?: string[]
+  namespace?: ToolManifest['namespace']
   executionMode?: ToolExecutionMode
   prepareArguments?(input: unknown, context?: ExtensionContext): unknown
   execute(toolCallId: string, input: unknown, signal: AbortSignal, update: ((result: unknown) => void) | undefined, context: ExtensionContext): unknown | Promise<unknown>
@@ -894,6 +897,7 @@ export class ExtensionHost {
           parameters: cloneSchema(definition.parameters, definition.name),
           promptSnippet: definition.promptSnippet,
           promptGuidelines: definition.promptGuidelines ?? [],
+          ...(definition.namespace === undefined ? {} : { namespace: definition.namespace }),
           executionMode: definition.executionMode ?? 'parallel',
         })
       },

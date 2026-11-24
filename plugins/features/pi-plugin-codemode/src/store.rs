@@ -2,7 +2,6 @@ use pi_plugin::{PluginContextError, ToolContext, ToolError};
 use serde_json::{Map, Value};
 
 pub(crate) const STORE_ENTRY_TYPE: &str = "codemode-store";
-pub(crate) const MAX_STORE_BYTES: usize = 1024 * 1024;
 
 pub(crate) fn read(context: &ToolContext) -> Result<Map<String, Value>, ToolError> {
     let snapshot = match context.session.snapshot() {
@@ -30,11 +29,6 @@ pub(crate) fn read(context: &ToolContext) -> Result<Map<String, Value>, ToolErro
         }
         values.extend(set.clone());
     }
-    if serde_json::to_vec(&values).map_or(true, |data| data.len() > MAX_STORE_BYTES) {
-        return Err(ToolError::Execution(
-            "codemode store exceeds the 1 MiB limit".into(),
-        ));
-    }
     Ok(values)
 }
 
@@ -53,18 +47,9 @@ pub(crate) fn persist(context: &ToolContext, writes: Value) -> Result<(), ToolEr
     if set.is_empty() && delete.is_empty() {
         return Ok(());
     }
-    // Enforce the final byte budget on the authoritative branch, independent
-    // of JavaScript string lengths or script mutations to built-in methods.
-    let mut next = read(context)?;
-    for key in delete.iter().filter_map(Value::as_str) {
-        next.remove(key);
-    }
-    next.extend(set.clone());
-    if serde_json::to_vec(&next).map_or(true, |data| data.len() > MAX_STORE_BYTES) {
-        return Err(ToolError::Execution(
-            "codemode store exceeds the 1 MiB limit".into(),
-        ));
-    }
+    // The frozen prelude enforces JSON/key UTF-16 character limits at each
+    // store() write. Reapplying a byte cap here rejects valid Unicode state and
+    // incorrectly rejects historical snapshots that scripts only read/delete.
     match context.session.append_entry(STORE_ENTRY_TYPE, Some(writes)) {
         Ok(()) | Err(PluginContextError::Unbound | PluginContextError::Unavailable(_)) => Ok(()),
         Err(error) => Err(error.into()),

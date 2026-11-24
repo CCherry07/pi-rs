@@ -1,5 +1,5 @@
 {
-  "oracleRevision": "05fd3fbda0bbb9a1c7a76e4bf92ab58ed77c8d94",
+  "oracleRevision": "0ab23c37b074252d04e31f5cfb99491f0613fb80",
   "tools": [
     {
       "name": "read",
@@ -105,6 +105,10 @@
             "type": "string",
             "description": "Full output, when truncated"
           },
+          "full_output_error": {
+            "type": "string",
+            "description": "Why the full output could not be saved, when truncated and saving failed"
+          },
           "exit_code": {
             "type": "number"
           },
@@ -161,6 +165,10 @@
           "full_output_path": {
             "type": "string",
             "description": "Full output, when truncated"
+          },
+          "full_output_error": {
+            "type": "string",
+            "description": "Why the full output could not be saved, when truncated and saving failed"
           },
           "exit_code": {
             "type": "number"

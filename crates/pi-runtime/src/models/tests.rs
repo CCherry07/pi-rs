@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -79,13 +78,15 @@ impl Provider for FixtureProvider {
             api: model.api,
             provider: model.provider,
             model: model.id,
-            answers: BTreeMap::from([(
+            answers: [(
                 "quality".into(),
                 ClassifierAnswer::Score {
                     score: 1.0,
                     confidence: 0.9,
                 },
-            )]),
+            )]
+            .into_iter()
+            .collect(),
             usage: Some(Usage {
                 input: 3,
                 output: 2,
@@ -193,13 +194,15 @@ fn classifier_request() -> ClassifierContext {
     ClassifierContext {
         state: serde_json::Map::new(),
         images: Vec::new(),
-        questions: BTreeMap::from([(
+        questions: [(
             "quality".into(),
             ClassifierQuestion::Score {
                 instructions: "Evaluate quality".into(),
                 criteria: vec!["poor".into(), "good".into()],
             },
-        )]),
+        )]
+        .into_iter()
+        .collect(),
     }
 }
 

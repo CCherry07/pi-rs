@@ -31,8 +31,9 @@ when independent calls should preserve successful results despite individual fai
 
 ## Script helpers
 
-- `tools.NAME(args)` and `tools["exact name"](args)` call scoped tools. Safe normalized aliases are
-  provided only when unambiguous. Exact names always remain accessible.
+- `tools.NAME(args)` and `tools["exact name"](args)` call scoped tools. Names normalize to JavaScript
+  identifiers; the first registered tool wins a collision, including collisions with an exact name.
+  `ALL_TOOLS` lists each normalized identifier once. Missing members report nearby matches.
 - `ALL_TOOLS` contains `{ name, description }`, including TypeScript input/output declarations and guidelines.
 - `await searchTools(query, { limit?, namespace? })` uses the shared BM25 ranker.
 - `await describeTool(name)` returns its description and TypeScript declaration; `await describeNamespace(name)` returns
@@ -56,6 +57,8 @@ text(await tools.read({ path: "Cargo.toml" }));
 
 ## Model operations
 
+The Coding product enables `models`. Independently composed plugins can opt in with
+`CodemodeOptions { models: true, ..Default::default() }`; the plain plugin does not expose it.
 Scripts query the same generation-local model catalog as the host:
 
 ```js
@@ -66,8 +69,12 @@ const model = await models.getModelOfType("classifier", "typesafe", "jev-latest"
 
 Types are `chat`, `classifier`, and `image`. The provider filter is optional; `null` also means
 all providers. `getModelsOfType` includes registered entries without credentials;
-`getAvailableOfType` filters by configured provider capabilities. An unknown model returns
-`undefined`. Catalog entries contain no API keys or headers. Chat models are queryable, while
+`getAvailableOfType` checks current credential configuration and provider/account filters on each query,
+without refreshing OAuth, executing credential commands, or probing remote endpoints. Credentials added,
+removed or changed during the session are reflected without reload; registered catalog entries stay
+immutable until reload. Availability is not a guarantee of remote service access. An unknown model returns
+`undefined`. Configured API keys and request headers are kept out of catalog entries; registered
+provider metadata is preserved. Chat models are queryable, while
 chat inference continues through the ordinary agent loop.
 
 ```js
@@ -104,7 +111,9 @@ for (const block of result.output) {
 }
 ```
 
-Image input is a nonempty array of text and/or image blocks. Generated images remain inside the
+Image input is a nonempty array of text and/or image blocks. Text blocks preserve optional string
+`textSignature`; malformed known metadata is rejected, and arbitrary extra properties are not forwarded.
+Generated images remain inside the
 script until emitted with `image(block)`; a reminder is appended if none are shown.
 
 Model arguments contribute only `provider` and `id`: the host resolves the registered model again,
@@ -119,10 +128,12 @@ Provider plugins can register typed models and implement classification or image
 the existing provider lifecycle. Rust extends `models.json` entries with `type: "classifier"` or
 `type: "image"`; omitted type means `chat`. These typed entries extend Pi’s current file format;
 the script method and provider wire contracts follow its typed model runtime. Reload replaces these
-catalogs as part of the same validated generation transaction. Credentials and configured headers resolve only when a request is
-made. Coding includes a selected built-in catalog for TypeSafe, OpenAI Decisions and OpenRouter;
-existing API keys in the environment or `auth.json` can enable them. OpenAI Decisions requires an
-API key; ChatGPT OAuth credentials cannot enable that endpoint.
+catalogs as part of the same validated generation transaction. Actual requests resolve credentials and
+configured headers; availability queries perform only read-only configuration checks. Coding includes
+all 46 classifier and 63 image records from the pinned legacy catalog, including supported costs,
+input limits, output modalities, headers and classifier compatibility metadata. Environment or
+`auth.json` credentials can enable them. OpenAI Decisions requires an API key, not ChatGPT OAuth.
+Copilot account filters constrain available models without deleting registered entries.
 
 | Model type | `api` | Endpoint relative to `baseUrl` |
 | --- | --- | --- |
@@ -146,22 +157,34 @@ For example, a local llama.cpp classifier can be added without an API key:
 }
 ```
 
-Cloudflare classifiers need a configured account-specific `baseUrl` ending in `/ai` and credentials;
-they are not added to the default catalog. Other model IDs can be configured through the same file.
+The built-in Cloudflare classifiers resolve their account placeholder from current stored credential
+environment metadata or `CLOUDFLARE_ACCOUNT_ID`; `CLOUDFLARE_API_KEY` supplies the key. A custom
+account-specific `baseUrl` is also supported. Other model IDs can be configured through the same file.
 
 ## Limits and compatibility
 
-The defaults are a 60-second deadline (after admission), 256 MiB QuickJS heap, 256 KiB VM stack,
-and approximately 10,000 output tokens (four UTF-8 bytes per estimated token). At most two VM
-workers run process-wide; admission waits at most 60 seconds and is cancellable. Scripts may set a
-positive timeout up to 2,147,483,647 milliseconds and a nonnegative output budget.
+Scripts have no default deadline. An explicit positive `timeout_ms` up to 2,147,483,647 milliseconds
+includes worker admission and tool calls. The process-wide worker limit defaults to 2;
+`PI_CODEMODE_MAX_WORKERS` is read dynamically on each admission. Waiters are admitted in arrival
+order, can cancel, and wait at most 60 seconds (or the remaining script deadline). Permits stay
+held until the native VM actually exits, even if its caller was already cancelled.
 
-Source is limited to 1 MiB. A script may issue at most 128 host calls, including model queries and inference, with at most
-1 MiB of JSON arguments per tool call or 8 MiB per model call, and 16 MiB total. Each serialized reply is at most 8 MiB; queued replies share a
-32 MiB host-memory budget. Excess replies reject with a message asking for smaller batches. Output
-is limited to 16 MiB and 10,000 items. Text is safely truncated at the requested budget and images
-that do not fit are omitted. Truncation is reported; this version does not save full output files.
-Store values are limited to 256 Ki JavaScript characters, with a 1 MiB authoritative JSON store.
+The VM has a 256 MiB heap and 1 MiB stack guard on an explicitly sized 8 MiB native thread.
+Tool arguments, structured replies and stored values support 512 nested object/array levels (a
+root container counts as one). Bounded stack-growing JSON encoding/decoding protects the bridge;
+session JSONL documents use a separate 1024-level limit for persistence envelopes. There are no
+additional source-size, call-count,
+argument, reply, or catalog quotas. The frozen prelude limits production to 16 Mi UTF-16 code units
+of text and base64 data and 100,000 output items. Exceeding that limit fails the script even if its
+exception is caught. Store values allow 256 Ki JSON characters each, with 1 Mi characters total
+counting keys plus serialized values; Unicode values are not rejected by a UTF-8 byte cap.
+
+The default text budget is 10,000 estimated tokens at four UTF-16 code units per token. Final
+formatted text above the budget keeps its head and tail without splitting surrogate pairs, and
+the complete formatted output is saved to a temporary file exposed as `details.fullOutputPath`.
+Images never consume this text budget. Their detected PNG/JPEG/GIF/WebP MIME type replaces the
+supplied label, and repeated images share a saved file. Result headers report completion/failure,
+wall time and output; failures retain script stacks and a summary of calls already made.
 
 ## Model-facing tool declarations
 
@@ -181,7 +204,7 @@ supplies the script discovery helpers, including each tool's prompt guidelines.
 `docs_path` points to the readable [script and model API reference](codemode.md). Product
 hosts can set it to their installed documentation path.
 
-At script completion, queued calls stop before execution. Started calls are cancelled and given
+Even unawaited tool calls start before script completion is observed. Pending calls are cancelled and given
 up to one second to finish their result hooks; completed usage is retained. The parent scheduler
 also owns these pipelines, so dropping or cancelling the outer tool cannot detach them. Its
 bounded cleanup aborts and joins unfinished async pipelines before returning the parent result.
@@ -193,17 +216,47 @@ QuickJS engine runs on a worker thread, not in an OS process or WebAssembly sand
 interrupts and checks between promise jobs stop loops, while host futures and their cancellation
 signals stop pending tools. Native operations that do not poll interrupts can delay thread cleanup;
 the worker permit remains held until cleanup completes. The heap quota covers the VM, with
-separate bounded host bridge/output buffers; it is not a process-wide RSS limit.
+the prelude limits retained output; it is not a process-wide RSS limit.
 
-Compared with `legacy/pi`, this implementation deliberately uses native QuickJS, has a finite
-default deadline and explicit bridge/call quotas.
-Model availability keeps the Rust host's credential-configuration snapshot rather than resolving
-secrets during catalog queries; actual credential failures appear when calling the model. Specialized
-requests reuse the configured host transport retries, including for Decisions HTTP 504 responses.
-Classifier questions and choice labels use deterministic Rust map ordering rather than JavaScript
-insertion order; llama.cpp labels and answers use that same order consistently. The bundled model
-catalog is a selected subset of Pi's catalog. Configurable worker limits, streaming yields and
-full-output spill files are not yet implemented. Codemode and other model-only tools cannot be called recursively from scripts.
+Conformance targets coding-agent codemode and `packages/codemode` at legacy Pi revision
+`0ab23c37b074252d04e31f5cfb99491f0613fb80`. Session-store persistence, disk reopen/resume and
+selected-branch replay are covered through the native session runtime; the standalone JavaScript
+package's separate durable sandbox API is not implemented. The script prelude,
+source options, output/results and discovery contracts follow that oracle. The implementation
+deliberately uses native QuickJS, not QuickJS-WASM: engine versions, available language intrinsics,
+engine-generated diagnostics/stack formatting, native-operation interruption and host timezone
+are not an engine-equivalence guarantee. `tests/legacy_conformance.rs` compares executable-oracle
+fixtures, normalizing only elapsed time, owned output paths and explicitly marked engine stack frames.
+The native JSON bridge requires Unicode scalar strings and checks an explicit structural depth
+before enabling stack-growing decoding. Lone UTF-16 surrogates and over-limit arguments/store
+writes fail explicitly as terminal sandbox errors; they cannot leave an execution waiting forever.
+Already-serialized object/array return output avoids a redundant host decode. Exact V8 diagnostic
+wording and lossless lone-surrogate transport are accepted non-goals. Malformed
+`@options` JSON diagnostics currently use the Rust JSON parser rather than V8's diagnostic suffix.
+Specialized requests reuse the configured host transport retries, including for Decisions HTTP 504
+responses. Typed model contexts retain supported metadata, not arbitrary extra JavaScript properties.
+The catalog generator checks all specialized records against the pinned source; credential rotation,
+account filtering and protocol tests use fake credentials and capturing transports. The codemode
+facade fixtures use identical deterministic model capabilities, not real-provider authentication. Codemode and other model-only tools
+cannot be called recursively from scripts. Generic runtime generations, session persistence and
+nested-tool cancellation remain owned by the Rust host rather than a second JavaScript runtime.
+
+## Executable conformance checks
+
+From the repository root:
+
+```sh
+cargo test -p pi-plugin-codemode --test legacy_conformance
+python3 scripts/sync-specialized-model-catalog.py --check
+node --import ./legacy/pi/packages/coding-agent/src/experimental/source-resolver.ts scripts/sync-codemode-conformance.mjs --check
+```
+
+Omit `--check` to regenerate from a clean local legacy checkout. The generator executes the actual
+coding-agent tool with fake tools/models, verifies temporary image/spill files, and records the
+oracle revision. Cargo consumes the checked-in fixture without Node or the legacy checkout.
+Documentation paths are configured identically in both hosts rather than rewriting error messages.
+The tests preserve error names/messages, call statuses and side-effect summaries; only elapsed
+time, generated paths and explicitly selected engine stack frames are normalized.
 
 ## Measuring overhead
 

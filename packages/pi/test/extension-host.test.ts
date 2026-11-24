@@ -69,6 +69,24 @@ test('keeps the first tool when extensions register the same name', async () => 
   })
 })
 
+test('preserves registered tool namespace aliases and optional omissions', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-tool-namespaces-'))
+  const extension = join(root, 'extension.ts')
+  await writeFile(extension, `export default (pi: any) => {
+    for (const [name, namespace] of [
+      ['full', { name: 'docs', aliases: ['dev-radius'], description: '', instructions: 'Read the guide.' }],
+      ['minimal', { name: 'minimal' }], ['plain', undefined],
+    ]) pi.registerTool({ name, namespace, parameters: {type:'object'}, execute: async () => ({content:[]}) });
+  }`)
+  const manifest = parseGenerationManifest(await new ExtensionHost().dispatch(JSON.stringify({
+    type: 'prepareGeneration', request: { projectTrusted: true, extensionPaths: [extension], mode: 'print' },
+  })))
+  const tools = manifest.agentPlugins.flatMap(plugin => plugin.tools)
+  assert.deepEqual(tools[0]?.namespace, { name: 'docs', aliases: ['dev-radius'], description: '', instructions: 'Read the guide.' })
+  assert.deepEqual(tools[1]?.namespace, { name: 'minimal' })
+  assert.equal(Object.hasOwn(tools[2]!, 'namespace'), false)
+})
+
 test('suffixes duplicate command invocation names in extension order', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-duplicate-commands-'))
   const first = join(root, 'first.ts')

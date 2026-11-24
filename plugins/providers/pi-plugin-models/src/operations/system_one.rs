@@ -1,8 +1,7 @@
 use super::invalid;
-use pi_core::{ClassifierAnswer, ClassifierContext, ClassifierModelSpec, ClassifierQuestion};
+use pi_core::{ClassifierContext, ClassifierModelSpec, ClassifierQuestion};
 use pi_plugin::ProviderError;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
 
 pub(super) fn payload(
     model: &ClassifierModelSpec,
@@ -145,7 +144,7 @@ pub(super) fn cloudflare_output(body: &Value) -> Result<&Value, ProviderError> {
 pub(super) fn answers(
     body: &Value,
     context: &ClassifierContext,
-) -> Result<BTreeMap<String, ClassifierAnswer>, ProviderError> {
+) -> Result<pi_core::ClassifierAnswers, ProviderError> {
     let answers = body
         .get("answers")
         .and_then(Value::as_object)
@@ -186,7 +185,7 @@ pub(super) fn answers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pi_core::ImageContent;
+    use pi_core::{ClassifierAnswer, ImageContent};
 
     fn context() -> ClassifierContext {
         serde_json::from_value(json!({"state":{"task":"review"},"questions":{"approve":{"type":"bool","instructions":"Approve?","criteria":{"true":"yes","false":"no"}}}})).unwrap()

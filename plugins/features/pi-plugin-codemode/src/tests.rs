@@ -40,7 +40,7 @@ async fn runs_async_source_console_return_images_and_store_with_fresh_globals() 
         const value = load('__proto__'); value.ok = false;
         text(load('__proto__'));
         console.warn('warning', 2);
-        image('data:image/png;base64,aGVsbG8=');
+        image('data:image/png;base64,iVBORw0KGgo=');
         globalThis.someState = 9;
         return await Promise.resolve({answer:42});
     "#).await;
@@ -77,7 +77,7 @@ async fn enforces_deadlines_on_cpu_and_promise_loops_and_detects_stalled_promise
     for body in ["while (true) {}", "while (true) await null;"] {
         let started = Instant::now();
         let result = script(&format!(
-            "// @options: {{\"timeout_ms\":30}}\ntext('before'); {body}"
+            "// @options: {{\"timeout_ms\":500}}\ntext('before'); {body}"
         ))
         .await;
         assert!(result.is_error);
@@ -91,25 +91,36 @@ async fn enforces_deadlines_on_cpu_and_promise_loops_and_detects_stalled_promise
     }
     let stalled = script("await new Promise(() => {});").await;
     assert!(stalled.is_error);
-    assert!(text_of(&stalled).contains("stalled"));
+    assert!(text_of(&stalled).contains("promise that can never settle"));
 }
 
 #[tokio::test]
 async fn output_and_source_limits_are_enforced_without_losing_utf8_boundaries() {
     let result = script("// @options: {\"max_output_tokens\":2}\ntext('你好世界');").await;
     assert!(!result.is_error);
-    assert!(text_of(&result).contains("你好"));
-    assert!(!text_of(&result).contains("世界"));
-    assert_eq!(result.details.unwrap()["truncated"], true);
+    assert!(text_of(&result).contains("你好世界"));
+    assert!(result.details.unwrap().get("fullOutputPath").is_none());
     let framed =
         script("// @options: {\"max_output_tokens\":1}\nfor (let n=0; n<9999; n++) text('');")
             .await;
     assert!(!framed.is_error);
-    assert!(text_of(&framed).len() < 100);
-    assert_eq!(framed.details.unwrap()["truncated"], true);
-    let result = script("for (let n=0; n<11000; n++) text('');").await;
+    assert!(text_of(&framed).len() < 500);
+    let path = framed.details.unwrap()["fullOutputPath"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("==> text 9999/9999 <==")
+    );
+    std::fs::remove_file(path).unwrap();
+    let result = script("for (let n=0; n<100001; n++) text('');").await;
     assert!(result.is_error);
-    assert!(text_of(&result).contains("10000 items"));
+    assert!(text_of(&result).contains("100000 text(), image(), and console calls"));
+    if let Some(path) = result.details.unwrap()["fullOutputPath"].as_str() {
+        std::fs::remove_file(path).unwrap();
+    }
     for source in [
         "// @options: {\"timeout_ms\":0}\ntext(1)",
         "text(1);\n// @options: {}",
@@ -136,8 +147,9 @@ fn enforces_quickjs_heap_limit() {
         output: Arc::new(Mutex::new(Output::default())),
         requests,
         replies: received,
-        deadline: Instant::now() + Duration::from_secs(2),
+        deadline: Some(Instant::now() + Duration::from_secs(2)),
         memory_limit: 8 * 1024 * 1024,
+        models: false,
     });
     assert!(result.error.is_some(), "heap allocation must fail");
 }
@@ -185,7 +197,7 @@ impl NestedToolExecutor for FakeExecutor {
             ..Usage::default()
         });
         let structured_content = (name == "structured").then(
-            || json!({"content":[{"type":"text","text":"raw"}],"structuredContent":{"ok":true}}),
+            || json!({"content":[{"type":"text","text":"raw"}],"structuredContent":arguments}),
         );
         Ok(NestedToolResult {
             call_id: ToolCallId::new(format!("script/{id}")),
@@ -256,7 +268,7 @@ async fn script_exit_and_timeout_drain_cancelled_pipelines_and_their_usage() {
     for (code, expected_usage, expected_error) in [
         ("tools.wait({}); await tools.read({}); exit();", 6, false),
         (
-            "// @options: {\"timeout_ms\":50}\nawait tools.wait({});",
+            "// @options: {\"timeout_ms\":500}\nawait tools.wait({});",
             3,
             true,
         ),
@@ -336,6 +348,45 @@ async fn bridges_parallel_json_calls_structured_results_errors_and_usage() {
 }
 
 #[tokio::test]
+async fn near_limit_json_round_trips_through_tool_arguments_results_and_store_writes() {
+    let (_abort, signal) = AbortHandle::new();
+    let executor = Arc::new(FakeExecutor {
+        barrier: None,
+        started: AtomicUsize::new(0),
+        cancelled: Arc::new(AtomicBool::new(false)),
+    });
+    let result = codemode_tool()
+        .execute(
+            fake_context(signal, executor),
+            ToolCallId::new("deep-roundtrip"),
+            json!({"code":r#"
+                let deep = "tool-leaf";
+                for (let index = 0; index < 511; index++) deep = {next: deep};
+                const echoed = await tools.structured({deep});
+                let node = echoed.structuredContent.deep;
+                let depth = 0;
+                while (node && typeof node === "object") { depth++; node = node.next; }
+                text({depth, leaf: node});
+
+                let stored = "store-leaf";
+                for (let index = 0; index < 512; index++) stored = {next: stored};
+                store("deep", stored);
+                node = load("deep");
+                depth = 0;
+                while (node && typeof node === "object") { depth++; node = node.next; }
+                text({depth, leaf: node});
+            "#}),
+            ToolUpdateSink::channel().0,
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error, "{}", text_of(&result));
+    let output = text_of(&result);
+    assert!(output.contains(r#"{"depth":511,"leaf":"tool-leaf"}"#));
+    assert!(output.contains(r#"{"depth":512,"leaf":"store-leaf"}"#));
+}
+
+#[tokio::test]
 async fn aborting_script_drops_pending_nested_tools() {
     let (abort, signal) = AbortHandle::new();
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -372,7 +423,7 @@ async fn aborting_script_drops_pending_nested_tools() {
 }
 
 #[tokio::test]
-async fn successful_return_cancels_unawaited_calls_and_call_storms_are_bounded() {
+async fn successful_return_cancels_unawaited_calls_without_artificial_call_quotas() {
     let (_abort, signal) = AbortHandle::new();
     let cancelled = Arc::new(AtomicBool::new(false));
     let executor = Arc::new(FakeExecutor {
@@ -384,7 +435,7 @@ async fn successful_return_cancels_unawaited_calls_and_call_storms_are_bounded()
         .execute(
             fake_context(signal, executor),
             ToolCallId::new("script"),
-            json!({"code":"tools.wait({}); await tools.read({}); return 'complete';"}),
+            json!({"code":"tools.wait({}); return 'complete';"}),
             ToolUpdateSink::channel().0,
         )
         .await
@@ -401,8 +452,8 @@ async fn successful_return_cancels_unawaited_calls_and_call_storms_are_bounded()
     });
     let result = codemode_tool().execute(fake_context(signal, executor.clone()), ToolCallId::new("script"), json!({"code":"const results = await Promise.allSettled(Array.from({length:130}, () => tools.read({}))); text(results.filter(x => x.status === 'rejected').length);"}), ToolUpdateSink::channel().0).await.unwrap();
     assert!(!result.is_error, "{}", text_of(&result));
-    assert_eq!(executor.started.load(Ordering::SeqCst), 128);
-    assert!(text_of(&result).ends_with('2'));
+    assert_eq!(executor.started.load(Ordering::SeqCst), 130);
+    assert!(text_of(&result).ends_with('0'));
 }
 
 #[tokio::test]
@@ -418,7 +469,7 @@ async fn invalid_images_fail_without_entering_provider_content() {
 }
 
 #[test]
-fn catalog_preserves_exact_names_and_exposes_namespace_instructions() {
+fn catalog_normalizes_names_and_exposes_namespace_instructions() {
     let (_abort, signal) = AbortHandle::new();
     let executor = Arc::new(FakeExecutor {
         barrier: None,
@@ -433,18 +484,19 @@ fn catalog_preserves_exact_names_and_exposes_namespace_instructions() {
     tools[2].spec.name = "read.file".into();
     tools[0].discovery.namespace = Some(pi_plugin::ToolNamespace {
         name: "files".into(),
+        aliases: Vec::new(),
         description: Some("file search".into()),
         instructions: Some("Use relative paths".into()),
     });
     let catalog = Catalog::new(&tools).unwrap();
     let declarations: Value = serde_json::from_str(&catalog.declarations).unwrap();
-    assert_eq!(declarations[0]["jsName"], "read-file");
+    assert_eq!(declarations[0]["jsName"], "read_file");
     assert_eq!(declarations[1]["jsName"], "read_file");
-    assert_eq!(declarations[2]["jsName"], "read.file");
+    assert_eq!(declarations[2]["jsName"], "read_file");
     let namespace: Value =
         serde_json::from_str(&catalog.query("describeNamespace", r#"["files"]"#).unwrap()).unwrap();
     assert_eq!(namespace["value"]["instructions"], "Use relative paths");
-    assert_eq!(namespace["value"]["tools"][0], "read-file");
+    assert_eq!(namespace["value"]["tools"][0], "read_file");
     let found: Value = serde_json::from_str(
         &catalog
             .query("searchTools", r#"["file",{"namespace":"files"}]"#)
@@ -454,15 +506,16 @@ fn catalog_preserves_exact_names_and_exposes_namespace_instructions() {
     assert_eq!(found["value"].as_array().unwrap().len(), 1);
     let description = declarations[0]["description"].as_str().unwrap();
     assert!(description.contains("codemode tool declaration:"));
-    assert!(description.contains("\"read-file\"(args:"));
+    assert!(description.contains("read_file(args:"));
     assert!(description.contains("Promise<string>"));
 }
 
 #[tokio::test]
 async fn emitted_images_are_saved_once_and_paths_reach_the_model() {
-    let result =
-        script("image('data:image/png;base64,aGVsbG8='); image('data:image/png;base64,aGVsbG8=');")
-            .await;
+    let result = script(
+        "image('data:image/png;base64,iVBORw0KGgo='); image('data:image/png;base64,iVBORw0KGgo=');",
+    )
+    .await;
     assert!(!result.is_error, "{}", text_of(&result));
     let labels = result
         .content
@@ -482,7 +535,7 @@ async fn emitted_images_are_saved_once_and_paths_reach_the_model() {
         .split(" (image/png,")
         .next()
         .unwrap();
-    assert_eq!(std::fs::read(path).unwrap(), b"hello");
+    assert_eq!(std::fs::read(path).unwrap(), b"\x89PNG\r\n\x1a\n");
     std::fs::remove_file(path).unwrap();
 }
 
@@ -577,11 +630,311 @@ fn codemode_loadout_changes_actual_registered_declarations_without_mutating_the_
     assert!(!only.tools[0].description.contains("### `wait`"));
 }
 
+#[tokio::test]
+async fn canonical_prelude_keeps_sloppy_arrow_scope_and_frozen_intrinsics() {
+    let result = script("Array.prototype.push=()=>0; const a=[]; a.push(1); text(a); return [this===globalThis,typeof arguments];").await;
+    assert!(!result.is_error, "{}", text_of(&result));
+    assert!(text_of(&result).contains("[1]"));
+    assert!(text_of(&result).contains("[true,\"undefined\"]"));
+    let result = script("globalLeak=3; return globalThis.globalLeak;").await;
+    assert!(!result.is_error);
+    assert!(text_of(&result).ends_with('3'));
+    assert!(script("const tools={}; return 1").await.is_error);
+}
+
+#[tokio::test]
+async fn return_serialization_and_image_sniffing_match_script_contract() {
+    let result = script("text(new Error('x')); return NaN;").await;
+    assert!(!result.is_error);
+    assert!(text_of(&result).ends_with("null"));
+    assert!(text_of(&result).contains("{}"));
+    assert!(script("return 1n;").await.is_error);
+    assert!(script("const x={}; x.x=x; text(x);").await.is_error);
+    let result = script("// @options: {\"max_output_tokens\":0}\nimage({type:'image',data:'iVBORw0KGgo=',mimeType:'image/jpeg'});").await;
+    assert!(!result.is_error, "{}", text_of(&result));
+    assert!(
+        result.content.iter().any(
+            |block| matches!(block,ContentBlock::Image(image) if image.mime_type == "image/png")
+        )
+    );
+}
+
+#[tokio::test]
+async fn unicode_store_limits_count_json_characters_not_bytes() {
+    let result = script("const value='中'.repeat(200000); for(let i=0;i<4;i++) store(String(i),value); return load('3').length;").await;
+    assert!(!result.is_error, "{}", text_of(&result));
+    assert!(text_of(&result).ends_with("200000"));
+}
+
 #[test]
-fn queued_result_budget_is_released_on_drop() {
-    let total = Arc::new(AtomicUsize::new(0));
-    let reservation = ReplyReservation::new(&total, 32 * 1024 * 1024).unwrap();
-    assert!(ReplyReservation::new(&total, 1).is_none());
-    drop(reservation);
-    assert!(ReplyReservation::new(&total, 1).is_some());
+fn input_schema_allows_additional_fields() {
+    assert!(parse_input(&json!({"code":"return 1", "ignored":true})).is_ok());
+}
+
+async fn with_context_and_workers(
+    code: &str,
+    workers: Arc<workers::Workers>,
+    context: ToolContext,
+) -> ToolResult {
+    let catalog = Arc::new(Catalog::new(context.nested_tools()).unwrap());
+    run(
+        context,
+        ToolCallId::new("queue-test"),
+        Source::parse(code).unwrap(),
+        catalog,
+        json!({}),
+        ToolUpdateSink::channel().0,
+        RunOptions {
+            models: false,
+            docs_path: CodemodeOptions::default().docs_path,
+            workers,
+        },
+    )
+    .await
+    .unwrap()
+}
+
+async fn with_workers(
+    code: &str,
+    workers: Arc<workers::Workers>,
+    signal: AbortSignal,
+) -> ToolResult {
+    with_context_and_workers(
+        code,
+        workers,
+        ToolContext::standalone(std::env::temp_dir(), signal),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn admission_failures_are_tool_results_and_never_start_the_script() {
+    let workers = Arc::new(workers::Workers::new(|| 1));
+    let occupied = workers.reserve().await;
+    let (_abort, signal) = AbortHandle::new();
+    let result = with_workers(
+        "// @options: {\"timeout_ms\":20}\ntext('must not run')",
+        workers.clone(),
+        signal,
+    )
+    .await;
+    assert!(result.is_error);
+    let text = text_of(&result);
+    assert!(
+        text.contains("Execution timed out after 20 ms while waiting for a free codemode worker")
+    );
+    assert!(text.contains("The script did not start."));
+    assert!(!text.contains("must not run"));
+    assert_eq!(result.details.unwrap(), json!({"calls":[]}));
+    let (abort, signal) = AbortHandle::new();
+    abort.abort();
+    let result = with_workers("return 1", workers.clone(), signal).await;
+    assert!(text_of(&result).contains("Script aborted: Execution aborted"));
+    drop(occupied);
+    let (_abort, signal) = AbortHandle::new();
+    assert!(!with_workers("return 1", workers, signal).await.is_error);
+}
+
+#[tokio::test]
+async fn deadline_after_admission_uses_only_the_remaining_time() {
+    let workers = Arc::new(workers::Workers::new(|| 1));
+    let occupied = workers.reserve().await;
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        drop(occupied);
+    });
+    let (_abort, signal) = AbortHandle::new();
+    let result = with_workers(
+        "// @options: {\"timeout_ms\":250}\ntext('started'); while(true) {}",
+        workers,
+        signal,
+    )
+    .await;
+    release.await.unwrap();
+    assert!(result.is_error);
+    let text = text_of(&result);
+    assert!(text.contains("started"), "{text}");
+    let millis = text
+        .split("Execution timed out after ")
+        .nth(1)
+        .unwrap()
+        .split(' ')
+        .next()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    assert!(
+        millis <= 120,
+        "admission must consume the original 250ms deadline: {text}"
+    );
+}
+
+#[tokio::test]
+async fn plain_codemode_has_no_models_but_configured_feature_exposes_them() {
+    assert!(text_of(&script("return typeof models").await).ends_with("undefined"));
+    let (_abort, signal) = AbortHandle::new();
+    let result = CodemodeTool {
+        options: CodemodeOptions {
+            models: true,
+            ..CodemodeOptions::default()
+        },
+    }
+    .execute(
+        ToolContext::standalone(std::env::temp_dir(), signal),
+        ToolCallId::new("models-test"),
+        json!({"code":"return typeof models.getModelsOfType"}),
+        ToolUpdateSink::channel().0,
+    )
+    .await
+    .unwrap();
+    assert!(!result.is_error, "{}", text_of(&result));
+    assert!(text_of(&result).ends_with("function"));
+}
+
+#[tokio::test]
+async fn model_named_tools_stay_in_the_tool_dispatch_scope() {
+    let (_abort, signal) = AbortHandle::new();
+    let executor = Arc::new(FakeExecutor {
+        barrier: None,
+        started: AtomicUsize::new(0),
+        cancelled: Arc::new(AtomicBool::new(false)),
+    });
+    let context = fake_context(signal.clone(), executor.clone());
+    let mut tool = context.nested_tools()[0].clone();
+    tool.spec.name = "models.getModelsOfType".into();
+    let context = ToolContext::standalone(std::env::temp_dir(), signal)
+        .with_nested_executor(vec![tool], executor.clone());
+    let result = codemode_tool()
+        .execute(
+            context,
+            ToolCallId::new("tool-model-name"),
+            json!({"code":"return await tools.models_getModelsOfType({value:'tool'});"}),
+            ToolUpdateSink::channel().0,
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error, "{}", text_of(&result));
+    assert!(text_of(&result).ends_with("tool"));
+    assert_eq!(executor.started.load(Ordering::SeqCst), 1);
+    let calls = &result.details.as_ref().unwrap()["calls"];
+    assert_eq!(calls[0]["name"], "models.getModelsOfType");
+    assert!(calls[0].get("cost").is_none());
+}
+
+#[tokio::test]
+async fn caught_terminal_signals_cannot_start_more_tools() {
+    for (code, failed) in [
+        ("try { exit(); } catch (_) {} tools.read({});", false),
+        (
+            "try { text('x'.repeat(16*1024*1024+1)); } catch (_) {} tools.read({});",
+            true,
+        ),
+    ] {
+        let (_abort, signal) = AbortHandle::new();
+        let executor = Arc::new(FakeExecutor {
+            barrier: None,
+            started: AtomicUsize::new(0),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        });
+        let result = codemode_tool()
+            .execute(
+                fake_context(signal, executor.clone()),
+                ToolCallId::new("terminal"),
+                json!({"code":code}),
+                ToolUpdateSink::channel().0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, failed, "{}", text_of(&result));
+        assert_eq!(executor.started.load(Ordering::SeqCst), 0);
+        assert_eq!(result.details.unwrap()["calls"], json!([]));
+    }
+}
+
+#[tokio::test]
+async fn deep_call_cancellation_and_overlimit_arguments_leave_the_next_worker_healthy() {
+    let workers = Arc::new(workers::Workers::new(|| 1));
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let executor = Arc::new(FakeExecutor {
+        barrier: None,
+        started: AtomicUsize::new(0),
+        cancelled: cancelled.clone(),
+    });
+    let (_abort, signal) = AbortHandle::new();
+    let result = with_context_and_workers(
+        r#"
+            let deep = 0;
+            for (let index = 0; index < 511; index++) deep = {next: deep};
+            tools.wait({deep});
+            await tools.read({});
+            return "finished";
+        "#,
+        workers.clone(),
+        fake_context(signal, executor.clone()),
+    )
+    .await;
+    assert!(!result.is_error, "{}", text_of(&result));
+    assert!(cancelled.load(Ordering::SeqCst));
+    assert_eq!(result.details.unwrap()["calls"][0]["status"], "cancelled");
+
+    let (_abort, signal) = AbortHandle::new();
+    let result = with_context_and_workers(
+        r#"
+            let deep = 0;
+            for (let index = 0; index < 512; index++) deep = {next: deep};
+            await tools.read({deep});
+        "#,
+        workers.clone(),
+        fake_context(signal, executor.clone()),
+    )
+    .await;
+    assert!(result.is_error);
+    assert!(text_of(&result).contains("JSON nesting depth exceeds the limit of 512"));
+    assert_eq!(executor.started.load(Ordering::SeqCst), 2);
+
+    let (_abort, signal) = AbortHandle::new();
+    let next = tokio::time::timeout(
+        Duration::from_secs(2),
+        with_workers("return 1", workers, signal),
+    )
+    .await
+    .expect("cancelled and rejected VMs must release the only worker");
+    assert!(!next.is_error, "{}", text_of(&next));
+}
+
+#[tokio::test]
+async fn bridge_decode_and_overlimit_failures_settle_and_release_the_worker() {
+    let workers = Arc::new(workers::Workers::new(|| 1));
+    for code in [
+        "return String.fromCharCode(0xd800)",
+        "store(String.fromCharCode(0xd800),1); return 1",
+        "let x=0; for(let i=0;i<513;i++)x={x}; store('deep',x); return 1",
+    ] {
+        let (abort, signal) = AbortHandle::new();
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            with_workers(code, workers.clone(), signal),
+        )
+        .await;
+        abort.abort();
+        let result = result.expect("bridge decoding must settle even without a source deadline");
+        assert!(result.is_error, "{}", text_of(&result));
+        assert!(text_of(&result).contains("Sandbox bridge broken"));
+        let (abort, signal) = AbortHandle::new();
+        let next = tokio::time::timeout(
+            Duration::from_secs(2),
+            with_workers("return 1", workers.clone(), signal),
+        )
+        .await;
+        abort.abort();
+        assert!(!next.expect("failed VM must release its worker").is_error);
+    }
+    let (_abort, signal) = AbortHandle::new();
+    let result = with_workers(
+        "let x=0;for(let i=0;i<600;i++)x={x};return x",
+        workers,
+        signal,
+    )
+    .await;
+    assert!(!result.is_error, "{}", text_of(&result));
 }

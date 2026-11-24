@@ -218,6 +218,23 @@ pub trait Provider: Send + Sync {
         self.availability()
     }
 
+    /// Query-time authentication and credential-specific filtering. Registries stay
+    /// immutable; implementations must not refresh OAuth or return credentials.
+    /// The default supports static providers through their configured availability.
+    async fn filter_available_models(
+        &self,
+        models: Vec<crate::AnyModelSpec>,
+        signal: AbortSignal,
+    ) -> Result<Vec<crate::AnyModelSpec>, ProviderError> {
+        if signal.is_aborted() {
+            return Err(ProviderError::Aborted);
+        }
+        Ok(models
+            .into_iter()
+            .filter(|model| self.model_availability(model).is_available())
+            .collect())
+    }
+
     async fn stream(
         &self,
         request: ProviderRequest,

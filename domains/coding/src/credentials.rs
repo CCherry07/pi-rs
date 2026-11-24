@@ -134,12 +134,19 @@ fn save_credentials(
     Ok(())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CredentialPrecedence {
+    EnvironmentFirst,
+    StoredFirst,
+}
+
 #[derive(Clone)]
 pub(crate) struct StoredCredentialSource {
     agent_dir: std::path::PathBuf,
     provider: String,
     explicit: Option<String>,
     environment: Vec<(String, pi_provider::CredentialKind)>,
+    precedence: CredentialPrecedence,
 }
 
 impl StoredCredentialSource {
@@ -154,6 +161,7 @@ impl StoredCredentialSource {
             provider: provider.into(),
             explicit,
             environment,
+            precedence: CredentialPrecedence::EnvironmentFirst,
         }
     }
 
@@ -161,6 +169,20 @@ impl StoredCredentialSource {
         agent_dir: &Path,
         provider: &str,
         explicit: Option<String>,
+    ) -> std::sync::Arc<dyn pi_provider::CredentialSource> {
+        Self::builtin_with_precedence(
+            agent_dir,
+            provider,
+            explicit,
+            CredentialPrecedence::EnvironmentFirst,
+        )
+    }
+
+    pub(crate) fn builtin_with_precedence(
+        agent_dir: &Path,
+        provider: &str,
+        explicit: Option<String>,
+        precedence: CredentialPrecedence,
     ) -> std::sync::Arc<dyn pi_provider::CredentialSource> {
         use pi_provider::CredentialKind::{ApiKey, Bearer, OAuth};
         let environment = match provider {
@@ -173,22 +195,139 @@ impl StoredCredentialSource {
             "openai" => vec![("OPENAI_API_KEY", ApiKey)],
             "github-copilot" => vec![("COPILOT_GITHUB_TOKEN", ApiKey)],
             "kimi-coding" => vec![("KIMI_API_KEY", ApiKey)],
-            _ => Vec::new(),
+            "google" => vec![("GEMINI_API_KEY", ApiKey)],
+            "google-vertex" => vec![("GOOGLE_CLOUD_API_KEY", ApiKey)],
+            "mistral" => vec![("MISTRAL_API_KEY", ApiKey)],
+            "azure" | "azure-openai-responses" => vec![("AZURE_OPENAI_API_KEY", ApiKey)],
+            "openrouter" => vec![("OPENROUTER_API_KEY", ApiKey)],
+            "amazon-bedrock" => vec![("AWS_BEARER_TOKEN_BEDROCK", Bearer)],
+            _ => pi_plugin_gateways::gateway_definitions()
+                .iter()
+                .find(|definition| definition.id == provider)
+                .map(|definition| {
+                    definition
+                        .environment
+                        .iter()
+                        .map(|key| (key.as_str(), ApiKey))
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
         .into_iter()
         .map(|(key, kind)| (key.to_owned(), kind))
         .collect();
-        std::sync::Arc::new(Self::new(agent_dir, provider, explicit, environment))
+        let mut source = Self::new(agent_dir, provider, explicit, environment);
+        source.precedence = precedence;
+        std::sync::Arc::new(source)
     }
 }
 
 #[async_trait::async_trait]
 impl pi_provider::CredentialSource for StoredCredentialSource {
+    async fn check(
+        &self,
+        signal: &pi_core::AbortSignal,
+    ) -> Result<Option<pi_provider::ProviderCredential>, pi_plugin::ProviderError> {
+        use pi_provider::{CredentialKind, ProviderCredential};
+        if signal.is_aborted() {
+            return Err(pi_plugin::ProviderError::Aborted);
+        }
+        if let Some(credential) = self.configured_credential()? {
+            return Ok(Some(credential));
+        }
+        // Availability is a read, not a login/refresh transaction. In particular
+        // expired OAuth must not acquire the auth lock or contact the provider.
+        let stored = read_stored_credential(&self.agent_dir, &self.provider).map_err(|_| {
+            pi_plugin::ProviderError::Failure(format!(
+                "Credential store read failed for {}",
+                self.provider
+            ))
+        })?;
+        Ok(stored.and_then(|value| {
+            let secret = source_secret(&value)?;
+            let kind = if value.is_oauth() {
+                CredentialKind::OAuth
+            } else {
+                CredentialKind::ApiKey
+            };
+            let metadata = match value {
+                StoredCredential::ApiKey { env, mut extra, .. } => {
+                    extra.insert("env".into(), serde_json::json!(env));
+                    extra
+                }
+                StoredCredential::Oauth { extra, .. } => extra,
+            };
+            Some(ProviderCredential {
+                secret,
+                kind,
+                metadata,
+            })
+        }))
+    }
+
     async fn resolve(
         &self,
         signal: &pi_core::AbortSignal,
     ) -> Result<Option<pi_provider::ProviderCredential>, pi_plugin::ProviderError> {
         use pi_provider::{CredentialKind, ProviderCredential};
+        if let Some(credential) = self.configured_credential()? {
+            return Ok(Some(credential));
+        }
+        let source = self.clone();
+        let lock_signal = signal.clone();
+        // A detached refresh must finish persisting a rotated token even when
+        // the caller aborts. Cancellation still interrupts waiting for the lock.
+        let task = tokio::spawn(async move { source.resolve_stored(&lock_signal).await });
+        let credential = tokio::select! {
+            _ = signal.wait() => return Err(pi_plugin::ProviderError::Aborted),
+            result = task => result.map_err(|error| pi_plugin::ProviderError::Failure(error.to_string()))?.map_err(pi_plugin::ProviderError::Failure)?,
+        };
+        Ok(credential.and_then(|value| {
+            let secret = source_secret(&value)?;
+            let kind = if value.is_oauth() {
+                CredentialKind::OAuth
+            } else {
+                CredentialKind::ApiKey
+            };
+            let mut metadata = match value {
+                StoredCredential::ApiKey { env, mut extra, .. } => {
+                    extra.insert("env".into(), serde_json::json!(env));
+                    extra
+                }
+                StoredCredential::Oauth { extra, .. } => extra,
+            };
+            if self.provider == "github-copilot"
+                && let Ok(domain) = std::env::var("GITHUB_COPILOT_ENTERPRISE_DOMAIN")
+            {
+                metadata.insert("enterpriseUrl".into(), serde_json::json!(domain));
+            }
+            Some(ProviderCredential {
+                secret,
+                kind,
+                metadata,
+            })
+        }))
+    }
+}
+
+impl StoredCredentialSource {
+    fn configured_credential(
+        &self,
+    ) -> Result<Option<pi_provider::ProviderCredential>, pi_plugin::ProviderError> {
+        use pi_provider::{CredentialKind, ProviderCredential};
+        // Keep the selected provider adapter's existing source precedence.
+        // Returning None selects the shared stored path below: checks remain
+        // read-only, while requests may still refresh stored OAuth credentials.
+        if self.explicit.is_none()
+            && self.precedence == CredentialPrecedence::StoredFirst
+            && read_stored_credential(&self.agent_dir, &self.provider)
+                .map_err(pi_plugin::ProviderError::Failure)?
+                .as_ref()
+                .and_then(source_secret)
+                .is_some()
+        {
+            return Ok(None);
+        }
         // Cloudflare merges each stored field before falling back to ambient env.
         let cloudflare = if self.provider.starts_with("cloudflare-") {
             read_stored_credential(&self.agent_dir, &self.provider)
@@ -240,44 +379,9 @@ impl pi_provider::CredentialSource for StoredCredentialSource {
                 metadata,
             }));
         }
-        let source = self.clone();
-        let lock_signal = signal.clone();
-        // A detached refresh must finish persisting a rotated token even when
-        // the caller aborts. Cancellation still interrupts waiting for the lock.
-        let task = tokio::spawn(async move { source.resolve_stored(&lock_signal).await });
-        let credential = tokio::select! {
-            _ = signal.wait() => return Err(pi_plugin::ProviderError::Aborted),
-            result = task => result.map_err(|error| pi_plugin::ProviderError::Failure(error.to_string()))?.map_err(pi_plugin::ProviderError::Failure)?,
-        };
-        Ok(credential.and_then(|value| {
-            let secret = value.secret()?.to_owned();
-            let kind = if value.is_oauth() {
-                CredentialKind::OAuth
-            } else {
-                CredentialKind::ApiKey
-            };
-            let mut metadata = match value {
-                StoredCredential::ApiKey { env, mut extra, .. } => {
-                    extra.insert("env".into(), serde_json::json!(env));
-                    extra
-                }
-                StoredCredential::Oauth { extra, .. } => extra,
-            };
-            if self.provider == "github-copilot"
-                && let Ok(domain) = std::env::var("GITHUB_COPILOT_ENTERPRISE_DOMAIN")
-            {
-                metadata.insert("enterpriseUrl".into(), serde_json::json!(domain));
-            }
-            Some(ProviderCredential {
-                secret,
-                kind,
-                metadata,
-            })
-        }))
+        Ok(None)
     }
-}
 
-impl StoredCredentialSource {
     pub(crate) async fn resolve_stored(
         &self,
         signal: &pi_core::AbortSignal,
@@ -332,6 +436,18 @@ impl StoredCredentialSource {
         save_credentials(&self.agent_dir, &credentials)?;
         Ok(Some(refreshed))
     }
+}
+
+// Ambient providers such as Vertex and Bedrock can be configured through
+// stored environment metadata alone. Their adapters interpret the empty secret
+// as absent; ordinary API-key protocols must still require a nonempty key.
+fn source_secret(credential: &StoredCredential) -> Option<String> {
+    credential.secret().map(str::to_owned).or_else(|| {
+        credential
+            .environment()
+            .is_some_and(|env| !env.is_empty())
+            .then(String::new)
+    })
 }
 
 fn needs_refresh(credential: Option<&StoredCredential>) -> bool {

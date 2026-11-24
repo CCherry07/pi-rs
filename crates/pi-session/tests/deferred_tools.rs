@@ -52,6 +52,7 @@ impl Plugin for DiscoveryPlugin {
                     exposure: ToolExposure::Deferred,
                     namespace: Some(ToolNamespace {
                         name: "fixture".into(),
+                        aliases: Vec::new(),
                         description: Some("Deferred fixture tools".into()),
                         instructions: None,
                     }),

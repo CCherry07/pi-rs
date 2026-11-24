@@ -50,6 +50,16 @@ pub trait ModelsContextAccess: Send + Sync {
         unbound()
     }
 
+    /// Asynchronously checks current credentials without rebuilding the catalog.
+    async fn query_available_models_of_type(
+        &self,
+        model_type: ModelType,
+        provider: Option<&ProviderId>,
+        _signal: AbortSignal,
+    ) -> PluginContextResult<Vec<AnyModelSpec>> {
+        self.available_models_of_type(model_type, provider)
+    }
+
     async fn classify_model(
         &self,
         _provider: ProviderId,
@@ -159,6 +169,18 @@ macro_rules! impl_models_context {
                 self.handle
                     .access()?
                     .available_models_of_type(model_type, provider)
+            }
+
+            pub async fn query_available_models_of_type(
+                &self,
+                model_type: ModelType,
+                provider: Option<&ProviderId>,
+                signal: AbortSignal,
+            ) -> PluginContextResult<Vec<AnyModelSpec>> {
+                self.handle
+                    .access()?
+                    .query_available_models_of_type(model_type, provider, signal)
+                    .await
             }
 
             pub fn model_of_type(

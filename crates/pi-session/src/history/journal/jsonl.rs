@@ -956,7 +956,11 @@ impl RawMessageMutation<'_> {
                 parent_id: self.parent_id,
                 timestamp_ms: self.timestamp_ms,
                 entry: SessionEntry::Message(MessageEntry {
-                    message: AgentMessage::from_shared_raw_json(source, start..end)?,
+                    message: AgentMessage::from_shared_raw_json_with_max_depth(
+                        source,
+                        start..end,
+                        crate::history::SESSION_JSON_MAX_DEPTH,
+                    )?,
                     terminate: self.terminate,
                 }),
             },
@@ -991,14 +995,22 @@ fn decode_mutation(
     // so operation-heavy sessions do not parse every record twice. Files with
     // alternate valid whitespace or field ordering retain the generic path.
     if line.starts_with(br#"{"kind":"entry","#) {
-        match serde_json::from_slice::<RawMessageMutation<'_>>(line) {
+        match pi_core::json::from_slice_with_max_depth::<RawMessageMutation<'_>>(
+            line,
+            crate::history::SESSION_JSON_MAX_DEPTH,
+        ) {
             Ok(message) => message
                 .into_mutation(Arc::clone(source))
                 .map_err(MutationDecodeError::Wire),
-            Err(_) => serde_json::from_slice(line).map_err(MutationDecodeError::Json),
+            Err(_) => pi_core::json::from_slice_with_max_depth(
+                line,
+                crate::history::SESSION_JSON_MAX_DEPTH,
+            )
+            .map_err(MutationDecodeError::Json),
         }
     } else {
-        serde_json::from_slice(line).map_err(MutationDecodeError::Json)
+        pi_core::json::from_slice_with_max_depth(line, crate::history::SESSION_JSON_MAX_DEPTH)
+            .map_err(MutationDecodeError::Json)
     }
 }
 
@@ -1105,20 +1117,26 @@ fn load_file_for(
     let Some(header_line) = lines.first() else {
         return Err(HistoryError::MissingHeader);
     };
-    let header_value: Value =
-        serde_json::from_slice(header_line).map_err(|error| HistoryError::InvalidJson {
-            line: 1,
-            message: error.to_string(),
-        })?;
+    let header_value: Value = pi_core::json::from_slice_with_max_depth(
+        header_line,
+        crate::history::SESSION_JSON_MAX_DEPTH,
+    )
+    .map_err(|error| HistoryError::InvalidJson {
+        line: 1,
+        message: error.to_string(),
+    })?;
     if !header_value.is_object() {
         return Err(HistoryError::MissingHeader);
     }
     validate_header_json_shape(&header_value, 1)?;
-    let header: SessionHeader =
-        serde_json::from_value(header_value).map_err(|error| HistoryError::InvalidJson {
-            line: 1,
-            message: error.to_string(),
-        })?;
+    let header: SessionHeader = pi_core::json::from_slice_with_max_depth(
+        header_line,
+        crate::history::SESSION_JSON_MAX_DEPTH,
+    )
+    .map_err(|error| HistoryError::InvalidJson {
+        line: 1,
+        message: error.to_string(),
+    })?;
     validate_header(&header)?;
 
     let mutation_count = lines.len().saturating_sub(1);
@@ -1190,11 +1208,14 @@ fn validate_ambiguous_optional_fields(
     let Some(field) = field else {
         return Ok(());
     };
-    let value: Value =
-        serde_json::from_slice(line_bytes).map_err(|error| HistoryError::InvalidJson {
-            line,
-            message: error.to_string(),
-        })?;
+    let value: Value = pi_core::json::from_slice_with_max_depth(
+        line_bytes,
+        crate::history::SESSION_JSON_MAX_DEPTH,
+    )
+    .map_err(|error| HistoryError::InvalidJson {
+        line,
+        message: error.to_string(),
+    })?;
     let object = value
         .as_object()
         .ok_or_else(|| invalid_json_shape(line, "is not a JSON object"))?;
@@ -1311,10 +1332,12 @@ fn validate_mutation_shape(mutation: &SessionMutation, line: usize) -> Result<()
 }
 
 fn encode_json_line<T: Serialize>(value: &T, line: usize) -> Result<Vec<u8>, HistoryError> {
-    let mut encoded = serde_json::to_vec(value).map_err(|error| HistoryError::InvalidJson {
-        line,
-        message: error.to_string(),
-    })?;
+    let mut encoded =
+        pi_core::json::to_vec_with_max_depth(value, crate::history::SESSION_JSON_MAX_DEPTH)
+            .map_err(|error| HistoryError::InvalidJson {
+                line,
+                message: error.to_string(),
+            })?;
     encoded.push(b'\n');
     Ok(encoded)
 }

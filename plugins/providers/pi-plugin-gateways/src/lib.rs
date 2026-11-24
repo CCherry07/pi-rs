@@ -97,6 +97,26 @@ impl Provider for GatewayProvider {
             ProviderAvailability::MissingCredentials
         }
     }
+    async fn filter_available_models(
+        &self,
+        models: Vec<pi_core::AnyModelSpec>,
+        signal: AbortSignal,
+    ) -> Result<Vec<pi_core::AnyModelSpec>, ProviderError> {
+        let Some(credential) = self.source.check(&signal).await? else {
+            return Ok(Vec::new());
+        };
+        if credential.secret.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        if self.id.as_str().starts_with("cloudflare-")
+            && !cloudflare_configuration_complete(self.id.as_str(), &credential, |name| {
+                std::env::var(name).ok()
+            })
+        {
+            return Ok(Vec::new());
+        }
+        Ok(models)
+    }
     async fn stream(
         &self,
         mut request: ProviderRequest,
@@ -222,13 +242,62 @@ impl Provider for GatewayProvider {
     }
 }
 
+fn cloudflare_configuration_complete(
+    provider: &str,
+    credential: &pi_provider::ProviderCredential,
+    ambient: impl Fn(&str) -> Option<String>,
+) -> bool {
+    let required = if provider == "cloudflare-ai-gateway" {
+        &["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_GATEWAY_ID"][..]
+    } else {
+        &["CLOUDFLARE_ACCOUNT_ID"][..]
+    };
+    required.iter().all(|name| {
+        credential
+            .metadata
+            .get("env")
+            .and_then(|value| value.get(name))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| ambient(name))
+            .is_some_and(|value| !value.trim().is_empty())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pi_core::{AbortHandle, ModelId, ThinkingLevel};
+    use pi_core::{AbortHandle, AnyModelSpec, ModelId, ThinkingLevel};
     use pi_provider::{CredentialKind, HttpResponse, ProviderCredential, TransportError};
     use std::collections::{BTreeMap, BTreeSet};
-    use std::sync::Mutex;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[derive(Default)]
+    struct RotatingSource {
+        value: Mutex<Option<ProviderCredential>>,
+        checks: AtomicUsize,
+        resolves: AtomicUsize,
+    }
+    #[async_trait]
+    impl CredentialSource for RotatingSource {
+        async fn check(
+            &self,
+            _: &AbortSignal,
+        ) -> Result<Option<ProviderCredential>, ProviderError> {
+            self.checks.fetch_add(1, Ordering::SeqCst);
+            Ok(self.value.lock().unwrap().clone())
+        }
+        async fn resolve(
+            &self,
+            _: &AbortSignal,
+        ) -> Result<Option<ProviderCredential>, ProviderError> {
+            self.resolves.fetch_add(1, Ordering::SeqCst);
+            Ok(self.value.lock().unwrap().clone())
+        }
+    }
 
     struct Key;
     #[async_trait]
@@ -265,6 +334,92 @@ mod tests {
             Err(TransportError::Request("captured".into()))
         }
     }
+    #[tokio::test]
+    async fn availability_rechecks_gateway_credentials_without_requests() {
+        let definition = gateway_definitions()
+            .iter()
+            .find(|definition| definition.id == "cloudflare-ai-gateway")
+            .unwrap();
+        let source = Arc::new(RotatingSource::default());
+        let transport = Arc::new(Capture::default());
+        let plugin = GatewayPlugin::new(definition, source.clone(), false, transport.clone());
+        let models = definition
+            .models
+            .iter()
+            .cloned()
+            .map(AnyModelSpec::Chat)
+            .collect::<Vec<_>>();
+        let present = ProviderCredential {
+            secret: "present".into(),
+            kind: CredentialKind::ApiKey,
+            metadata: BTreeMap::from([(
+                "env".into(),
+                serde_json::json!({
+                    "CLOUDFLARE_ACCOUNT_ID": "account",
+                    "CLOUDFLARE_GATEWAY_ID": "gateway",
+                }),
+            )]),
+        };
+
+        for (credential, expected) in [(None, 0), (Some(present), models.len()), (None, 0)] {
+            *source.value.lock().unwrap() = credential;
+            let (_, signal) = AbortHandle::new();
+            assert_eq!(
+                plugin
+                    .provider
+                    .filter_available_models(models.clone(), signal)
+                    .await
+                    .unwrap()
+                    .len(),
+                expected
+            );
+        }
+
+        assert_eq!(source.checks.load(Ordering::SeqCst), 3);
+        assert_eq!(source.resolves.load(Ordering::SeqCst), 0);
+        assert!(transport.0.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn cloudflare_availability_requires_current_route_configuration() {
+        let credential = |env: serde_json::Value| ProviderCredential {
+            secret: "key".into(),
+            kind: CredentialKind::ApiKey,
+            metadata: BTreeMap::from([("env".into(), env)]),
+        };
+        fn no_ambient(_: &str) -> Option<String> {
+            None
+        }
+        assert!(!cloudflare_configuration_complete(
+            "cloudflare-ai-gateway",
+            &credential(serde_json::json!({})),
+            no_ambient,
+        ));
+        assert!(!cloudflare_configuration_complete(
+            "cloudflare-ai-gateway",
+            &credential(serde_json::json!({"CLOUDFLARE_ACCOUNT_ID":"account"})),
+            no_ambient,
+        ));
+        assert!(cloudflare_configuration_complete(
+            "cloudflare-ai-gateway",
+            &credential(serde_json::json!({
+                "CLOUDFLARE_ACCOUNT_ID":"account",
+                "CLOUDFLARE_GATEWAY_ID":"gateway"
+            })),
+            no_ambient,
+        ));
+        assert!(cloudflare_configuration_complete(
+            "cloudflare-workers-ai",
+            &credential(serde_json::json!({"CLOUDFLARE_ACCOUNT_ID":"account"})),
+            no_ambient,
+        ));
+        assert!(!cloudflare_configuration_complete(
+            "cloudflare-workers-ai",
+            &credential(serde_json::json!({"CLOUDFLARE_ACCOUNT_ID":""})),
+            |_| Some("ambient-account".into()),
+        ));
+    }
+
     #[test]
     fn generated_catalog_has_unique_models_and_only_supported_chat_protocols() {
         let mut providers = BTreeSet::new();

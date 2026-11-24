@@ -26,6 +26,9 @@ pub fn models_json_schema() -> serde_json::Value {
     config::models_json_schema()
 }
 
+type CredentialSourceFactory =
+    dyn Fn(&ProviderId) -> Arc<dyn pi_provider::CredentialSource> + Send + Sync;
+
 #[derive(Clone)]
 pub struct ModelsPluginOptions {
     pub path: PathBuf,
@@ -33,6 +36,7 @@ pub struct ModelsPluginOptions {
     pub extension_provider_configs: BTreeMap<ProviderId, serde_json::Value>,
     base_provider_configs: BTreeMap<ProviderId, serde_json::Value>,
     credential_sources: BTreeMap<ProviderId, ModelCredentialSource>,
+    credential_source_factory: Option<Arc<CredentialSourceFactory>>,
 }
 
 impl std::fmt::Debug for ModelsPluginOptions {
@@ -68,6 +72,7 @@ impl ModelsPluginOptions {
             extension_provider_configs: BTreeMap::new(),
             base_provider_configs: BTreeMap::new(),
             credential_sources: BTreeMap::new(),
+            credential_source_factory: None,
         }
     }
 
@@ -119,6 +124,17 @@ impl ModelsPluginOptions {
     ) -> Self {
         self.credential_sources
             .insert(provider.into(), ModelCredentialSource { source, available });
+        self
+    }
+
+    /// Supplies credentials for configured provider IDs not explicitly bound above.
+    /// The factory runs once per generation, not on queries; the returned source
+    /// checks current authentication and resolves request credentials independently.
+    pub fn credential_source_factory(
+        mut self,
+        factory: impl Fn(&ProviderId) -> Arc<dyn pi_provider::CredentialSource> + Send + Sync + 'static,
+    ) -> Self {
+        self.credential_source_factory = Some(Arc::new(factory));
         self
     }
 
@@ -219,11 +235,22 @@ impl ModelsPlugin {
                 })
                 .extension = Some(provider);
         }
+        let mut credential_sources = options.credential_sources;
+        if let Some(factory) = options.credential_source_factory {
+            for id in providers.keys() {
+                credential_sources
+                    .entry(id.clone())
+                    .or_insert_with(|| ModelCredentialSource {
+                        source: factory(id),
+                        available: false,
+                    });
+            }
+        }
         Ok(Self {
             providers: providers.into_values().collect(),
             resolver: Arc::new(ConfigValueResolver::default()),
             transport,
-            credential_sources: options.credential_sources,
+            credential_sources,
         })
     }
 

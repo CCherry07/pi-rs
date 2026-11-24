@@ -63,10 +63,43 @@ const MODEL_ID_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b'}');
 
 pub struct AmazonBedrockPlugin {
-    provider: Arc<AmazonBedrockProvider>,
+    provider: Arc<dyn Provider>,
 }
 
 impl AmazonBedrockPlugin {
+    pub fn with_credential_source(
+        mut self,
+        source: Arc<dyn pi_provider::CredentialSource>,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Self {
+        self.provider = Arc::new(pi_provider::CredentialProvider::new(
+            self.provider,
+            source,
+            move |credential| {
+                let config = BedrockConfig::from_credential(credential)?;
+                Ok(Arc::new(AmazonBedrockProvider::with_transport(
+                    config,
+                    Arc::clone(&transport),
+                )?))
+            },
+        ));
+        self
+    }
+
+    /// Add the local AWS default credential chain to a stored credential
+    /// source without resolving credentials or starting the AWS CLI during an
+    /// availability query.
+    pub fn with_ambient_credential_source(
+        self,
+        source: Arc<dyn pi_provider::CredentialSource>,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Self {
+        self.with_credential_source(
+            Arc::new(BedrockCredentialSource { inner: source }),
+            transport,
+        )
+    }
+
     pub fn discover() -> Result<Self, ProviderError> {
         Self::from_stored(None, BTreeMap::new())
     }
@@ -121,23 +154,57 @@ impl BedrockConfig {
         bearer_token: Option<String>,
         overrides: BTreeMap<String, String>,
     ) -> Result<Self, ProviderError> {
-        let credential_settings = AwsCredentialSettings::from_environment(overrides.clone());
-        let region = value(&overrides, "AWS_REGION")
-            .or_else(|| value(&overrides, "AWS_DEFAULT_REGION"))
-            .or_else(|| env("AWS_REGION"))
-            .or_else(|| env("AWS_DEFAULT_REGION"))
+        let credential_settings = AwsCredentialSettings::from_environment(overrides);
+        Self::from_settings(bearer_token, credential_settings)
+    }
+
+    fn from_credential(
+        credential: Option<&pi_provider::ProviderCredential>,
+    ) -> Result<Self, ProviderError> {
+        let environment = credential_environment(credential);
+        let prefer_profile = credential
+            .and_then(|credential| credential.metadata.get("preferProfile"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or_else(|| environment.contains_key("AWS_PROFILE"));
+        let allow_default_files = credential
+            .and_then(|credential| credential.metadata.get("allowDefaultFiles"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let bearer_token = credential
+            .map(|credential| credential.secret.trim())
+            .filter(|secret| !secret.is_empty())
+            .map(str::to_owned);
+        Self::from_settings(
+            bearer_token,
+            AwsCredentialSettings::from_values_with_defaults(
+                environment,
+                prefer_profile,
+                allow_default_files,
+            ),
+        )
+    }
+
+    fn from_settings(
+        bearer_token: Option<String>,
+        credential_settings: AwsCredentialSettings,
+    ) -> Result<Self, ProviderError> {
+        let region = credential_settings
+            .get("AWS_REGION")
+            .or_else(|| credential_settings.get("AWS_DEFAULT_REGION"))
+            .map(str::to_owned)
             .or(credential_settings.profile_region()?);
         let config = Self {
             provider_id: ProviderId::new(AMAZON_BEDROCK_PROVIDER_ID),
-            base_url: value(&overrides, "AWS_BEDROCK_BASE_URL")
-                .or_else(|| env("AWS_BEDROCK_BASE_URL")),
+            base_url: credential_settings
+                .get("AWS_BEDROCK_BASE_URL")
+                .map(str::to_owned),
             region,
-            bearer_token: bearer_token
-                .or_else(|| value(&overrides, "AWS_BEARER_TOKEN_BEDROCK"))
-                .or_else(|| env("AWS_BEARER_TOKEN_BEDROCK")),
-            skip_auth: value(&overrides, "AWS_BEDROCK_SKIP_AUTH")
-                .or_else(|| env("AWS_BEDROCK_SKIP_AUTH"))
-                .is_some_and(|value| value == "1"),
+            bearer_token: bearer_token.or_else(|| {
+                credential_settings
+                    .get("AWS_BEARER_TOKEN_BEDROCK")
+                    .map(str::to_owned)
+            }),
+            skip_auth: credential_settings.get("AWS_BEDROCK_SKIP_AUTH") == Some("1"),
             credential_settings,
             headers: BTreeMap::new(),
         };
@@ -155,6 +222,7 @@ impl BedrockConfig {
             credential_settings: AwsCredentialSettings {
                 values: BTreeMap::new(),
                 prefer_profile: false,
+                allow_default_files: false,
             },
             headers: BTreeMap::new(),
         }
@@ -191,6 +259,108 @@ impl BedrockConfig {
         }
         Ok(())
     }
+}
+
+struct BedrockCredentialSource {
+    inner: Arc<dyn pi_provider::CredentialSource>,
+}
+
+#[async_trait]
+impl pi_provider::CredentialSource for BedrockCredentialSource {
+    async fn check(
+        &self,
+        signal: &AbortSignal,
+    ) -> Result<Option<pi_provider::ProviderCredential>, ProviderError> {
+        let credential = self.inner.check(signal).await?;
+        if signal.is_aborted() {
+            return Err(ProviderError::Aborted);
+        }
+        Ok(with_ambient_bedrock_credential(credential))
+    }
+
+    async fn resolve(
+        &self,
+        signal: &AbortSignal,
+    ) -> Result<Option<pi_provider::ProviderCredential>, ProviderError> {
+        let credential = self.inner.resolve(signal).await?;
+        if signal.is_aborted() {
+            return Err(ProviderError::Aborted);
+        }
+        Ok(with_ambient_bedrock_credential(credential))
+    }
+}
+
+fn with_ambient_bedrock_credential(
+    credential: Option<pi_provider::ProviderCredential>,
+) -> Option<pi_provider::ProviderCredential> {
+    let ambient = ambient_aws_environment();
+    if let Some(mut credential) = credential {
+        let stored = credential_environment(Some(&credential));
+        let prefer_profile = stored.contains_key("AWS_PROFILE");
+        let mut environment = ambient;
+        environment.extend(stored);
+        credential
+            .metadata
+            .insert("env".to_string(), serde_json::json!(environment));
+        credential.metadata.insert(
+            "preferProfile".to_string(),
+            serde_json::Value::Bool(prefer_profile),
+        );
+        credential.metadata.insert(
+            "allowDefaultFiles".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        return Some(credential);
+    }
+    let settings = AwsCredentialSettings::from_values_with_defaults(ambient.clone(), false, true);
+    let token = settings.get("AWS_BEARER_TOKEN_BEDROCK").map(str::to_owned);
+    let ready = settings.get("AWS_BEDROCK_SKIP_AUTH") == Some("1")
+        || token.is_some()
+        || settings.has_source();
+    ready.then(|| pi_provider::ProviderCredential {
+        secret: token.unwrap_or_default(),
+        kind: pi_provider::CredentialKind::ApiKey,
+        metadata: BTreeMap::from([
+            ("env".to_string(), serde_json::json!(ambient)),
+            ("preferProfile".to_string(), serde_json::Value::Bool(false)),
+            (
+                "allowDefaultFiles".to_string(),
+                serde_json::Value::Bool(true),
+            ),
+        ]),
+    })
+}
+
+fn credential_environment(
+    credential: Option<&pi_provider::ProviderCredential>,
+) -> BTreeMap<String, String> {
+    credential
+        .and_then(|credential| credential.metadata.get("env"))
+        .and_then(|environment| serde_json::from_value(environment.clone()).ok())
+        .unwrap_or_default()
+}
+
+fn ambient_aws_environment() -> BTreeMap<String, String> {
+    [
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_PROFILE",
+        "AWS_SHARED_CREDENTIALS_FILE",
+        "AWS_CONFIG_FILE",
+        "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+        "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+        "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "AWS_ROLE_ARN",
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "AWS_BEDROCK_BASE_URL",
+        "AWS_BEDROCK_SKIP_AUTH",
+    ]
+    .into_iter()
+    .filter_map(|name| env(name).map(|value| (name.to_string(), value)))
+    .collect()
 }
 
 pub struct AmazonBedrockProvider {
@@ -484,13 +654,6 @@ fn remove_reserved_auth_headers(headers: &mut BTreeMap<String, String>) {
     }
 }
 
-fn value(values: &BTreeMap<String, String>, name: &str) -> Option<String> {
-    values
-        .get(name)
-        .filter(|value| !value.trim().is_empty())
-        .cloned()
-}
-
 fn env(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -503,15 +666,61 @@ fn map_transport_error(error: TransportError) -> ProviderError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use crc32fast::hash;
     use futures::{StreamExt, stream};
-    use pi_core::{AbortHandle, ModelId, ThinkingLevel};
-    use pi_provider::HttpResponse;
+    use pi_core::{AbortHandle, AnyModelSpec, ModelId, ThinkingLevel};
+    use pi_provider::{CredentialKind, CredentialSource, HttpResponse, ProviderCredential};
     use serde_json::{Value, json};
 
     use super::*;
+
+    #[derive(Default)]
+    struct RotatingSource {
+        value: Mutex<Option<ProviderCredential>>,
+        checks: AtomicUsize,
+        resolves: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl CredentialSource for RotatingSource {
+        async fn check(
+            &self,
+            _: &AbortSignal,
+        ) -> Result<Option<ProviderCredential>, ProviderError> {
+            self.checks.fetch_add(1, Ordering::SeqCst);
+            Ok(self.value.lock().unwrap().clone())
+        }
+
+        async fn resolve(
+            &self,
+            _: &AbortSignal,
+        ) -> Result<Option<ProviderCredential>, ProviderError> {
+            self.resolves.fetch_add(1, Ordering::SeqCst);
+            Ok(self.value.lock().unwrap().clone())
+        }
+    }
+
+    #[derive(Default)]
+    struct NoRequestTransport(AtomicUsize);
+
+    #[async_trait]
+    impl HttpTransport for NoRequestTransport {
+        async fn post_json(
+            &self,
+            _: &str,
+            _: &BTreeMap<String, String>,
+            _: &Value,
+            _: AbortSignal,
+        ) -> Result<HttpResponse, TransportError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(TransportError::Request("unexpected request".into()))
+        }
+    }
 
     #[derive(Default)]
     struct Capture {
@@ -598,6 +807,54 @@ mod tests {
                 body: Box::pin(stream::iter([Ok(body)])),
             })
         }
+    }
+
+    #[tokio::test]
+    async fn availability_rechecks_aws_credentials_without_running_the_chain() {
+        let source = Arc::new(RotatingSource::default());
+        let transport = Arc::new(NoRequestTransport::default());
+        let initial = BedrockConfig::from_settings(
+            None,
+            AwsCredentialSettings::from_values(BTreeMap::new(), false),
+        )
+        .unwrap();
+        let plugin = AmazonBedrockPlugin {
+            provider: Arc::new(
+                AmazonBedrockProvider::with_transport(initial, transport.clone()).unwrap(),
+            ),
+        }
+        .with_credential_source(source.clone(), transport.clone());
+        let models = vec![AnyModelSpec::Chat(amazon_bedrock_models().remove(0))];
+        let present = ProviderCredential {
+            secret: String::new(),
+            kind: CredentialKind::ApiKey,
+            metadata: BTreeMap::from([(
+                "env".into(),
+                serde_json::json!({
+                    "AWS_ACCESS_KEY_ID": "access",
+                    "AWS_SECRET_ACCESS_KEY": "secret",
+                    "AWS_REGION": "us-east-1",
+                }),
+            )]),
+        };
+
+        for (credential, expected) in [(None, 0), (Some(present), 1), (None, 0)] {
+            *source.value.lock().unwrap() = credential;
+            let (_, signal) = AbortHandle::new();
+            assert_eq!(
+                plugin
+                    .provider
+                    .filter_available_models(models.clone(), signal)
+                    .await
+                    .unwrap()
+                    .len(),
+                expected
+            );
+        }
+
+        assert_eq!(source.checks.load(Ordering::SeqCst), 3);
+        assert_eq!(source.resolves.load(Ordering::SeqCst), 0);
+        assert_eq!(transport.0.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

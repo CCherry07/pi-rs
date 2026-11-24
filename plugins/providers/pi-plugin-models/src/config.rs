@@ -44,7 +44,10 @@ pub(crate) struct PreparedModel {
     pub output: Vec<ModelInput>,
     pub id: ModelId,
     pub spec: ModelSpec,
+    // Configured request headers may contain secrets or credential commands.
+    // Keep them separate from metadata supplied by a registered provider.
     pub headers: BTreeMap<String, String>,
+    pub catalog_headers: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1119,6 +1122,7 @@ impl ModelDefinition {
 
         let headers = definition.headers;
         Ok(PreparedModel {
+            catalog_headers: BTreeMap::new(),
             kind: definition.kind.into(),
             output: definition
                 .output
@@ -1669,8 +1673,10 @@ impl PreparedModel {
                 api: m.api.clone(),
                 base_url: m.base_url.clone(),
                 input: m.input.clone(),
+                input_limits: m.input_limits,
                 cost: m.cost.clone(),
                 context_window: m.context_window,
+                headers: self.catalog_headers.clone(),
                 compat: m.compat.clone(),
             }),
             ModelType::Image => AnyModelSpec::Image(ImageModelSpec {
@@ -1680,38 +1686,43 @@ impl PreparedModel {
                 api: m.api.clone(),
                 base_url: m.base_url.clone(),
                 input: m.input.clone(),
+                input_limits: m.input_limits,
                 output: self.output.clone(),
                 cost: m.cost.clone(),
+                headers: self.catalog_headers.clone(),
             }),
         }
     }
     pub(crate) fn from_catalog(value: AnyModelSpec) -> Self {
         let kind = value.model_type();
-        let (spec, output) = match value {
-            AnyModelSpec::Chat(m) => (m, Vec::new()),
+        let (spec, output, headers) = match value {
+            AnyModelSpec::Chat(m) => (m, Vec::new(), BTreeMap::new()),
             AnyModelSpec::Classifier(m) => {
                 let mut spec = ModelSpec::new(m.provider, m.id, m.name, m.api);
                 spec.base_url = m.base_url;
                 spec.input = m.input;
+                spec.input_limits = m.input_limits;
                 spec.cost = m.cost;
                 spec.context_window = m.context_window;
                 spec.compat = m.compat;
-                (spec, Vec::new())
+                (spec, Vec::new(), m.headers)
             }
             AnyModelSpec::Image(m) => {
                 let mut spec = ModelSpec::new(m.provider, m.id, m.name, m.api);
                 spec.base_url = m.base_url;
                 spec.input = m.input;
+                spec.input_limits = m.input_limits;
                 spec.cost = m.cost;
-                (spec, m.output)
+                (spec, m.output, m.headers)
             }
         };
         Self {
+            catalog_headers: headers.clone(),
             kind,
             output,
             id: spec.id.clone(),
             spec,
-            headers: BTreeMap::new(),
+            headers,
         }
     }
 }
@@ -1777,6 +1788,55 @@ mod typed_model_tests {
             composed.models[0].spec.base_url.as_deref(),
             Some("http://classifier")
         );
+    }
+
+    #[test]
+    fn specialized_catalog_projection_preserves_supported_base_metadata() {
+        let value = json!({"models":[
+            {"id":"judge","type":"classifier","api":"typesafe-system-one",
+                "baseUrl":"https://classifier.test/v1","input":["text","image"],
+                "inputLimits":{"maxRequestBytes":4096,"images":{"maxPerRequest":2}},
+                "contextWindow":64000,"headers":{"X-Model":"judge"},
+                "compat":{"imageInput":"images"}},
+            {"id":"artist","type":"image","api":"openrouter-images",
+                "baseUrl":"https://images.test/v1","input":["text","image"],
+                "inputLimits":{"images":{"resize":{"maxWidth":2048,"jpegQuality":90}}},
+                "output":["image","text"],"headers":{"X-Model":"artist"}}
+        ]});
+        let provider = compile_extension_provider(&"mixed".into(), value, &BTreeMap::new())
+            .unwrap()
+            .compose_with_base(&[])
+            .unwrap();
+
+        assert_eq!(provider.models[0].headers["X-Model"], "judge");
+        assert_eq!(provider.models[1].headers["X-Model"], "artist");
+        let mut classifier = provider.models[0].catalog();
+        assert!(matches!(&classifier, AnyModelSpec::Classifier(model)
+            if model.context_window == 64_000
+                && model.input_limits.unwrap().max_request_bytes == Some(4096)
+                && model.headers.is_empty()
+                && model.compat.as_ref().unwrap()["imageInput"] == "images"));
+        // Public provider metadata survives reconstruction, while configured
+        // request headers above remain private (legacy provider-composer).
+        if let AnyModelSpec::Classifier(model) = &mut classifier {
+            model
+                .headers
+                .insert("X-Registered".into(), "classifier".into());
+        }
+        assert_eq!(
+            PreparedModel::from_catalog(classifier.clone()).catalog(),
+            classifier
+        );
+
+        let mut image = provider.models[1].catalog();
+        assert!(matches!(&image, AnyModelSpec::Image(model)
+            if model.output == vec![ModelInput::Image, ModelInput::Text]
+                && model.input_limits.unwrap().images.unwrap().resize.unwrap().max_width == Some(2048)
+                && model.headers.is_empty()));
+        if let AnyModelSpec::Image(model) = &mut image {
+            model.headers.insert("X-Registered".into(), "image".into());
+        }
+        assert_eq!(PreparedModel::from_catalog(image.clone()).catalog(), image);
     }
 
     #[test]

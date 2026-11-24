@@ -386,6 +386,8 @@ pub struct JsToolManifest {
     pub prompt_snippet: Option<String>,
     #[serde(default)]
     pub prompt_guidelines: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<pi_plugin::ToolNamespace>,
     #[serde(default)]
     pub execution_mode: ToolExecutionMode,
 }
@@ -818,7 +820,7 @@ impl JsPluginGeneration {
                 let plugin_id = PluginId::new(id);
                 let tools = tools
                     .into_iter()
-                    .map(|tool| Arc::new(JsTool::new(tool, Arc::clone(&lease))) as Arc<dyn Tool>)
+                    .map(|tool| Arc::new(JsTool::new(tool, Arc::clone(&lease))))
                     .collect();
                 let commands = commands
                     .into_iter()
@@ -1468,7 +1470,7 @@ impl Drop for JsGenerationLease {
 
 struct JsPlugin {
     id: PluginId,
-    tools: Vec<Arc<dyn Tool>>,
+    tools: Vec<Arc<JsTool>>,
     commands: Vec<Arc<dyn Command>>,
     hooks: Vec<JsAgentHook>,
     dynamic_hooks: bool,
@@ -2118,7 +2120,13 @@ impl Plugin for JsPlugin {
 
     fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         for tool in &self.tools {
-            context.register_tool(Arc::clone(tool))?;
+            context.register_tool_with_discovery(
+                tool.clone(),
+                pi_plugin::ToolDiscovery {
+                    namespace: tool.namespace.clone(),
+                    ..Default::default()
+                },
+            )?;
         }
         for command in &self.commands {
             context.register_command(Arc::clone(command))?;
@@ -3677,6 +3685,7 @@ fn session_fork_position(position: SessionForkPosition) -> &'static str {
 }
 
 struct JsTool {
+    namespace: Option<pi_plugin::ToolNamespace>,
     callback_id: String,
     prepare_callback_id: Option<String>,
     spec: ToolSpec,
@@ -3686,6 +3695,7 @@ struct JsTool {
 impl JsTool {
     fn new(manifest: JsToolManifest, lease: Arc<JsGenerationLease>) -> Self {
         Self {
+            namespace: manifest.namespace,
             callback_id: manifest.callback_id,
             prepare_callback_id: manifest.prepare_callback_id,
             spec: ToolSpec {

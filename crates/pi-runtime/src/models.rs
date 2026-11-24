@@ -32,6 +32,21 @@ impl PiRuntime {
             .available_models_of_type(model_type, provider)
     }
 
+    pub async fn query_available_models_of_type(
+        &self,
+        model_type: ModelType,
+        provider: Option<&ProviderId>,
+        signal: AbortSignal,
+    ) -> Result<Vec<AnyModelSpec>, RuntimeError> {
+        self.current_generation()
+            .agent
+            .registries()
+            .model_runtime()
+            .query_available_models_of_type(model_type, provider, signal)
+            .await
+            .map_err(|error| RuntimeError::Provider(error.to_string()))
+    }
+
     pub fn model_of_type(
         &self,
         model_type: ModelType,

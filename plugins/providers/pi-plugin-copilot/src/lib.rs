@@ -85,7 +85,6 @@ impl GitHubCopilotStoredMetadata {
 
 pub struct GitHubCopilotPlugin {
     provider: Arc<dyn Provider>,
-    available_model_ids: Option<BTreeSet<String>>,
 }
 
 impl GitHubCopilotPlugin {
@@ -98,14 +97,24 @@ impl GitHubCopilotPlugin {
             self.provider,
             source,
             move |value| {
-                Ok(Arc::new(GitHubCopilotProvider::with_transport(
-                    value.map(|value| value.secret.clone()),
-                    value
-                        .and_then(|value| value.metadata.get("enterpriseUrl"))
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned),
-                    Arc::clone(&transport),
-                )?))
+                Ok(Arc::new(
+                    GitHubCopilotProvider::with_transport(
+                        value.map(|value| value.secret.clone()),
+                        value
+                            .and_then(|value| value.metadata.get("enterpriseUrl"))
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned),
+                        Arc::clone(&transport),
+                    )?
+                    .with_available_model_ids(value.and_then(|credential| {
+                        GitHubCopilotStoredMetadata::from_extensions(
+                            credential.kind == pi_provider::CredentialKind::OAuth,
+                            &credential.metadata,
+                        )
+                        .available_model_ids
+                        .map(|ids| ids.into_iter().collect())
+                    })),
+                ))
             },
         ));
         self
@@ -172,24 +181,15 @@ impl GitHubCopilotPlugin {
         transport: Arc<dyn HttpTransport>,
     ) -> Result<Self, ProviderError> {
         Ok(Self {
-            provider: Arc::new(GitHubCopilotProvider::with_transport(
-                token,
-                enterprise_domain,
-                transport,
-            )?),
-            available_model_ids,
+            provider: Arc::new(
+                GitHubCopilotProvider::with_transport(token, enterprise_domain, transport)?
+                    .with_available_model_ids(available_model_ids),
+            ),
         })
     }
 
     fn models(&self) -> Vec<pi_core::ModelSpec> {
         github_copilot_models()
-            .into_iter()
-            .filter(|model| {
-                self.available_model_ids
-                    .as_ref()
-                    .is_none_or(|available| available.contains(model.id.as_str()))
-            })
-            .collect()
     }
 }
 
@@ -209,6 +209,7 @@ impl ProviderPlugin for GitHubCopilotPlugin {
 }
 
 pub struct GitHubCopilotProvider {
+    available_model_ids: Option<BTreeSet<String>>,
     token: Option<String>,
     enterprise_domain: Option<String>,
     transport: Arc<dyn HttpTransport>,
@@ -242,10 +243,16 @@ impl GitHubCopilotProvider {
             .map_err(ProviderError::Failure)?
             .flatten();
         Ok(Self {
+            available_model_ids: None,
             token,
             enterprise_domain,
             transport,
         })
+    }
+
+    fn with_available_model_ids(mut self, ids: Option<BTreeSet<String>>) -> Self {
+        self.available_model_ids = ids;
+        self
     }
 
     fn base_url(&self, token: &str) -> String {
@@ -274,6 +281,19 @@ impl Provider for GitHubCopilotProvider {
             ProviderAvailability::Available
         } else {
             ProviderAvailability::MissingCredentials
+        }
+    }
+
+    fn model_availability(&self, model: &pi_core::AnyModelSpec) -> ProviderAvailability {
+        if model.model_type() == pi_core::ModelType::Chat
+            && self
+                .available_model_ids
+                .as_ref()
+                .is_some_and(|ids| !ids.contains(model.id().as_str()))
+        {
+            ProviderAvailability::MissingCredentials
+        } else {
+            self.availability()
         }
     }
 
@@ -429,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn oauth_account_catalog_filters_registered_models() {
+    fn oauth_account_catalog_filters_availability_not_registered_models() {
         let plugin = GitHubCopilotPlugin::new_with_catalog_and_transport(
             Some("token".to_string()),
             None,
@@ -438,8 +458,18 @@ mod tests {
         )
         .unwrap();
         let models = plugin.models();
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id.as_str(), "gemini-3.8-flash");
+        assert_eq!(models, github_copilot_models());
+        let available: Vec<_> = models
+            .into_iter()
+            .filter(|model| {
+                plugin
+                    .provider
+                    .model_availability(&pi_core::AnyModelSpec::Chat(model.clone()))
+                    .is_available()
+            })
+            .collect();
+        assert_eq!(available.len(), 1);
+        assert_eq!(available[0].id.as_str(), "gemini-3.8-flash");
     }
 
     #[test]

@@ -206,15 +206,20 @@ impl BuiltinProviderSet {
         use pi_provider::CredentialKind;
         use std::collections::BTreeMap;
 
+        let agent_dir = config.agent_dir.clone();
         let mut options = pi_plugin_models::ModelsPluginOptions::for_agent_dir(&config.agent_dir)
-            .with_builtin_specialized_models();
+            .with_builtin_specialized_models()
+            .credential_source_factory(move |id| {
+                StoredCredentialSource::builtin(&agent_dir, id.as_str(), None)
+            });
         let mut environments = BTreeMap::from([
             ("openai".to_owned(), vec!["OPENAI_API_KEY"]),
             ("openrouter".to_owned(), vec!["OPENROUTER_API_KEY"]),
+            ("github-copilot".to_owned(), vec!["COPILOT_GITHUB_TOKEN"]),
             ("typesafe".to_owned(), vec!["TYPESAFE_API_KEY"]),
             (
                 "cloudflare-workers-ai".to_owned(),
-                vec!["CLOUDFLARE_API_TOKEN"],
+                vec!["CLOUDFLARE_API_KEY", "CLOUDFLARE_API_TOKEN"],
             ),
         ]);
         for id in self.stored_credentials.keys() {
@@ -299,6 +304,45 @@ impl BuiltinProviderSet {
             &config.agent_dir,
             "github-copilot",
             selected_api_key(config, "github-copilot"),
+        );
+        let google_source = StoredCredentialSource::builtin(
+            &config.agent_dir,
+            "google",
+            selected_api_key(config, "google"),
+        );
+        let google_vertex_source = StoredCredentialSource::builtin_with_precedence(
+            &config.agent_dir,
+            "google-vertex",
+            selected_api_key(config, "google-vertex"),
+            crate::credentials::CredentialPrecedence::StoredFirst,
+        );
+        let mistral_source = StoredCredentialSource::builtin(
+            &config.agent_dir,
+            "mistral",
+            selected_api_key(config, "mistral"),
+        );
+        let azure_source = StoredCredentialSource::builtin(
+            &config.agent_dir,
+            "azure",
+            selected_api_key(config, "azure")
+                .or_else(|| selected_api_key(config, "azure-openai-responses")),
+        );
+        let azure_compatibility_source = StoredCredentialSource::builtin(
+            &config.agent_dir,
+            "azure-openai-responses",
+            selected_api_key(config, "azure-openai-responses")
+                .or_else(|| selected_api_key(config, "azure")),
+        );
+        let openrouter_source = StoredCredentialSource::builtin(
+            &config.agent_dir,
+            "openrouter",
+            selected_api_key(config, "openrouter"),
+        );
+        let bedrock_source = StoredCredentialSource::builtin_with_precedence(
+            &config.agent_dir,
+            "amazon-bedrock",
+            selected_api_key(config, "amazon-bedrock"),
+            crate::credentials::CredentialPrecedence::StoredFirst,
         );
         let builder = if config.provider == "openai-codex" {
             let credentials = codex_credentials.clone();
@@ -447,73 +491,104 @@ impl BuiltinProviderSet {
         let explicit_api_key = selected_api_key(config, "google");
         let builder = builder.try_provider_plugin_factory({
             let transport = Arc::clone(&transport);
-            move || match &explicit_api_key {
-                Some(api_key) => {
-                    GooglePlugin::new_with_transport(Some(api_key.clone()), Arc::clone(&transport))
-                }
-                None => GooglePlugin::from_stored_with_transport(
-                    stored_google
-                        .as_ref()
-                        .and_then(StoredCredential::secret)
-                        .map(str::to_owned),
-                    Arc::clone(&transport),
-                ),
+            move || {
+                (match &explicit_api_key {
+                    Some(api_key) => GooglePlugin::new_with_transport(
+                        Some(api_key.clone()),
+                        Arc::clone(&transport),
+                    ),
+                    None => GooglePlugin::from_stored_with_transport(
+                        stored_google
+                            .as_ref()
+                            .and_then(StoredCredential::secret)
+                            .map(str::to_owned),
+                        Arc::clone(&transport),
+                    ),
+                })
+                .map(|plugin| {
+                    plugin
+                        .with_credential_source(Arc::clone(&google_source), Arc::clone(&transport))
+                })
             }
         });
         let explicit_api_key = selected_api_key(config, "google-vertex");
         let builder = builder.try_provider_plugin_factory({
             let transport = Arc::clone(&transport);
-            move || match &explicit_api_key {
-                Some(api_key) => GoogleVertexPlugin::new_with_transport(
-                    Some(api_key.clone()),
-                    Arc::clone(&transport),
-                ),
-                None => GoogleVertexPlugin::from_stored_with_environment_and_transport(
-                    stored_google_vertex
-                        .as_ref()
-                        .and_then(StoredCredential::secret)
-                        .map(str::to_owned),
-                    stored_google_vertex
-                        .as_ref()
-                        .and_then(StoredCredential::environment)
-                        .cloned()
-                        .unwrap_or_default(),
-                    Arc::clone(&transport),
-                ),
+            move || {
+                (match &explicit_api_key {
+                    Some(api_key) => GoogleVertexPlugin::new_with_transport(
+                        Some(api_key.clone()),
+                        Arc::clone(&transport),
+                    ),
+                    None => GoogleVertexPlugin::from_stored_with_environment_and_transport(
+                        stored_google_vertex
+                            .as_ref()
+                            .and_then(StoredCredential::secret)
+                            .map(str::to_owned),
+                        stored_google_vertex
+                            .as_ref()
+                            .and_then(StoredCredential::environment)
+                            .cloned()
+                            .unwrap_or_default(),
+                        Arc::clone(&transport),
+                    ),
+                })
+                .map(|plugin| {
+                    plugin.with_ambient_credential_source(
+                        Arc::clone(&google_vertex_source),
+                        Arc::clone(&transport),
+                    )
+                })
             }
         });
         let explicit_api_key = selected_api_key(config, "mistral");
         let builder = builder.try_provider_plugin_factory({
             let transport = Arc::clone(&transport);
-            move || match &explicit_api_key {
-                Some(api_key) => {
-                    MistralPlugin::new_with_transport(Some(api_key.clone()), Arc::clone(&transport))
-                }
-                None => MistralPlugin::from_stored_with_transport(
-                    stored_mistral
-                        .as_ref()
-                        .and_then(StoredCredential::secret)
-                        .map(str::to_owned),
-                    Arc::clone(&transport),
-                ),
+            move || {
+                (match &explicit_api_key {
+                    Some(api_key) => MistralPlugin::new_with_transport(
+                        Some(api_key.clone()),
+                        Arc::clone(&transport),
+                    ),
+                    None => MistralPlugin::from_stored_with_transport(
+                        stored_mistral
+                            .as_ref()
+                            .and_then(StoredCredential::secret)
+                            .map(str::to_owned),
+                        Arc::clone(&transport),
+                    ),
+                })
+                .map(|plugin| {
+                    plugin
+                        .with_credential_source(Arc::clone(&mistral_source), Arc::clone(&transport))
+                })
             }
         });
         let explicit_api_key = selected_api_key(config, "azure")
             .or_else(|| selected_api_key(config, "azure-openai-responses"));
         let builder = builder.try_provider_plugin_factory({
             let transport = Arc::clone(&transport);
-            move || match &explicit_api_key {
-                Some(api_key) => AzureOpenAiPlugin::new_with_transport(
-                    Some(api_key.clone()),
-                    Arc::clone(&transport),
-                ),
-                None => AzureOpenAiPlugin::from_stored_with_transport(
-                    stored_azure
-                        .as_ref()
-                        .and_then(StoredCredential::secret)
-                        .map(str::to_owned),
-                    Arc::clone(&transport),
-                ),
+            move || {
+                (match &explicit_api_key {
+                    Some(api_key) => AzureOpenAiPlugin::new_with_transport(
+                        Some(api_key.clone()),
+                        Arc::clone(&transport),
+                    ),
+                    None => AzureOpenAiPlugin::from_stored_with_transport(
+                        stored_azure
+                            .as_ref()
+                            .and_then(StoredCredential::secret)
+                            .map(str::to_owned),
+                        Arc::clone(&transport),
+                    ),
+                })
+                .map(|plugin| {
+                    plugin.with_credential_sources(
+                        Arc::clone(&azure_source),
+                        Arc::clone(&azure_compatibility_source),
+                        Arc::clone(&transport),
+                    )
+                })
             }
         });
         let explicit_api_key = selected_api_key(config, "openrouter");
@@ -533,7 +608,14 @@ impl BuiltinProviderSet {
                         Arc::clone(&transport),
                     ),
                 })
-                .map(|plugin| plugin.with_catalog(openrouter_catalog.clone()))
+                .map(|plugin| {
+                    plugin
+                        .with_catalog(openrouter_catalog.clone())
+                        .with_credential_source(
+                            Arc::clone(&openrouter_source),
+                            Arc::clone(&transport),
+                        )
+                })
             }
         });
         let explicit_token = selected_api_key(config, "github-copilot");
@@ -620,6 +702,12 @@ impl BuiltinProviderSet {
                 environment,
                 Arc::clone(&transport),
             )
+            .map(|plugin| {
+                plugin.with_ambient_credential_source(
+                    Arc::clone(&bedrock_source),
+                    Arc::clone(&transport),
+                )
+            })
         })
     }
 }
@@ -699,7 +787,7 @@ mod tests {
             // Environment precedence is process-global; isolate it without unsafe
             // mutation or a lock that unrelated provider tests do not acquire.
             let temporary = tempfile::tempdir().unwrap();
-            for mode in ["stored", "environment"] {
+            for mode in ["stored", "environment", "environment-only", "missing"] {
                 let mut command = std::process::Command::new(std::env::current_exe().unwrap());
                 command
                     .arg("--exact")
@@ -709,6 +797,8 @@ mod tests {
                     .env("TMPDIR", temporary.path())
                     .env("TMP", temporary.path())
                     .env("TEMP", temporary.path())
+                    .env("HOME", temporary.path())
+                    .env("USERPROFILE", temporary.path())
                     .env(CHILD, mode)
                     .env("AZURE_OPENAI_BASE_URL", "https://azure.example/openai/v1")
                     .env("AWS_REGION", "us-east-1")
@@ -717,7 +807,7 @@ mod tests {
                 if let Some(system_root) = std::env::var_os("SystemRoot") {
                     command.env("SystemRoot", system_root);
                 }
-                if mode == "environment" {
+                if matches!(mode, "environment" | "environment-only") {
                     for name in [
                         "ANTHROPIC_API_KEY",
                         "GEMINI_API_KEY",
@@ -765,6 +855,9 @@ mod tests {
                 "enterpriseUrl":"github.example.com", "availableModelIds":["gemini-3.8-flash"],
             }),
         );
+        if matches!(mode.as_str(), "environment-only" | "missing") {
+            credentials.clear();
+        }
         std::fs::write(
             directory.path().join("auth.json"),
             serde_json::to_vec(&credentials).unwrap(),
@@ -846,7 +939,29 @@ mod tests {
                         expected
                     );
                     for (provider, header) in providers {
-                        assert!(runtime.provider_is_available(&ProviderId::new(provider)));
+                        let overridden = provider == selected && explicit.is_some();
+                        let expected_available = mode != "missing" || overridden;
+                        assert_eq!(
+                            runtime.provider_is_available(&ProviderId::new(provider)),
+                            expected_available,
+                            "{mode}: {provider}, selected {selected}, reload {reload}"
+                        );
+                        let available = runtime
+                            .query_available_models_of_type(
+                                pi_core::ModelType::Chat,
+                                Some(&provider.into()),
+                                AbortHandle::new().1,
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            !available.is_empty(),
+                            expected_available,
+                            "{mode}: {provider}, selected {selected}, reload {reload}"
+                        );
+                        if !expected_available {
+                            continue;
+                        }
                         let model = runtime
                             .models()
                             .into_iter()
@@ -872,11 +987,11 @@ mod tests {
                             capture.0.lock().unwrap().take().unwrap_or_else(|| {
                                 panic!("{provider} did not reach the transport")
                             });
-                        let overridden = provider == selected && explicit.is_some();
                         let key = if overridden {
                             "explicit-key"
-                        } else if mode == "environment"
-                            && !matches!(provider, "google-vertex" | "amazon-bedrock")
+                        } else if mode == "environment-only"
+                            || (mode == "environment"
+                                && !matches!(provider, "google-vertex" | "amazon-bedrock"))
                         {
                             "environment-key"
                         } else {
@@ -898,10 +1013,35 @@ mod tests {
                                 .into_iter()
                                 .filter(|model| model.provider.as_str() == provider)
                                 .count();
-                            assert_eq!(models == 1, mode == "stored" && !overridden);
+                            // Registration is complete; account restrictions only
+                            // narrow availability, never erase canonical models.
+                            assert!(models > 1);
+                            let available = runtime.available_models_of_type(
+                                pi_core::ModelType::Chat,
+                                Some(&provider.into()),
+                            );
+                            assert_eq!(
+                                available.len(),
+                                if mode == "stored" && !overridden {
+                                    1
+                                } else {
+                                    models
+                                }
+                            );
+                            assert_eq!(
+                                runtime
+                                    .query_available_models_of_type(
+                                        pi_core::ModelType::Chat,
+                                        Some(&provider.into()),
+                                        AbortHandle::new().1,
+                                    )
+                                    .await
+                                    .unwrap(),
+                                available
+                            );
                             assert_eq!(
                                 url.starts_with("https://copilot-api.github.example.com/"),
-                                !overridden
+                                !overridden && matches!(mode.as_str(), "stored" | "environment")
                             );
                         }
                     }

@@ -11,6 +11,10 @@ use crate::{
 #[derive(Default)]
 pub struct RegistriesBuilder {
     tools: HashMap<String, (PluginId, Arc<dyn Tool>)>,
+    tool_order: Vec<String>,
+    provider_order: Vec<ProviderId>,
+    model_order: Vec<(ProviderId, ModelId)>,
+    typed_model_order: Vec<(crate::ModelType, ProviderId, ModelId)>,
     tool_discovery: HashMap<String, crate::ToolDiscovery>,
     commands: HashMap<String, (PluginId, Arc<dyn Command>)>,
     command_order: Vec<String>,
@@ -42,6 +46,7 @@ impl RegistriesBuilder {
         if self.tools.contains_key(&name) {
             return Err(CoreError::DuplicateTool(name));
         }
+        self.tool_order.push(name.clone());
         self.tool_discovery.insert(name.clone(), discovery);
         self.tools.insert(name, (owner, tool));
         Ok(())
@@ -66,6 +71,7 @@ impl RegistriesBuilder {
         if self.providers.contains_key(&id) {
             return Err(CoreError::DuplicateProvider(id.to_string()));
         }
+        self.provider_order.push(id.clone());
         self.providers.insert(id, (owner, provider));
         Ok(())
     }
@@ -85,6 +91,9 @@ impl RegistriesBuilder {
         if !self.provider_overrides.insert(id.clone()) {
             return Err(CoreError::DuplicateProviderOverride(id.to_string()));
         }
+        if !self.providers.contains_key(&id) {
+            self.provider_order.push(id.clone());
+        }
         self.providers.insert(id, (owner, provider));
         Ok(())
     }
@@ -103,19 +112,17 @@ impl RegistriesBuilder {
                 model.provider, model.id
             )));
         }
+        self.model_order.push(key.clone());
         self.models.insert(key, (owner, model));
         Ok(())
     }
 
     pub(crate) fn models_for_provider(&self, provider: &ProviderId) -> Vec<ModelSpec> {
-        let mut models = self
-            .models
+        self.model_order
             .iter()
-            .filter(|((candidate, _), _)| candidate == provider)
-            .map(|(_, (_, model))| model.clone())
-            .collect::<Vec<_>>();
-        models.sort_by(|left, right| left.id.cmp(&right.id));
-        models
+            .filter(|(candidate, _)| candidate == provider)
+            .filter_map(|key| self.models.get(key).map(|(_, model)| model.clone()))
+            .collect()
     }
 
     pub(crate) fn register_model_override(
@@ -166,10 +173,13 @@ impl RegistriesBuilder {
         }
         self.models
             .retain(|(candidate, _), _| candidate != &provider);
+        self.model_order
+            .retain(|(candidate, _)| candidate != &provider);
         self.model_overrides
             .retain(|(candidate, _)| candidate != &provider);
         for model in models {
             let key = (provider.clone(), model.id.clone());
+            self.model_order.push(key.clone());
             self.models.insert(key, (owner.clone(), model));
         }
         Ok(())
@@ -213,16 +223,25 @@ impl RegistriesBuilder {
     pub fn freeze(self) -> FrozenRegistries {
         FrozenRegistries {
             tools: self.tools,
+            tool_order: self.tool_order,
             tool_discovery: self.tool_discovery,
             commands: self.commands,
             command_order: self.command_order,
-            models: ModelRuntime::new(self.providers, self.models, self.typed_models),
+            models: ModelRuntime::new(
+                self.providers,
+                self.models,
+                self.typed_models,
+                self.provider_order,
+                self.model_order,
+                self.typed_model_order,
+            ),
         }
     }
 }
 
 pub struct FrozenRegistries {
     tools: HashMap<String, (PluginId, Arc<dyn Tool>)>,
+    tool_order: Vec<String>,
     tool_discovery: HashMap<String, crate::ToolDiscovery>,
     commands: HashMap<String, (PluginId, Arc<dyn Command>)>,
     command_order: Vec<String>,
@@ -243,6 +262,7 @@ impl FrozenRegistries {
         }
         Ok(Self {
             tools,
+            tool_order: self.tool_order.clone(),
             tool_discovery: self
                 .tool_discovery
                 .iter()
@@ -264,6 +284,7 @@ impl FrozenRegistries {
     pub fn with_allowed_tools(&self, names: &[String]) -> Self {
         let allowed = names.iter().collect::<HashSet<_>>();
         Self {
+            tool_order: self.tool_order.clone(),
             tools: self
                 .tools
                 .iter()
@@ -286,6 +307,7 @@ impl FrozenRegistries {
     pub fn scope_tool_execution(&self, allowed: &[String], origin: &str) -> Self {
         let origin: Arc<str> = Arc::from(origin);
         Self {
+            tool_order: self.tool_order.clone(),
             tools: self
                 .tools
                 .iter()
@@ -411,22 +433,20 @@ impl FrozenRegistries {
     /// Callable inventory for nested execution; denied metadata is absent in
     /// scoped registries, so discovery cannot widen an execution ceiling.
     pub fn nested_tools(&self, active: &[String]) -> Vec<crate::ToolInfo> {
-        let mut tools = self
-            .tool_discovery
+        self.tool_order
             .iter()
-            .filter(|(name, discovery)| {
-                discovery.exposure == crate::ToolExposure::Deferred || active.contains(name)
-            })
-            .filter_map(|(name, discovery)| {
+            .filter_map(|name| {
+                let discovery = self.tool_discovery.get(name)?;
+                if discovery.exposure != crate::ToolExposure::Deferred && !active.contains(name) {
+                    return None;
+                }
                 let tool = self.tool(name)?;
                 (!tool.model_only()).then(|| crate::ToolInfo {
                     spec: tool.spec(),
                     discovery: discovery.clone(),
                 })
             })
-            .collect::<Vec<_>>();
-        tools.sort_by(|left, right| left.spec.name.cmp(&right.spec.name));
-        tools
+            .collect()
     }
 
     /// Registration metadata visible within this immutable execution scope.
