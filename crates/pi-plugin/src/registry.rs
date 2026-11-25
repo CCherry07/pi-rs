@@ -8,6 +8,13 @@ use crate::{
     PluginId, Provider, ProviderId, ProviderPlugin, ProviderPluginDriver, Result, Tool,
 };
 
+#[derive(Clone)]
+struct RegisteredCommand {
+    owner: PluginId,
+    command: Arc<dyn Command>,
+    completions: Arc<[crate::UiCompletion]>,
+}
+
 #[derive(Default)]
 pub struct RegistriesBuilder {
     tools: HashMap<String, (PluginId, Arc<dyn Tool>)>,
@@ -16,7 +23,7 @@ pub struct RegistriesBuilder {
     model_order: Vec<(ProviderId, ModelId)>,
     typed_model_order: Vec<(crate::ModelType, ProviderId, ModelId)>,
     tool_discovery: HashMap<String, crate::ToolDiscovery>,
-    commands: HashMap<String, (PluginId, Arc<dyn Command>)>,
+    commands: HashMap<String, RegisteredCommand>,
     command_order: Vec<String>,
     providers: HashMap<ProviderId, (PluginId, Arc<dyn Provider>)>,
     provider_overrides: HashSet<ProviderId>,
@@ -53,12 +60,29 @@ impl RegistriesBuilder {
     }
 
     pub fn register_command(&mut self, owner: PluginId, command: Arc<dyn Command>) -> Result<()> {
+        self.register_command_with_completions(owner, command, Vec::new())
+    }
+
+    /// Freezes completion data with the command; duplicate registration changes neither.
+    pub fn register_command_with_completions(
+        &mut self,
+        owner: PluginId,
+        command: Arc<dyn Command>,
+        completions: Vec<crate::UiCompletion>,
+    ) -> Result<()> {
         let name = command.spec().name;
         if self.commands.contains_key(&name) {
             return Err(CoreError::DuplicateCommand(name));
         }
         self.command_order.push(name.clone());
-        self.commands.insert(name, (owner, command));
+        self.commands.insert(
+            name,
+            RegisteredCommand {
+                owner,
+                command,
+                completions: completions.into(),
+            },
+        );
         Ok(())
     }
 
@@ -243,7 +267,7 @@ pub struct FrozenRegistries {
     tools: HashMap<String, (PluginId, Arc<dyn Tool>)>,
     tool_order: Vec<String>,
     tool_discovery: HashMap<String, crate::ToolDiscovery>,
-    commands: HashMap<String, (PluginId, Arc<dyn Command>)>,
+    commands: HashMap<String, RegisteredCommand>,
     command_order: Vec<String>,
     models: ModelRuntime,
 }
@@ -337,31 +361,46 @@ impl FrozenRegistries {
     pub fn command(&self, name: &str) -> Option<Arc<dyn Command>> {
         self.commands
             .get(name)
-            .map(|(_, command)| Arc::clone(command))
+            .map(|entry| Arc::clone(&entry.command))
     }
 
     pub fn command_specs(&self) -> Vec<crate::CommandSpec> {
         let mut specs = self
             .commands
             .values()
-            .map(|(_, command)| command.spec())
+            .map(|entry| entry.command.spec())
             .collect::<Vec<_>>();
         specs.sort_by(|left, right| left.name.cmp(&right.name));
         specs
+    }
+
+    /// Returns detached metadata snapshots in command and candidate registration order.
+    pub fn command_completions(&self) -> Vec<crate::CommandCompletions> {
+        self.command_order
+            .iter()
+            .filter_map(|name| {
+                let entry = self.commands.get(name)?;
+                (!entry.completions.is_empty()).then(|| crate::CommandCompletions {
+                    name: name.clone(),
+                    items: entry.completions.to_vec(),
+                })
+            })
+            .collect()
     }
 
     pub fn command_catalog(&self) -> Vec<crate::CommandCatalogEntry> {
         self.command_order
             .iter()
             .filter_map(|name| self.commands.get(name))
-            .map(|(owner, command)| crate::CommandCatalogEntry {
-                spec: command.spec(),
-                metadata: command
+            .map(|entry| crate::CommandCatalogEntry {
+                spec: entry.command.spec(),
+                metadata: entry
+                    .command
                     .metadata()
                     .unwrap_or_else(|| crate::CommandMetadata {
                         source: crate::CommandSource::Extension,
                         source_info: crate::CommandSourceInfo {
-                            path: format!("builtin:{owner}"),
+                            path: format!("builtin:{}", entry.owner),
                             source: "builtin".to_string(),
                             scope: crate::CommandSourceScope::Temporary,
                             origin: crate::CommandSourceOrigin::TopLevel,
@@ -557,7 +596,7 @@ impl FrozenRegistries {
     }
 
     pub fn command_owner(&self, name: &str) -> Option<&PluginId> {
-        self.commands.get(name).map(|(owner, _)| owner)
+        self.commands.get(name).map(|entry| &entry.owner)
     }
 
     pub fn provider_owner(&self, id: &ProviderId) -> Option<&PluginId> {

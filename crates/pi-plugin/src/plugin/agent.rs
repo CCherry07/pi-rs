@@ -221,6 +221,16 @@ impl<'a> RegisterContext<'a> {
         self.registries
             .register_command(self.owner.clone(), command)
     }
+
+    /// Registers ordered, generation-local argument candidates with their owning command.
+    pub fn register_command_with_completions(
+        &mut self,
+        command: Arc<dyn crate::Command>,
+        completions: Vec<crate::UiCompletion>,
+    ) -> Result<()> {
+        self.registries
+            .register_command_with_completions(self.owner.clone(), command, completions)
+    }
 }
 
 #[derive(Debug, Clone)]

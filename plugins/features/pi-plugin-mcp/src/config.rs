@@ -75,6 +75,16 @@ impl McpConfigEntry {
         self.auth.is_some()
     }
 
+    pub(crate) fn auth_provider(&self) -> Option<&str> {
+        self.auth.as_ref().map(|auth| auth.provider.as_str())
+    }
+
+    pub(crate) fn supports_oauth(&self) -> bool {
+        self.auth.is_none()
+            && matches!(&self.transport, Some(McpTransport::Http { headers, .. })
+            if !headers.keys().any(|key| key.eq_ignore_ascii_case("authorization")))
+    }
+
     pub(crate) fn apply_override(self, base: &Self) -> Result<Self, String> {
         let patch = self.policy_override.ok_or("Expected MCP policy override")?;
         if patch.unexpected_fields {

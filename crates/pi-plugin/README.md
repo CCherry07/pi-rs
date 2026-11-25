@@ -106,6 +106,28 @@ reuse must account for all relevant inputs, including config, code, resources, p
 wire values. Executable Tool/Command/Provider contracts, capabilities, registries and ModelRuntime
 live here. Storage and orchestration remain in `pi-session`, `pi-agent` and `pi-runtime`.
 
+## Command argument completion
+
+`RegisterContext::register_command_with_completions(command, Vec<UiCompletion>)` attaches finite,
+ordered argument candidates to the command during registration. The existing `register_command`
+remains equivalent to an empty completion catalog. Duplicate names reject both command and metadata;
+no live registry update or additional callback lifecycle is introduced.
+
+`FrozenRegistries::command_completions()` returns detached `CommandCompletions` snapshots in command
+registration order. `SessionCatalog` exposes the same generation-local view. `matching(prefix)`
+matches whitespace-delimited positional arguments: preceding words are exact, the current word is
+a case-sensitive prefix, and only candidates at that depth appear. `UiCompletion.value` replaces the
+complete argument string, excluding the slash-command name; a trailing space advances to the next
+argument. `label` and optional `description` belong to the owner. This is not a shell parser or an
+arbitrary dynamic JavaScript completion callback.
+
+The native CLI consumes these snapshots through its generic selector: Tab or the first Enter completes
+the draft, and a subsequent Enter executes the completed invocation. Escape dismisses suggestions.
+Replacement rebuilds the metadata with the owning generation; failed preparation keeps the previous
+catalog. Reading candidates executes no plugin code, discovers no files and persists no session data.
+Existing exact-build fingerprint checks require rebuilding native plugins against the changed SDK;
+command vtables, exported descriptors and library-lifetime policy are unchanged.
+
 Native authors enable the `native` feature and use `pi_plugin::prelude` and `#[pi_plugin::native_plugin]`. Configured native plugins
 use `#[pi_plugin::native_plugin(factory)]` and additionally derive `schemars::JsonSchema` for options.
 ABI 26 has two kinds (`plugin`, `provider`); older native libraries must be rebuilt. The SDK owns

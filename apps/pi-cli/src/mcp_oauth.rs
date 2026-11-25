@@ -1,5 +1,6 @@
 //! OS/browser/terminal ownership for MCP OAuth. The library owns discovery, PKCE,
 //! state validation and credentials; no OS interaction leaks into reusable crates.
+use std::io::IsTerminal;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -221,6 +222,12 @@ impl McpOAuthPrompt for ShellOAuthPrompt {
         Ok(())
     }
     async fn redirect_url(&self, signal: AbortSignal) -> Result<Option<String>, String> {
+        // Agent-launched shell commands can complete through the browser callback
+        // without a TTY. Never consume their piped stdin or start a raw-mode reader.
+        if !std::io::stdin().is_terminal() {
+            signal.wait().await;
+            return Ok(None);
+        }
         // An owned, cancellable reader: browser completion must not strand a
         // blocking stdin task or leave the terminal raw until the user hits Enter.
         let (abort, stop) = AbortHandle::new();

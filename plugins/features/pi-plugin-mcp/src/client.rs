@@ -323,7 +323,15 @@ impl std::fmt::Debug for McpToolSet {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct McpOfferedTool {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) exposure: McpExposure,
+}
+
 struct McpPool {
+    inventory: BTreeMap<String, Vec<McpOfferedTool>>,
     authorization_required: Vec<McpAuthorizationRequired>,
     servers: Vec<Arc<ConnectedServer>>,
     tools: Vec<Arc<McpTool>>,
@@ -393,6 +401,7 @@ impl McpToolSet {
                 .collect::<Vec<_>>(),
         )?;
         let mut servers = Vec::with_capacity(configs.len());
+        let mut inventory = BTreeMap::new();
         let mut authorization_required = Vec::new();
         let mut tools = Vec::new();
         let mut names = HashSet::new();
@@ -428,6 +437,17 @@ impl McpToolSet {
             } else {
                 Vec::new()
             };
+            inventory.insert(
+                server.name.clone(),
+                remote_tools
+                    .iter()
+                    .map(|tool| McpOfferedTool {
+                        name: tool.name.to_string(),
+                        description: tool.description.as_deref().unwrap_or_default().to_owned(),
+                        exposure: server.policy.exposure_for(&tool.name),
+                    })
+                    .collect(),
+            );
             // Assign before filtering so hidden collision peers cannot change visible names.
             let mut plain_counts = HashMap::new();
             let mut remote_names = HashSet::new();
@@ -468,6 +488,7 @@ impl McpToolSet {
         );
         Ok(Self {
             inner: Arc::new(McpPool {
+                inventory,
                 authorization_required,
                 servers,
                 tools,
@@ -562,6 +583,15 @@ impl McpToolSet {
             .servers
             .iter()
             .any(|server| server.name == name && server.resources_visible())
+    }
+
+    /// Read-only inventory, including tools deliberately omitted from the registry.
+    pub(crate) fn offered_tools(&self, server: &str) -> &[McpOfferedTool] {
+        self.inner
+            .inventory
+            .get(server)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
     }
 
     pub(crate) fn tool_exposure_counts(&self, server: &str) -> (usize, usize, usize) {
@@ -1347,6 +1377,7 @@ mod tests {
                 servers: vec![Arc::clone(&connected)],
                 tools: vec![Arc::new(tool)],
                 resource_tools: Vec::new(),
+                inventory: BTreeMap::new(),
                 authorization_required: Vec::new(),
             }),
         };

@@ -10,7 +10,8 @@ Codemode (including its `codemode-deferred` alias) is supported by the independe
 [`pi-plugin-codemode`](../pi-plugin-codemode/README.md) script runtime, included in the coding product.
 Top-level `autoEnableCodemode` controls automatic script-entry activation and defaults to `true`.
 HTTP `oauth` settings and global-only `auth.provider` are supported by the transport layer.
-Provider tokens require a host-injected resolver; Coding/CLI do not install that resolver yet.
+Provider tokens use a host-injected resolver; Coding/CLI install their shared stored-first credential
+resolver without borrowing the selected model's explicit CLI key.
 
 ## Explicit-server API
 
@@ -161,11 +162,18 @@ its transport and credentials. A project override cannot introduce credential fi
   resource availability, and sanitized failures. A failed server does not hide disabled or healthy
   rows, including when another entry is malformed; configuration diagnostics make the inspection
   unsuccessful. Reports include hidden tools, effective per-tool exposure differences and project
-  override provenance. Inspection does not list resource contents or publish tools into a registry.
+  override provenance and optional `authProvider`. Inspection does not list resource contents or
+  publish tools into a registry.
 - `test(name)` explicitly connects one saved, enabled server, reports its tools and shuts down.
 - `prepare().await` connects the enabled servers and returns an `Arc<dyn Plugin>` with their tools
-  and `/mcp` management. Interactive `/mcp` uses semantic selectors for inspect, reconnect,
-  enable/disable, and exposure changes. Argument forms remain available in noninteractive frontends.
+  and `/mcp` management. Interactive `/mcp` offers state-dependent actions, a read-only Tools view,
+  reconnect, sign-in/out, enable/disable, and server-wide exposure. Tools retain their remote names,
+  first description line and differing effective exposure, including hidden tools; selecting one
+  never edits policy. Back/cancel returns to the enclosing selector without writing or reloading.
+  Global servers offer trusted project-only enable/disable overrides without copying credentials.
+  Omitted login/logout/reconnect names select the sole eligible (or sole pending OAuth) server,
+  otherwise a selector; noninteractive ambiguous requests must name a server. Native CLI argument
+  completion uses plugin-owned generation snapshots, never a live registry mutation.
 
 Reads and saves neither connect nor construct sessions. Shell-level inspection is explicit and does
 not construct a session. Preparation completes before a host publishes its runtime generation; a
@@ -193,7 +201,11 @@ pi mcp logout <server> [--local]
 continues to ignore that file until the normal project-trust service says the project is trusted.
 `list` exits `1` when configuration or any enabled connection fails and `0` when every enabled
 server connects; disabled servers are successful rows. JSON includes `servers`, `errors`, and an
-optional untrusted-project `note`. Add/remove never create a session or require model credentials.
+optional untrusted-project `note`. Unknown login/logout names include nearby-name suggestions and
+configured-name/untrusted-project guidance. Add/remove never create a session or require model credentials.
+HTTP authoring accepts `--oauth-client-id`, `--oauth-client-secret`, `--oauth-callback-port`,
+`--oauth-client-name` and `--oauth-client-registration auto|cimd|dcr`. Validation does not resolve
+secret references, run commands, sign in, or create a credential store. Invalid options leave disk unchanged.
 
 `McpLibrary::login` validates the defining scope, probes first, hands a typed auth challenge to the
 installed `McpOAuthHost`, and reconnects after the real exchange. Already-authorized servers skip UI.
@@ -201,8 +213,10 @@ The CLI's native host owns browser launch and loopback listening, with hidden pa
 the default embedding host remains manual (`127.0.0.1:53682/callback` unless configured). Native callbacks
 use an ephemeral port by default and honor configured URL/port plus the actual CIMD redirect path.
 `begin_login` remains available for low-level callers. No token is fabricated when authorization starts.
-Shell login supports `--timeout <seconds>` (default 300); semantic login is bounded to 300 seconds and
-observes command cancellation. Both semantic login and logout request a complete generation reload.
+Shell login supports positive finite fractional `--timeout <seconds>` (default 300, within Rust's
+representable duration range); semantic login is bounded to 300 seconds and observes cancellation.
+Non-TTY shell input still permits browser callbacks and already-authorized probes; only pasted input
+is disabled, without consuming piped stdin or starting a terminal reader. Both semantic login and logout request a complete generation reload.
 `logout` removes only the selected name/URL credentials. Provider/header auth is rejected by these
 commands; `--local` requires a trusted project-defined transport rather than an inherited policy override.
 Inspection and generation connections share private `<agent-dir>/mcp-auth.json` state. Coding supplies
@@ -216,9 +230,11 @@ and unrelated credentials. Coding captures revisions before connecting and asks 
 owner to replace the entire generation before the next idle submission if credentials changed.
 ACP has no browser or local discovery and reuses credentials only when its host explicitly injects a store.
 
-OAuth add flags, live connection logs and per-tool semantic editing remain unimplemented. Configure
-OAuth fields or `toolExposure` in the file. This is not full legacy UI parity. Tests use deterministic
-local fixtures, never real-account sign-ins.
+This is not a full parity claim. Server log-file capture, command-backed configuration resolution,
+connection lifecycle and extension-registration contracts, and official conformance evidence remain
+separate work. Per-tool editing and an interactive live log viewer are not provided by the pinned
+legacy manager either; edit `toolExposure` in the file. Tests use deterministic local fixtures,
+never real-account sign-ins.
 
 ## Configuration and boundaries
 

@@ -31,7 +31,7 @@ impl McpOAuthHost for ScriptedRedirect {
 
 #[tokio::test]
 async fn semantic_auth_mutations_reload_and_notify_only_through_the_replacement_context() {
-    for login in [true, false] {
+    for (login, named) in [(true, true), (true, false), (false, true), (false, false)] {
         for reload_succeeds in [true, false] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -92,7 +92,11 @@ async fn semantic_auth_mutations_reload_and_notify_only_through_the_replacement_
             let result = command
                 .execute(
                     context.clone(),
-                    format!("{} account", if login { "login" } else { "logout" }),
+                    format!(
+                        "{}{}",
+                        if login { "login" } else { "logout" },
+                        if named { " account" } else { "" }
+                    ),
                 )
                 .await;
             assert_eq!(access.reloads.load(std::sync::atomic::Ordering::SeqCst), 1);

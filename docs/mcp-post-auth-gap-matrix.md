@@ -18,6 +18,9 @@ The oracle's `src/extensions/mcp/index.ts:876–916` offers a **read-only Tools 
 first-line descriptions and effective exposure. It edits server exposure, not individual tool
 exposure. A per-tool exposure editor is shared non-support, not a missing legacy feature.
 
+A follow-up direct read of `config.rs:expand_with` corrected the initial C1 wording: `!command`
+is passed through literally, not rejected. Both behaviors differ from the oracle's value resolver.
+
 The oracle logs server `notifications/message` to a rotated file (`log.ts`); it does not expose a
 live log viewer in the MCP manager. File logging and connection/stderr status are the parity work.
 An interactive live log viewer would be an additional product feature.
@@ -26,15 +29,15 @@ An interactive live log viewer would be an additional product feature.
 
 | ID | Oracle contract and source | Rust baseline / owning seam | Required evidence and delivery |
 | --- | --- | --- | --- |
-| M1 | `L/src/extensions/mcp/cli.ts:add`: `--oauth-client-id`, `--oauth-client-secret`, `--oauth-callback-port`, `--oauth-client-name`, `--oauth-client-registration`; HTTP-only, validated before save | `apps/pi-cli/src/mcp_commands.rs` omits these flags; `McpServerDefinition` cannot author OAuth even though config supports it | **OPEN**. Typed library authoring + CLI parser tests, round-trip unresolved secrets, invalid/misplaced flags leave disk unchanged |
-| M2 | `index.ts:showTools`: full offered-tool inventory, description and differing effective exposure, including tools hidden by policy | `plugin.rs:manage` shows only aggregate counts; inspection can already inventory hidden tools | **OPEN**. Read-only semantic view; cancellation and no disk/generation mutation; preserve remote names separately from normalized tool names |
-| M3 | `index.ts:serverMenu/saveConfig`: Enable/Disable in this project for a global server, with explicit trusted-project override ownership | Existing overrides merge correctly; manager cannot create this project-only override | **OPEN**. Trusted project-only write, global bytes unchanged, inherited credentials untouched; reload failure retains old generation |
-| M4 | `index.ts:pickServer` and command handler: omitted login/logout/reconnect name auto-selects the only eligible/preferred server, otherwise selector; contextual actions, completion, returning/back/cancel | Rust commands require names and offer a fixed action list, including ineligible sign-in actions | **OPEN**. Eligibility/state-dependent choices, non-UI behavior, no duplicate side effects on cancellation, retired-context handoff |
-| M5 | `cli.ts:list`: optional `authProvider`, always-present `errors` array, raw remote tool names with differing `toolExposure`, actionable names/provider guidance | `McpServerReport` has no `authProvider`; CLI already emits `errors: []` and differing tool exposures, which must be preserved | **OPEN**. Exact stable JSON-shape and needs-auth output regressions; preserve useful Rust-only inspection APIs |
-| M6 | `cli.ts:runMcpCommand/editDistance`: unknown login/logout name suggests a nearby configured name, lists configured names and ignored-project guidance | Rust error lacks the same discovery assistance | **OPEN**. Deterministic suggestion/unknown/untrusted-scope cases; never echo credentials |
+| M1 | `L/src/extensions/mcp/cli.ts:add`: `--oauth-client-id`, `--oauth-client-secret`, `--oauth-callback-port`, `--oauth-client-name`, `--oauth-client-registration`; HTTP-only, validated before save | `apps/pi-cli/src/mcp_commands.rs` omits these flags; `McpServerDefinition` cannot author OAuth even though config supports it | **VALIDATED; local delivery pending**. Typed library authoring + CLI parser tests, round-trip unresolved secrets, invalid/misplaced flags leave disk unchanged |
+| M2 | `index.ts:showTools`: full offered-tool inventory, description and differing effective exposure, including tools hidden by policy | `plugin.rs:manage` shows only aggregate counts; inspection can already inventory hidden tools | **VALIDATED; local delivery pending**. Read-only semantic view; cancellation and no disk/generation mutation; preserve remote names separately from normalized tool names |
+| M3 | `index.ts:serverMenu/saveConfig`: Enable/Disable in this project for a global server, with explicit trusted-project override ownership | Existing overrides merge correctly; manager cannot create this project-only override | **VALIDATED; local delivery pending**. Trusted project-only write, global bytes unchanged, inherited credentials untouched; reload failure retains old generation |
+| M4 | `index.ts:pickServer` and command handler: omitted login/logout/reconnect name auto-selects the only eligible/preferred server, otherwise selector; contextual actions, completion, returning/back/cancel | Rust commands require names and offer a fixed action list, including ineligible sign-in actions | **VALIDATED; local delivery pending**. Eligibility/state-dependent choices, non-UI behavior, no duplicate side effects on cancellation, retired-context handoff |
+| M5 | `cli.ts:list`: optional `authProvider`, always-present `errors` array, raw remote tool names with differing `toolExposure`, actionable names/provider guidance | `McpServerReport` has no `authProvider`; CLI already emits `errors: []` and differing tool exposures, which must be preserved | **VALIDATED; local delivery pending**. Exact stable JSON-shape and needs-auth output regressions; preserve useful Rust-only inspection APIs |
+| M6 | `cli.ts:runMcpCommand/editDistance`: unknown login/logout name suggests a nearby configured name, lists configured names and ignored-project guidance | Rust error lacks the same discovery assistance | **VALIDATED; local delivery pending**. Deterministic suggestion/unknown/untrusted-scope cases; never echo credentials |
 | D1 | `L/src/extensions/mcp/log.ts`: timestamp/server/level/logger, multiline indentation, append per message, rotate above 5 MiB to `mcp.log.1`, best-effort failures | `client_handler.rs` handles roots/progress only; no server log sink | **OPEN**. Notification-to-private-file fixture, rotation and unavailable sink, concurrent writers; logging cannot break requests or write outside renderer to terminal |
 | D2 | `runtime.ts:connectOnce/handleClientClose`: drain stdio stderr; last 2,000 characters explain initialization failure or disconnect | `client.rs` sends stderr to null | **OPEN**. Bounded drain that cannot deadlock the child, redacted diagnostic tail, failure/exit cleanup and no terminal pollution |
-| C1 | `runtime.ts:createDefaultTransport/oauthSettings` + `L/src/core/resolve-config-value.ts`: uncached `!command` for env/header/client-secret values, 10-second bound, trim/nonempty success; parse/save do not execute | `config.rs:expand_with` rejects command-backed strings; transport-only APIs are explicit input and must not gain implicit shell execution | **OPEN**. Explicit local-config resolution capability after trust; no execution for untrusted/disabled entries, static parse/authoring/inspection metadata; cancellation, output limits, redacted failure, refresh/reconnect rereads |
+| C1 | `runtime.ts:createDefaultTransport/oauthSettings` + `L/src/core/resolve-config-value.ts`: uncached `!command` for env/header/client-secret values, 10-second bound, trim/nonempty success; parse/save do not execute | `config.rs:expand_with` treats command-backed strings as literal values instead of executing them; transport-only APIs are explicit input and must not gain implicit shell execution | **OPEN**. Explicit local-config resolution capability after trust; no execution for untrusted/disabled entries, static parse/authoring/inspection metadata; cancellation, output limits, redacted failure, refresh/reconnect rereads |
 | C2 | Same resolver: embedded `$VAR`/`${VAR}`, `$$` and `$!` escaping, missing/empty env rejection; command/args only home expansion in legacy | Rust supports `${env:VAR}` and whole `$VAR`, expands additional transport fields; exact template behavior differs | **OPEN**. Table-driven shared syntax tests; preserve documented Rust extensions separately, never execute command/args/URL as value commands |
 | L1 | `index.ts:session_start/startConnection`: config and independent connection failures retain healthy servers plus one startup diagnostic | Product prepare tolerates typed needs-auth only; unrelated config/connection errors reject the whole generation | **OPEN**. Partial-fault candidate containing healthy tools and management state; still reject generation-wide invariant/collision failures and preserve transactional publication |
 | L2 | `index.ts:before_agent_start/tool_call`, `agent-session-mcp.test.ts:768–922`: background connection; first prompt waits only for direct servers, bounded at 10 seconds; scripts/search/resources wait only for relevant servers; pending directory summaries | Rust waits for all connections before publication. Registry immutability is intentional, but the resulting observable latency is not thereby approved as equivalent | **APPROVED TIMING DIVERGENCE; implementation/evidence OPEN**. Bounded startup and next-idle whole-generation publication; typed pending/retry diagnostics during active runs instead of same-turn selective waits. See decision below |
@@ -46,7 +49,7 @@ An interactive live log viewer would be an additional product feature.
 | E2 | `index.ts:mcp_servers_change`: late extension registration/replacement/removal, old work invalidation/cleanup, session-only manager edits, report registrations without a connector | No registration-change adapter or transient extension management scope | **OPEN**. Generation-safe adapter, stale-attempt rejection, restart/close ordering, no mcp.json or Pi v4 config persistence |
 | E3 | `L/src/cli/args.ts` and built-in extension loading: `--no-mcp`; `--no-extensions` disables built-ins as well as discovered extensions while explicit extension paths remain valid | No `--no-mcp`; Rust `--no-extensions` currently only gates extension discovery, not MCP | **OPEN**. CLI/product option, no accidental connect/tool/schema/prompt entries; no impact on explicit ACP client server isolation; Node argument-splitting coverage if touched |
 | Q1 | `L/test/mcp-conformance/{README.md,run.ts,client.ts,baseline.json}`: official pinned suite `0.2.0-alpha.11`, modes 2025-03-26/06-18/11-25; checks and client completion baseline; missing scenarios fail | Local rmcp fixtures exist, no equivalent official runner/baseline coverage is established | **OPEN**. Product-path client adapter, pinned reproducible runner, local fixture servers only, per-check reviewed baseline; never regenerate to hide failures |
-| Q2 | Published SDK/harness docs describe shipped behavior | `packages/pi/docs/mcp.md` still says OAuth/provider auth unsupported and documents pre-management APIs; release copies it as shipped documentation | **OPEN**. Sync authored docs deliberately, verify links and release input; docs alone do not require rerunning unchanged Rust gates |
+| Q2 | Published SDK/harness docs describe shipped behavior | `packages/pi/docs/mcp.md` still says OAuth/provider auth unsupported and documents pre-management APIs; release copies it as shipped documentation | **VALIDATED; local delivery pending**. Sync authored docs deliberately, verify links and release input; docs alone do not require rerunning unchanged Rust gates |
 
 ## Newly identified auth-boundary carryovers (not silently waived)
 
@@ -56,9 +59,41 @@ before claiming full parity.
 
 | ID | Oracle | Rust baseline | Required evidence / disposition |
 | --- | --- | --- | --- |
-| A1 | `cli.ts:login/waitForRedirectUrl` allows non-TTY browser callback login; only terminal paste is disabled; already-authorized probe also works without TTY | CLI rejects nonterminal input before probing | **OPEN**. Piped-stdin local fake-browser callback and already-authorized no-browser tests, bounded cleanup |
-| A2 | `cli.ts` accepts positive finite fractional `--timeout` seconds | Rust restricts integers to 1–86400 | **OPEN**. Fractional timer/invalid numeric parser tests or approved documented limit |
+| A1 | `cli.ts:login/waitForRedirectUrl` allows non-TTY browser callback login; only terminal paste is disabled; already-authorized probe also works without TTY | CLI rejects nonterminal input before probing | **VALIDATED; local delivery pending**. Piped-stdin local fake-browser callback and already-authorized no-browser tests, bounded cleanup |
+| A2 | `cli.ts` accepts positive finite fractional `--timeout` seconds | Rust restricts integers to 1–86400 | **VALIDATED; local delivery pending**. Fractional timer/invalid numeric parser tests or approved documented limit |
 | A3 | Official auth cases include step-up, retry-limit and CIMD behavior under several negotiated protocols | Existing deterministic tests are narrower than the official baseline | **OPEN via Q1**, not presumed equivalent or failing until measured |
+
+## Management tranche implementation/evidence (not yet landed)
+
+M1–M6 and A1–A2 are implemented in the current candidate. Q2 deliberately synchronizes only the
+MCP introduction and local-library/management/auth sections of `packages/pi/docs/mcp.md`; unrelated
+resource, configuration and Cua sections remain authored as before. No full parity claim follows.
+
+- M1: typed OAuth authoring in `library.rs` and CLI parser; library round-trip and native
+  `apps/pi-cli/tests/mcp_management.rs` cases preserve unresolved values and reject invalid writes.
+- M2: offered inventory in `client.rs`; `plugin/tests/inventory.rs` drives nonempty raw-name/hidden
+  Tools menus with local HTTP and proves no execution, write or reload.
+- M3/M4: `plugin/manager.rs`, `plugin/tests/{management,auth}.rs` cover project ownership, contextual
+  navigation, omitted-name selection, cancellation and replacement success/failure. M4 additionally
+  adds frozen owner-neutral registry completion metadata in `pi-plugin::command::completion`;
+  `apps/pi-cli/src/tui/tests/command_completions.rs` exercises generic selector behavior and actual
+  successful/failed replacement, old snapshot stability, no provider request and lazy persistence.
+- M5/M6: optional provider metadata, stable JSON, native needs-auth/redacted guidance and
+  deterministic unknown-name/untrusted-project diagnostics in library and native management tests.
+- A1/A2: native parser tests and six local OAuth fixture modes (callback/paste/cancel/timeout and
+  pipe-callback/pipe-timeout); pipe callback also proves already-authorized login opens no browser.
+- Focused management/native evidence `05877924`: MCP, CLI MCP/native authoring tests, build, all
+  six OAuth fixture modes, fmt and diff green. Completion-contract run `96e54156` passed plugin/MCP
+  tests, then found a missing id in the CLI fixture. Repaired run `ced373fb` passed both CLI completion
+  regressions and all six native management tests, plus fmt/diff. Shipped-doc run `b849d0e3` passed
+  package typecheck, all 14 release unit tests, synchronized-section/local-link/release-input checks.
+- Final public-contract gate `af36e33b-3f16-488f-98de-002f878415ee` passed `cargo fmt --all --
+  --check`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and
+  nonpaged `git diff --check`. Real-provider opt-in tests remain ignored; no official conformance
+  run is implied by these workspace results. Subsequent ledger-only edits do not invalidate them.
+- CLI/MCP/SDK READMEs and architecture document the registered metadata boundary and management
+  behavior. A local-only landing remains required. All other rows stay open; #132 must not close
+  on this tranche.
 
 ## Existing coverage to preserve
 

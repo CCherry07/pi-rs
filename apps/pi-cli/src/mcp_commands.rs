@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use pi_plugin_mcp::{
@@ -21,7 +20,7 @@ Commands:
   add <server>            Add or replace a server in mcp.json
   remove <server>         Remove a server from mcp.json
   list                    Show state, tools, and errors (exits 1 on failure)
-  login <server>          Browser OAuth sign-in with loopback/pasted callback (terminal required)
+  login <server>          Browser OAuth sign-in; terminal input enables pasted fallback
   logout <server>         Delete stored OAuth credentials for this server
 
 Options for add and remove:
@@ -34,6 +33,15 @@ Options for add:
   --header <KEY=VALUE>    HTTP header (repeatable)
   --bearer-token-env-var <NAME>
                           Send Authorization: Bearer ${NAME}
+  --oauth-client-id <id>  Pre-registered OAuth client id
+  --oauth-client-secret <secret>
+                          OAuth client secret (stored unresolved)
+  --oauth-callback-port <port>
+                          Fixed OAuth callback port
+  --oauth-client-name <name>
+                          Client name for OAuth registration
+  --oauth-client-registration <mode>
+                          auto (default), cimd, or dcr
   --exposure <mode>       codemode (default), deferred, direct, or hidden
   --description <text>    What the server offers, shown in the system prompt
 
@@ -116,20 +124,11 @@ async fn authorize(
     let scope = parsed.flags.contains("local").then_some(McpScope::Project);
     let name = &parsed.positional[0];
     let result = if command == "login" {
-        let seconds = match parsed.values.get("timeout") {
-            Some(value) => match value.parse::<u64>() {
-                Ok(value @ 1..=86400) => value,
-                _ => return command_error("--timeout must be an integer from 1 to 86400 seconds"),
-            },
-            None => 300,
+        let timeout = match login_timeout(parsed.values.get("timeout").map(String::as_str)) {
+            Ok(timeout) => timeout,
+            Err(error) => return command_error(error),
         };
-        login(
-            library,
-            name,
-            scope,
-            std::time::Duration::from_secs(seconds),
-        )
-        .await
+        login(library, name, scope, timeout).await
     } else {
         library.logout(name, scope)
     };
@@ -142,18 +141,27 @@ async fn authorize(
     }
 }
 
+fn login_timeout(value: Option<&str>) -> Result<std::time::Duration, String> {
+    let invalid = || {
+        "--timeout must be a positive finite number of seconds representable as a duration"
+            .to_string()
+    };
+    let seconds = value
+        .unwrap_or("300")
+        .parse::<f64>()
+        .map_err(|_| invalid())?;
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return Err(invalid());
+    }
+    std::time::Duration::try_from_secs_f64(seconds).map_err(|_| invalid())
+}
+
 async fn login(
     library: &McpLibrary,
     name: &str,
     scope: Option<McpScope>,
     timeout: std::time::Duration,
 ) -> Result<String, String> {
-    if !std::io::stdin().is_terminal() {
-        return Err(
-            "MCP login requires a terminal; run pi mcp login in a terminal, then retry the session"
-                .into(),
-        );
-    }
     let (abort, signal) = pi_core::AbortHandle::new();
     let count = tokio::select! {
         biased;
@@ -173,6 +181,11 @@ fn add(
     let known = BTreeMap::from([
         ("local", OptionKind::Flag),
         ("url", OptionKind::Value),
+        ("oauth-client-id", OptionKind::Value),
+        ("oauth-client-secret", OptionKind::Value),
+        ("oauth-callback-port", OptionKind::Value),
+        ("oauth-client-name", OptionKind::Value),
+        ("oauth-client-registration", OptionKind::Value),
         ("env", OptionKind::List),
         ("cwd", OptionKind::Value),
         ("header", OptionKind::List),
@@ -195,13 +208,21 @@ fn add(
     if url.is_some() && (parsed.lists.contains_key("env") || parsed.values.contains_key("cwd")) {
         return command_error("--env and --cwd only apply to stdio servers");
     }
+    const HTTP_ONLY: &[&str] = &[
+        "header",
+        "bearer-token-env-var",
+        "oauth-client-id",
+        "oauth-client-secret",
+        "oauth-callback-port",
+        "oauth-client-name",
+        "oauth-client-registration",
+    ];
     if url.is_none()
-        && (parsed.lists.contains_key("header")
-            || parsed.values.contains_key("bearer-token-env-var"))
+        && let Some(option) = HTTP_ONLY
+            .iter()
+            .find(|name| parsed.values.contains_key(**name) || parsed.lists.contains_key(**name))
     {
-        return command_error(
-            "--header and --bearer-token-env-var only apply to HTTP servers (--url)",
-        );
+        return command_error(format!("--{option} only applies to HTTP servers (--url)"));
     }
 
     let transport = if let Some(url) = url {
@@ -236,6 +257,40 @@ fn add(
         }
     };
     let mut definition = McpServerDefinition::new(name, transport);
+    if HTTP_ONLY
+        .iter()
+        .filter(|name| name.starts_with("oauth-"))
+        .any(|name| parsed.values.contains_key(*name))
+    {
+        let callback_port = match parsed.values.get("oauth-callback-port") {
+            Some(value) => match value.parse::<u16>() {
+                Ok(value @ 1..) => Some(value),
+                _ => {
+                    return command_error(
+                        "--oauth-callback-port must be an integer from 1 to 65535",
+                    );
+                }
+            },
+            None => None,
+        };
+        let client_registration = match parsed.values.get("oauth-client-registration") {
+            Some(value) => match serde_json::from_value(serde_json::json!(value)) {
+                Ok(value) => Some(value),
+                Err(_) => {
+                    return command_error("--oauth-client-registration must be auto, cimd, or dcr");
+                }
+            },
+            None => None,
+        };
+        definition = definition.oauth(pi_plugin_mcp::McpOAuthConfig {
+            client_id: parsed.values.get("oauth-client-id").cloned(),
+            client_secret: parsed.values.get("oauth-client-secret").cloned(),
+            callback_port,
+            client_name: parsed.values.get("oauth-client-name").cloned(),
+            client_registration,
+            ..Default::default()
+        });
+    }
     if let Some(exposure) = parsed.values.get("exposure") {
         let exposure = match exposure.parse::<pi_plugin_mcp::McpExposure>() {
             Ok(exposure) => exposure,
@@ -410,6 +465,9 @@ fn render_text(inspection: &McpInspection, context: &McpCommandContext, note: Op
             scope_name(report.scope)
         );
         println!("  {}", report.transport);
+        if let Some(path) = &report.project_override {
+            println!("  project override: {}", path.display());
+        }
         if !report.tools.is_empty() {
             let tools = report
                 .tools
@@ -581,6 +639,25 @@ mod tests {
         assert!(directory.path().join(".pi/mcp.json").exists());
         let remove = ["remove", "--local", "parked"].map(String::from);
         assert_eq!(run(&remove, &context).await.unwrap(), 0);
+    }
+
+    #[test]
+    fn login_timeouts_accept_fractional_positive_seconds_without_panicking() {
+        assert_eq!(
+            login_timeout(None).unwrap(),
+            std::time::Duration::from_secs(300)
+        );
+        assert_eq!(
+            login_timeout(Some("1.5")).unwrap(),
+            std::time::Duration::from_millis(1500)
+        );
+        assert_eq!(
+            login_timeout(Some("86401")).unwrap(),
+            std::time::Duration::from_secs(86401)
+        );
+        for value in ["0", "-1", "NaN", "inf", "1e300", "oops"] {
+            assert!(login_timeout(Some(value)).is_err(), "{value}");
+        }
     }
 
     #[tokio::test]
