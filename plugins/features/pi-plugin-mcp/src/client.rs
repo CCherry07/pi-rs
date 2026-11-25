@@ -427,13 +427,20 @@ impl McpToolSet {
                 .peer_info()
                 .is_some_and(|info| info.capabilities.tools.is_some())
             {
-                tokio::time::timeout(CONNECT_TIMEOUT, server.peer.list_all_tools())
-                    .await
-                    .map_err(|_| McpError::Timeout(name))?
-                    .map_err(|_| McpError::ListTools {
-                        server: server.name.clone(),
-                        message: "server rejected discovery or the connection closed".into(),
-                    })?
+                match tokio::time::timeout(CONNECT_TIMEOUT, server.peer.list_all_tools()).await {
+                    Ok(Ok(tools)) => tools,
+                    Ok(Err(_)) => {
+                        server.handler.stderr.finish().await;
+                        return Err(McpError::ListTools {
+                            server: server.name.clone(),
+                            message: server
+                                .handler
+                                .stderr
+                                .message("server rejected discovery or the connection closed"),
+                        });
+                    }
+                    Err(_) => return Err(McpError::Timeout(name)),
+                }
             } else {
                 Vec::new()
             };
@@ -578,6 +585,15 @@ impl McpToolSet {
         }
     }
 
+    pub(crate) fn connection_error(&self, name: &str) -> Option<String> {
+        self.inner
+            .servers
+            .iter()
+            .find(|server| server.name == name)
+            .filter(|server| server.peer.is_transport_closed())
+            .map(|server| server.handler.stderr.message("Connection closed"))
+    }
+
     pub(crate) fn has_resources(&self, name: &str) -> bool {
         self.inner
             .servers
@@ -664,7 +680,9 @@ impl McpToolSet {
             let Some(mut service) = server.service.lock().await.take() else {
                 continue;
             };
-            match service.close_with_timeout(SHUTDOWN_TIMEOUT).await {
+            let result = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
+            server.handler.stderr.finish().await;
+            match result {
                 Ok(Some(_)) => {}
                 Ok(None) => {
                     first_error.get_or_insert_with(|| McpError::Shutdown {
@@ -695,7 +713,13 @@ async fn connect_server(
         oauth,
         auth,
     } = config;
-    let handler = McpClientHandler::new(policy.root.as_deref());
+    let mut handler = McpClientHandler::new(policy.root.as_deref());
+    let redactor = crate::diagnostics::Redactor::new(&transport, oauth.as_ref());
+    handler.stderr = crate::diagnostics::StderrCapture::new(redactor.clone());
+    handler.log = policy
+        .log_path
+        .clone()
+        .map(|path| crate::diagnostics::ServerLog::new(path, name.clone(), redactor));
     let auto = ClientLifecycleMode::Auto {
         preferred_versions: vec![rmcp::model::ProtocolVersion::V_2026_07_28],
         legacy_version: Some(rmcp::model::ProtocolVersion::LATEST),
@@ -741,70 +765,75 @@ async fn connect_once(
     handler: McpClientHandler,
     lifecycle: ClientLifecycleMode,
 ) -> Result<RunningService<RoleClient, McpClientHandler>, McpError> {
-    match config {
-        McpTransport::Http { url, headers } => {
-            // reqwest 0.13's no-provider feature requires an explicit default.
-            // Respect an embedding host's choice, otherwise match Pi's ring backend.
-            if rustls::crypto::CryptoProvider::get_default().is_none() {
-                let _ = rustls::crypto::ring::default_provider().install_default();
-            }
-            let headers = http_headers(name, headers)?;
-            let has_static_authorization = headers.contains_key(&http::header::AUTHORIZATION);
-            let transport_config =
-                StreamableHttpClientTransportConfig::with_uri(url.clone()).custom_headers(headers);
-            if let Some(provider_auth) = provider_auth.filter(|_| !has_static_authorization) {
-                let resolver =
-                    client_auth
-                        .provider_tokens
-                        .clone()
-                        .ok_or_else(|| McpError::Initialize {
+    let stderr = handler.stderr.clone();
+    let result =
+        match config {
+            McpTransport::Http { url, headers } => {
+                // reqwest 0.13's no-provider feature requires an explicit default.
+                // Respect an embedding host's choice, otherwise match Pi's ring backend.
+                if rustls::crypto::CryptoProvider::get_default().is_none() {
+                    let _ = rustls::crypto::ring::default_provider().install_default();
+                }
+                let headers = http_headers(name, headers)?;
+                let has_static_authorization = headers.contains_key(&http::header::AUTHORIZATION);
+                let transport_config = StreamableHttpClientTransportConfig::with_uri(url.clone())
+                    .custom_headers(headers);
+                if let Some(provider_auth) = provider_auth.filter(|_| !has_static_authorization) {
+                    let resolver = client_auth.provider_tokens.clone().ok_or_else(|| {
+                        McpError::Initialize {
                             server: name.to_string(),
                             message: "provider authentication resolver is not installed".into(),
-                        })?;
-                let transport = StreamableHttpClientTransport::with_client(
-                    ProviderAuthClient::new(provider_auth.provider.clone(), resolver),
-                    transport_config,
-                );
-                handler.serve_with_lifecycle(transport, lifecycle).await
-            } else if !has_static_authorization {
-                let oauth_client = oauth_http_client(name, url, oauth, client_auth)
-                    .await
-                    .map_err(|_| McpError::Initialize {
-                        server: name.to_string(),
-                        message: "OAuth credential state could not be loaded".into(),
+                        }
                     })?;
-                let transport =
-                    StreamableHttpClientTransport::with_client(oauth_client, transport_config);
-                handler.serve_with_lifecycle(transport, lifecycle).await
-            } else {
-                let transport = StreamableHttpClientTransport::from_config(transport_config);
+                    let transport = StreamableHttpClientTransport::with_client(
+                        ProviderAuthClient::new(provider_auth.provider.clone(), resolver),
+                        transport_config,
+                    );
+                    handler.serve_with_lifecycle(transport, lifecycle).await
+                } else if !has_static_authorization {
+                    let oauth_client = oauth_http_client(name, url, oauth, client_auth)
+                        .await
+                        .map_err(|_| McpError::Initialize {
+                            server: name.to_string(),
+                            message: "OAuth credential state could not be loaded".into(),
+                        })?;
+                    let transport =
+                        StreamableHttpClientTransport::with_client(oauth_client, transport_config);
+                    handler.serve_with_lifecycle(transport, lifecycle).await
+                } else {
+                    let transport = StreamableHttpClientTransport::from_config(transport_config);
+                    handler.serve_with_lifecycle(transport, lifecycle).await
+                }
+            }
+            McpTransport::Stdio {
+                command,
+                args,
+                env,
+                cwd,
+            } => {
+                let mut process = tokio::process::Command::new(command);
+                process.args(args).envs(env);
+                if let Some(cwd) = cwd {
+                    process.current_dir(cwd);
+                }
+                // Drain separately from protocol stdout. rmcp still owns process cleanup.
+                let (transport, captured) = TokioChildProcess::builder(process)
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .map_err(|error| McpError::Start {
+                        server: name.to_string(),
+                        message: error.to_string(),
+                    })?;
+                if let Some(captured) = captured {
+                    stderr.start(captured);
+                }
                 handler.serve_with_lifecycle(transport, lifecycle).await
             }
-        }
-        McpTransport::Stdio {
-            command,
-            args,
-            env,
-            cwd,
-        } => {
-            let mut process = tokio::process::Command::new(command);
-            process.args(args).envs(env);
-            if let Some(cwd) = cwd {
-                process.current_dir(cwd);
-            }
-            // Child logs must not corrupt the TUI / protocol channel or expose
-            // credentials. Protocol failures are surfaced through typed errors.
-            let (transport, _) = TokioChildProcess::builder(process)
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .map_err(|error| McpError::Start {
-                    server: name.to_string(),
-                    message: error.to_string(),
-                })?;
-            handler.serve_with_lifecycle(transport, lifecycle).await
-        }
+        };
+    if result.is_err() {
+        stderr.finish().await;
     }
-    .map_err(|error| {
+    result.map_err(|error| {
         if error.is_authorization_required() {
             McpError::AuthorizationRequired(McpAuthorizationRequired {
                 server: name.to_string(),
@@ -816,8 +845,9 @@ async fn connect_once(
         } else {
             McpError::Initialize {
                 server: name.to_string(),
-                message: "handshake failed; check endpoint, credentials and server availability"
-                    .into(),
+                message: stderr.message(
+                    "handshake failed; check endpoint, credentials and server availability",
+                ),
             }
         }
     })
@@ -1194,6 +1224,7 @@ impl Tool for McpTool {
 pub(crate) enum McpRequestError {
     Aborted,
     Timeout(Duration),
+    Disconnected(String),
     Service(rmcp::service::ServiceError),
 }
 
@@ -1210,6 +1241,9 @@ impl McpRequestError {
                 "MCP request timed out for server {server} after {} seconds without progress",
                 timeout.as_secs_f64(),
             )),
+            Self::Disconnected(message) => {
+                ToolError::Execution(format!("MCP server {server}: {message}"))
+            }
             Self::Service(_) => {
                 ToolError::Execution(format!("MCP request failed for server {server}"))
             }
@@ -1227,6 +1261,23 @@ impl ConnectedServer {
     }
 
     pub(crate) async fn request(
+        &self,
+        context: &ToolContext,
+        request: ClientRequest,
+        tool: &str,
+        updates: &ToolUpdateSink,
+    ) -> Result<ServerResult, McpRequestError> {
+        let result = self.request_inner(context, request, tool, updates).await;
+        if matches!(&result, Err(McpRequestError::Service(_))) && self.peer.is_transport_closed() {
+            self.handler.stderr.finish().await;
+            return Err(McpRequestError::Disconnected(
+                self.handler.stderr.message("Connection closed"),
+            ));
+        }
+        result
+    }
+
+    async fn request_inner(
         &self,
         context: &ToolContext,
         request: ClientRequest,

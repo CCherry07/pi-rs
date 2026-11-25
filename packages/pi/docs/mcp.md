@@ -230,9 +230,25 @@ and unrelated credentials. Coding captures revisions before connecting and asks 
 owner to replace the entire generation before the next idle submission if credentials changed.
 ACP has no browser or local discovery and reuses credentials only when its host explicitly injects a store.
 
-This is not a full parity claim. Server log-file capture, connection lifecycle and
-extension-registration contracts, and official conformance evidence remain
-separate work. Per-tool editing and an interactive live log viewer are not provided by the pinned
+Local-library connections append server `notifications/message` to private `<agent-dir>/mcp.log`,
+with a UTC millisecond timestamp, server, level, optional logger and indented continuation lines.
+Before an append, a file larger than 5 MiB rotates to `mcp.log.1`. Writes and rotation are best effort;
+an unavailable sink or another process holding its lock never fails an MCP request. This is a server
+message file, not a live manager log viewer or a transcript of protocol traffic. Explicit transport-only
+and ACP clients never infer a log path. Merely reading/saving config or preparing disabled servers
+does not create log files.
+
+Stdio stderr is continuously drained into a bounded in-memory tail, not sent to the terminal or the
+log file. Initialization/discovery failures and disconnects include up to the last 2,000 UTF-16 units
+of diagnostic text. The manager reports disconnected transports without changing their frozen tool
+catalog. Configured env/header/argument/secret values and inherited credential-like environment
+values are redacted before tail truncation; terminal control characters are removed. Redaction is
+not a general detector for arbitrary secrets a server invents or transforms, so treat `mcp.log` as
+private server output. Child lifetime remains rmcp-owned; the drain is cancelled on failed admission,
+shutdown or owner drop, with a bounded final drain for inherited stderr pipes.
+
+This is not a full parity claim. Connection lifecycle, extension-registration contracts, and official
+conformance evidence remain separate work. Per-tool editing and an interactive live log viewer are not provided by the pinned
 legacy manager either; edit `toolExposure` in the file. Tests use deterministic local fixtures,
 never real-account sign-ins.
 

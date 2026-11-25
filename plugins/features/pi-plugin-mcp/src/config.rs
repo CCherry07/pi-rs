@@ -438,6 +438,7 @@ fn parse_entry(
         description,
         timeout,
         root: None,
+        log_path: None,
     };
     let policy_override = (!has_transport).then_some(McpPolicyOverride {
         unexpected_fields: unexpected_override_fields,

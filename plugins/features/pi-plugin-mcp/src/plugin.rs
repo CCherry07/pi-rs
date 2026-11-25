@@ -132,6 +132,8 @@ impl McpCommand {
             .any(|required| required.server == row.name)
         {
             McpServerState::NeedsAuth
+        } else if self.pool.connection_error(&row.name).is_some() {
+            McpServerState::Disconnected
         } else {
             McpServerState::Connected
         }
@@ -330,13 +332,16 @@ impl Command for McpCommand {
                             if row.enabled {
                                 let (direct, deferred, codemode) = self.pool.tool_exposure_counts(&row.name);
                                 format!(
-                                    "{} · {direct} direct tools · {deferred} deferred tools · {codemode} codemode tools{}",
+                                    "{} · {direct} direct tools · {deferred} deferred tools · {codemode} codemode tools{}{}",
                                     self.server_state(row).as_str(),
                                     if self.pool.has_resources(&row.name) {
                                         " · resources available"
                                     } else {
                                         ""
-                                    }
+                                    },
+                                    self.pool.connection_error(&row.name)
+                                        .map(|error| format!("\n{error}"))
+                                        .unwrap_or_default()
                                 )
                             } else {
                                 "disabled".into()
@@ -449,6 +454,7 @@ impl Command for McpCommand {
 #[cfg(test)]
 mod tests {
     mod auth;
+    mod diagnostics;
     mod inventory;
     mod management;
     use super::*;

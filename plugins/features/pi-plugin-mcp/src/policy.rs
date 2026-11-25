@@ -49,6 +49,8 @@ pub(crate) struct McpServerPolicy {
     pub description: Option<String>,
     pub timeout: Duration,
     pub root: Option<PathBuf>,
+    /// Local-library-only diagnostics; never inferred by transport-only clients.
+    pub log_path: Option<PathBuf>,
 }
 
 impl Default for McpServerPolicy {
@@ -59,6 +61,7 @@ impl Default for McpServerPolicy {
             description: None,
             timeout: Duration::from_secs(60),
             root: None,
+            log_path: None,
         }
     }
 }

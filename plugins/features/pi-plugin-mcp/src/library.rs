@@ -156,6 +156,7 @@ impl McpServerDefinition {
 #[serde(rename_all = "kebab-case")]
 pub enum McpServerState {
     Connected,
+    Disconnected,
     NeedsAuth,
     Disabled,
     Failed,
@@ -165,6 +166,7 @@ impl McpServerState {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Connected => "connected",
+            Self::Disconnected => "disconnected",
             Self::NeedsAuth => "needs sign-in",
             Self::Disabled => "disabled",
             Self::Failed => "failed",
@@ -278,20 +280,17 @@ impl McpLibrary {
                 .resolve_connection(entry.clone(), signal.clone())
                 .await
                 .map_err(McpOAuthError::Failed)?;
-            let challenge =
-                match McpToolSet::connect_with_auth(vec![config.clone()], self.connection_auth())
-                    .await
-                {
-                    Ok(pool) => {
-                        let count = pool.tools().len();
-                        pool.shutdown()
-                            .await
-                            .map_err(|error| McpOAuthError::Failed(error.to_string()))?;
-                        return Ok(count);
-                    }
-                    Err(crate::McpError::AuthorizationRequired(required)) => required.challenge,
-                    Err(error) => return Err(McpOAuthError::Failed(error.to_string())),
-                };
+            let challenge = match self.connect_probe(config.clone()).await {
+                Ok(pool) => {
+                    let count = pool.tools().len();
+                    pool.shutdown()
+                        .await
+                        .map_err(|error| McpOAuthError::Failed(error.to_string()))?;
+                    return Ok(count);
+                }
+                Err(crate::McpError::AuthorizationRequired(required)) => required.challenge,
+                Err(error) => return Err(McpOAuthError::Failed(error.to_string())),
+            };
             let McpTransport::Http { url, .. } = &config.transport else {
                 unreachable!("validated HTTP")
             };
@@ -313,7 +312,8 @@ impl McpLibrary {
                 .resolve_connection(entry, signal.clone())
                 .await
                 .map_err(McpOAuthError::Failed)?;
-            let pool = McpToolSet::connect_with_auth(vec![config], self.connection_auth())
+            let pool = self
+                .connect_probe(config)
                 .await
                 .map_err(|error| McpOAuthError::Failed(format!("Signed in, but {error}")))?;
             let count = pool.tools().len();
@@ -1012,6 +1012,7 @@ impl McpLibrary {
     ) -> Result<(McpServerConfig, McpServerPolicy), String> {
         let mut policy = entry.config.policy().clone();
         policy.root = Some(self.cwd.as_ref().unwrap_or(&self.agent_dir).clone());
+        policy.log_path = Some(self.agent_dir.join("mcp.log"));
         Ok((
             self.resolve_connection(entry, pi_core::AbortHandle::new().1)
                 .await?,
@@ -1029,6 +1030,15 @@ impl McpLibrary {
             cwd: self.cwd.as_ref().unwrap_or(&self.agent_dir).clone(),
             allow_commands: self.allow_command_values,
         }
+    }
+
+    async fn connect_probe(&self, config: McpServerConfig) -> Result<McpToolSet, crate::McpError> {
+        let policy = McpServerPolicy {
+            log_path: Some(self.agent_dir.join("mcp.log")),
+            ..McpServerPolicy::direct()
+        };
+        McpToolSet::connect_with_policies_and_auth(vec![(config, policy)], self.connection_auth())
+            .await
     }
 
     fn connection_auth(&self) -> McpClientAuth {

@@ -4,7 +4,8 @@
 
 - Rust baseline: `4d17e8f0a222cc1a61ab1acfbbf82af47979e312` (local `main`).
 - Behavior oracle: `legacy/pi@0ab23c37b074252d04e31f5cfb99491f0613fb80`, verified clean.
-- Owner: @Jinah, continuing #128/#131; no second implementation or worker.
+- Owner: @Shino, continuing #132 from clean `f176fc33c67d2acadcd0bf6e1d4bd9848b199561` after
+  @Jinah's completed local delivery; no second implementation. The frozen comparison stays unchanged.
 - This is an **open acceptance ledger**, not a claim of full MCP parity. Baseline findings below
   stay fixed; implementation/evidence updates belong in the delivery column or tranche notes.
 - `L/` below means `legacy/pi/packages/coding-agent/`; Rust paths are repository-relative.
@@ -35,10 +36,10 @@ An interactive live log viewer would be an additional product feature.
 | M4 | `index.ts:pickServer` and command handler: omitted login/logout/reconnect name auto-selects the only eligible/preferred server, otherwise selector; contextual actions, completion, returning/back/cancel | Rust commands require names and offer a fixed action list, including ineligible sign-in actions | **DELIVERED `edddce1e8`**. Eligibility/state-dependent choices, non-UI behavior, no duplicate side effects on cancellation, retired-context handoff |
 | M5 | `cli.ts:list`: optional `authProvider`, always-present `errors` array, raw remote tool names with differing `toolExposure`, actionable names/provider guidance | `McpServerReport` has no `authProvider`; CLI already emits `errors: []` and differing tool exposures, which must be preserved | **DELIVERED `edddce1e8`**. Exact stable JSON-shape and needs-auth output regressions; preserve useful Rust-only inspection APIs |
 | M6 | `cli.ts:runMcpCommand/editDistance`: unknown login/logout name suggests a nearby configured name, lists configured names and ignored-project guidance | Rust error lacks the same discovery assistance | **DELIVERED `edddce1e8`**. Deterministic suggestion/unknown/untrusted-scope cases; never echo credentials |
-| D1 | `L/src/extensions/mcp/log.ts`: timestamp/server/level/logger, multiline indentation, append per message, rotate above 5 MiB to `mcp.log.1`, best-effort failures | `client_handler.rs` handles roots/progress only; no server log sink | **OPEN**. Notification-to-private-file fixture, rotation and unavailable sink, concurrent writers; logging cannot break requests or write outside renderer to terminal |
-| D2 | `runtime.ts:connectOnce/handleClientClose`: drain stdio stderr; last 2,000 characters explain initialization failure or disconnect | `client.rs` sends stderr to null | **OPEN**. Bounded drain that cannot deadlock the child, redacted diagnostic tail, failure/exit cleanup and no terminal pollution |
-| C1 | `runtime.ts:createDefaultTransport/oauthSettings` + `L/src/core/resolve-config-value.ts`: uncached `!command` for env/header/client-secret values, 10-second bound, trim/nonempty success; parse/save do not execute | `config.rs:expand_with` treats command-backed strings as literal values instead of executing them; transport-only APIs are explicit input and must not gain implicit shell execution | **OPEN**. Explicit local-config resolution capability after trust; no execution for untrusted/disabled entries, static parse/authoring/inspection metadata; cancellation, output limits, redacted failure, refresh/reconnect rereads |
-| C2 | Same resolver: embedded `$VAR`/`${VAR}`, `$$` and `$!` escaping, missing/empty env rejection; command/args only home expansion in legacy | Rust supports `${env:VAR}` and whole `$VAR`, expands additional transport fields; exact template behavior differs | **OPEN**. Table-driven shared syntax tests; preserve documented Rust extensions separately, never execute command/args/URL as value commands |
+| D1 | `L/src/extensions/mcp/log.ts`: timestamp/server/level/logger, multiline indentation, append per message, rotate above 5 MiB to `mcp.log.1`, best-effort failures | `client_handler.rs` handles roots/progress only; no server log sink | **DELIVERED in the diagnostics tranche below**. Private notification sink, 5 MiB rotation, exact format, redaction, unavailable/busy sink and concurrent-writer fixtures. See diagnostics tranche below |
+| D2 | `runtime.ts:connectOnce/handleClientClose`: drain stdio stderr; last 2,000 characters explain initialization failure or disconnect | `client.rs` sends stderr to null | **DELIVERED in the diagnostics tranche below**. Bounded draining/redacting tail on handshake/discovery failure and disconnect, manager status, drain ownership/cancellation and no terminal or log-file stderr writes. See diagnostics tranche below |
+| C1 | `runtime.ts:createDefaultTransport/oauthSettings` + `L/src/core/resolve-config-value.ts`: uncached `!command` for env/header/client-secret values, 10-second bound, trim/nonempty success; parse/save do not execute | `config.rs:expand_with` treats command-backed strings as literal values instead of executing them; transport-only APIs are explicit input and must not gain implicit shell execution | **DELIVERED `f176fc33c`**. Explicit local-config capability after trust, bounded `pi-shell` capture, redacted failures and private rmcp late-refresh coordination; valid tokens never resolve helpers. See tranche evidence below |
+| C2 | Same resolver: embedded `$VAR`/`${VAR}`, `$$` and `$!` escaping, missing/empty env rejection; command/args only home expansion in legacy | Rust supports `${env:VAR}` and whole `$VAR`, expands additional transport fields; exact template behavior differs | **DELIVERED `f176fc33c`**. Table-driven Pi syntax tests preserve documented Rust extensions; command/args/URL never execute value commands |
 | L1 | `index.ts:session_start/startConnection`: config and independent connection failures retain healthy servers plus one startup diagnostic | Product prepare tolerates typed needs-auth only; unrelated config/connection errors reject the whole generation | **OPEN**. Partial-fault candidate containing healthy tools and management state; still reject generation-wide invariant/collision failures and preserve transactional publication |
 | L2 | `index.ts:before_agent_start/tool_call`, `agent-session-mcp.test.ts:768–922`: background connection; first prompt waits only for direct servers, bounded at 10 seconds; scripts/search/resources wait only for relevant servers; pending directory summaries | Rust waits for all connections before publication. Registry immutability is intentional, but the resulting observable latency is not thereby approved as equivalent | **APPROVED TIMING DIVERGENCE; implementation/evidence OPEN**. Bounded startup and next-idle whole-generation publication; typed pending/retry diagnostics during active runs instead of same-turn selective waits. See decision below |
 | L3 | `runtime.ts:open`: HTTP transient initialization retries after 250/1000 ms (408/429/5xx except 501/network), abort stops backoff; no stdio blanket retry | Rust has protocol-handshake fallback, not this retry policy | **OPEN**. Typed failure classification, exact attempts/backoff, close/cancel stops work; no auth/permanent error retries |
@@ -98,9 +99,10 @@ resource, configuration and Cua sections remain authored as before. No full pari
   followed by the approved L2 boundary with L1–L6, E1–E3, and Q1/A3 official conformance. Q2 must be
   kept current as those remaining behaviors ship.
 
-## C1/C2 validated candidate (local delivery pending)
+## C1/C2 delivery and evidence
 
-The current uncommitted candidate adds the approved in-memory `pi-shell::capture` seam, local-library
+Local commit `f176fc33c67d2acadcd0bf6e1d4bd9848b199561` delivers C1/C2; takeover verified that
+commit and a clean index/worktree. No source work is recreated and nothing was pushed. The tranche adds the approved in-memory `pi-shell::capture` seam, local-library
 execution opt-in, Pi value templates, and connect-time helper resolution. Run `d6ee3066` passed all
 `pi-shell` / MCP tests, Coding MCP-configuration integration tests and native CLI management tests;
 it then found four redundant-reference Clippy errors. After repair, `0cebbf82` passed formatting,
@@ -125,8 +127,58 @@ no-helper regression. Authored-doc run `07e8240c` checks synchronized local-libr
 README/shipped-doc relative links, added architecture links, and release documentation inputs.
 A broader scan found the pre-existing unrelated `docs/architecture.md` link to missing `plugin-ui.md`;
 this tranche neither adds nor changes that link. No Windows or official conformance run is claimed.
-C1 and C2 remain open until local delivery is verified; #132 remains open, with D1/D2, L1–L6, E1–E3
-and Q1/A3 still outstanding. Nothing in this section waives a frozen row.
+C1 and C2 are delivered; the diagnostics tranche below delivers D1/D2. #132 remains open, with
+L1–L6, E1–E3 and Q1/A3 still outstanding. Nothing in this section waives a frozen row.
+
+## D1/D2 diagnostics delivery and evidence
+
+This continuation starts from clean local `f176fc33c`, not a second implementation. The owning
+modules are private `diagnostics.rs` / `diagnostics/stderr.rs`, `client_handler.rs`, and existing
+client/library/manager adapters. The exact oracle is still `legacy/pi@0ab23c37`: `log.ts` owns the
+message format/rotation, and `runtime.ts:connectOnce/handleClientClose` owns the stderr failure tail.
+
+- Local-library connections (including inspection/test/login probes) supply the log path explicitly.
+  Transport-only/ACP clients never discover it. Messages append privately, rotate above 5 MiB, and
+  retain multiline indentation. A nonblocking cross-process lock treats contention as best-effort
+  failure. Local writers serialize rotation and append; explicit unlock prevents concurrent child
+  forks retaining an advisory lock after the writer closes its descriptor.
+- Stderr drains continuously, retains 8 KiB of already-redacted bytes plus an incomplete known-secret
+  match, and renders at most 2,000 UTF-16 units. It is never copied to `mcp.log` or printed directly.
+  Configured values and inherited credential-like environment values are redacted before truncation;
+  this is not an arbitrary-secret detector, so logs remain private server output. rmcp keeps child
+  ownership. Drain tasks abort on owner/cancelled-wait drop, with bounded final EOF grace.
+- Disconnected status and errors do not replace services, retry calls or mutate frozen tools. L3–L6
+  stay open. D1/D2 are conformance work with explicit Rust privacy/bounding protections, not approval
+  for a live log viewer or same-turn lifecycle publication.
+- Focused run `64f06d0` passed the initial nine diagnostics unit tests plus existing config diagnostic
+  coverage and five local stdio integration cases. Package run `e5641e16` exposed a concurrent-writer
+  loss during child spawning; the explicit-unlock fix addresses inherited file-lock lifetime rather
+  than weakening the assertion. Expanded package run `ddb176f8` passed all MCP tests before
+  finding a new test-only Clippy lint; after its repair, targeted Clippy passed in `9b8d47b9`.
+  Package typecheck and all 14 release tests passed in `a5e717be`. A first full gate `41253e7d`
+  found the CLI's missing `Disconnected` exhaustive match; that match was added.
+- Final-input workspace/all-target Clippy with warnings denied, formatting and nonpaged diff checks
+  passed in `5b201c54-5fa3-4640-af24-fad5dbf290b8`. **`cargo test --workspace` was not fully green**:
+  run `3e96727d` aborted in the unchanged
+  `codemode::depth_limit_store_values_survive_selected_branch_reload_and_disk_resume` test.
+  Focused reproduction `41ade74f` also overflowed. @Suzuya reproduced the identical failure with the
+  exact focused command on clean `main@f176fc33c` in `1e2aeabd-2ad8-42de-8309-70eb04359c1b`
+  (exit 101/SIGABRT), confirming a pre-existing baseline/toolchain blocker rather than diagnostics
+  spillover. No depth contract, stack environment or unrelated test source was changed. The lead
+  permits local delivery with this explicit exception if affected tests and remaining gates pass.
+  Run `4e0e339f`, excluding only that exact test, subsequently found a native-fixture fingerprint
+  mismatch: a copied host `pi-plugin` build output still watched the main checkout's `Cargo.lock`,
+  while the fixture correctly watched this worktree. Final run
+  `98f23931-8ccc-4fc9-afba-863ae6245104` removed only this checkout's `pi-plugin` package build cache
+  and **passed all remaining workspace tests**, including the native fixture and affected diagnostics
+  tests, without weakening native compatibility checks or adding another skip. The local diagnostics
+  commit is titled `feat: add private MCP server diagnostics`; nothing is pushed.
+  This is not an unrestricted full-workspace pass.
+- Added fixtures cover timestamp/level/logger formatting, rotation/private modes, concurrent complete
+  records, unavailable/busy sink, chunk-boundary secret redaction, Unicode/invalid bytes, pipe-pressure
+  draining, EOF grace/owner drop, notification-to-file routing, protocol startup/discovery failure,
+  disconnect request/manager status, unchanged tool catalog, and disabled/untrusted/explicit-client
+  no-log boundaries. Stdio fixtures are Unix-gated; no Windows, real service or official-suite claim.
 
 ## Existing coverage to preserve
 
