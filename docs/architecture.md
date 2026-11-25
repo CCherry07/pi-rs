@@ -2072,6 +2072,21 @@ errors and disconnected-tool failures include that tail; manager status observes
 without altering the immutable tool catalog. rmcp still owns the child and its cleanup; drain tasks
 are abort-on-drop, with a 100 ms final EOF grace after closure so inherited pipes cannot hang cleanup.
 
+HTTP setup retries belong to the MCP client, not rmcp or generic session policy. The complete
+connect-and-tool-discovery operation gets at most three attempts, with cancellable 250/1000 ms
+backoffs inside the existing 30-second bound. Typed 408/429/5xx (except 501) and request/network
+failures are transient; authentication, deterministic 4xx, protocol/closed/session-expired errors
+and stdio startup are not general retry candidates. The extra fresh-transport legacy fallback is
+limited to the typed uncorrelated discovery rejection, not arbitrary initialization failure. Request execution is not
+replayed by this connection retry loop. Next-idle publication and the lifecycle supervisor remain
+separate contracts; bounded retries do not mutate a live generation.
+
+A checksum-pinned local rmcp 3.3.0 override preserves typed non-success POST status/Retry-After
+metadata with bounded diagnostic bodies; see [patch provenance and removal criteria](../vendor/rmcp-3.3.0/PI-PATCH.md).
+Only the existing transport error type and non-success metadata boundary change. Successful JSON/SSE
+decoding, OAuth, session recovery and SDK retry policy stay upstream-owned. MCP uses Pi's fixed delay
+schedule rather than parsing SDK error text or introducing a second wire implementation.
+
 Local-library policy explicitly supplies `<agent-dir>/mcp.log` to the client handler. Typed stable
 `notifications/message` payloads append timestamp/server/level/logger lines and indented continuations.
 The private file rotates above 5 MiB before the next append, retaining `mcp.log.1`. A local mutex plus

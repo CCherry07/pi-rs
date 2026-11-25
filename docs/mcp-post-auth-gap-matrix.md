@@ -36,13 +36,13 @@ An interactive live log viewer would be an additional product feature.
 | M4 | `index.ts:pickServer` and command handler: omitted login/logout/reconnect name auto-selects the only eligible/preferred server, otherwise selector; contextual actions, completion, returning/back/cancel | Rust commands require names and offer a fixed action list, including ineligible sign-in actions | **DELIVERED `edddce1e8`**. Eligibility/state-dependent choices, non-UI behavior, no duplicate side effects on cancellation, retired-context handoff |
 | M5 | `cli.ts:list`: optional `authProvider`, always-present `errors` array, raw remote tool names with differing `toolExposure`, actionable names/provider guidance | `McpServerReport` has no `authProvider`; CLI already emits `errors: []` and differing tool exposures, which must be preserved | **DELIVERED `edddce1e8`**. Exact stable JSON-shape and needs-auth output regressions; preserve useful Rust-only inspection APIs |
 | M6 | `cli.ts:runMcpCommand/editDistance`: unknown login/logout name suggests a nearby configured name, lists configured names and ignored-project guidance | Rust error lacks the same discovery assistance | **DELIVERED `edddce1e8`**. Deterministic suggestion/unknown/untrusted-scope cases; never echo credentials |
-| D1 | `L/src/extensions/mcp/log.ts`: timestamp/server/level/logger, multiline indentation, append per message, rotate above 5 MiB to `mcp.log.1`, best-effort failures | `client_handler.rs` handles roots/progress only; no server log sink | **DELIVERED in the diagnostics tranche below**. Private notification sink, 5 MiB rotation, exact format, redaction, unavailable/busy sink and concurrent-writer fixtures. See diagnostics tranche below |
-| D2 | `runtime.ts:connectOnce/handleClientClose`: drain stdio stderr; last 2,000 characters explain initialization failure or disconnect | `client.rs` sends stderr to null | **DELIVERED in the diagnostics tranche below**. Bounded draining/redacting tail on handshake/discovery failure and disconnect, manager status, drain ownership/cancellation and no terminal or log-file stderr writes. See diagnostics tranche below |
+| D1 | `L/src/extensions/mcp/log.ts`: timestamp/server/level/logger, multiline indentation, append per message, rotate above 5 MiB to `mcp.log.1`, best-effort failures | `client_handler.rs` handles roots/progress only; no server log sink | **IMPLEMENTED/VALIDATED `7e12ad10`; local landing held**. Private notification sink, 5 MiB rotation, exact format, redaction, unavailable/busy sink and concurrent-writer fixtures. See diagnostics tranche below |
+| D2 | `runtime.ts:connectOnce/handleClientClose`: drain stdio stderr; last 2,000 characters explain initialization failure or disconnect | `client.rs` sends stderr to null | **IMPLEMENTED/VALIDATED `7e12ad10`; local landing held**. Bounded draining/redacting tail on handshake/discovery failure and disconnect, manager status, drain ownership/cancellation and no terminal or log-file stderr writes. See diagnostics tranche below |
 | C1 | `runtime.ts:createDefaultTransport/oauthSettings` + `L/src/core/resolve-config-value.ts`: uncached `!command` for env/header/client-secret values, 10-second bound, trim/nonempty success; parse/save do not execute | `config.rs:expand_with` treats command-backed strings as literal values instead of executing them; transport-only APIs are explicit input and must not gain implicit shell execution | **DELIVERED `f176fc33c`**. Explicit local-config capability after trust, bounded `pi-shell` capture, redacted failures and private rmcp late-refresh coordination; valid tokens never resolve helpers. See tranche evidence below |
 | C2 | Same resolver: embedded `$VAR`/`${VAR}`, `$$` and `$!` escaping, missing/empty env rejection; command/args only home expansion in legacy | Rust supports `${env:VAR}` and whole `$VAR`, expands additional transport fields; exact template behavior differs | **DELIVERED `f176fc33c`**. Table-driven Pi syntax tests preserve documented Rust extensions; command/args/URL never execute value commands |
 | L1 | `index.ts:session_start/startConnection`: config and independent connection failures retain healthy servers plus one startup diagnostic | Product prepare tolerates typed needs-auth only; unrelated config/connection errors reject the whole generation | **OPEN**. Partial-fault candidate containing healthy tools and management state; still reject generation-wide invariant/collision failures and preserve transactional publication |
 | L2 | `index.ts:before_agent_start/tool_call`, `agent-session-mcp.test.ts:768–922`: background connection; first prompt waits only for direct servers, bounded at 10 seconds; scripts/search/resources wait only for relevant servers; pending directory summaries | Rust waits for all connections before publication. Registry immutability is intentional, but the resulting observable latency is not thereby approved as equivalent | **APPROVED TIMING DIVERGENCE; implementation/evidence OPEN**. Bounded startup and next-idle whole-generation publication; typed pending/retry diagnostics during active runs instead of same-turn selective waits. See decision below |
-| L3 | `runtime.ts:open`: HTTP transient initialization retries after 250/1000 ms (408/429/5xx except 501/network), abort stops backoff; no stdio blanket retry | Rust has protocol-handshake fallback, not this retry policy | **OPEN**. Typed failure classification, exact attempts/backoff, close/cancel stops work; no auth/permanent error retries |
+| L3 | `runtime.ts:open`: HTTP transient initialization retries after 250/1000 ms (408/429/5xx except 501/network), abort stops backoff; no stdio blanket retry | Rust has protocol-handshake fallback, not this retry policy | **IMPLEMENTED/VALIDATED locally; landing held**. Typed classification and complete-setup retries; seven product regressions prove attempts/backoff/cancellation and no auth/permanent/stdio retries. See the explicit workspace baseline exception below |
 | L4 | `runtime.ts:request`: one transient HTTP retry for resource reads/listings, never tool calls; expired-session 404 allows one request retry on a new session without cancelling other in-flight requests | No product-owned retry/session-expiry contract over rmcp has been established | **OPEN**. Local POST/GET counts; mutating tool not repeated on ambiguous failure; expired-session concurrent calls share reconnect safely |
 | L5 | `runtime.ts:getClient/handleClientClose/reconnect`: disconnected state, lazy reconnect on next call, coalesced connect, explicit reconnect and shutdown lifetime | Published `McpToolSet` holds fixed services; manual reconnect currently probes then reloads | **OPEN**. Transport replacement behind frozen descriptors; schema changes need a new generation, no silent live registry mutation; cleanup/parallel callers/failed retry |
 | L6 | `runtime.ts:refreshTools` + `index.ts:registerTools`: tools/list_changed adds/updates/retracts tools, retaining old inventory on failed refresh | Client handler does not observe list-changed notifications | **OPEN**. Coalesced notification revision; whole-generation schema publication, removed names become unreachable, active-run safety, failed candidate rollback |
@@ -130,7 +130,13 @@ this tranche neither adds nor changes that link. No Windows or official conforma
 C1 and C2 are delivered; the diagnostics tranche below delivers D1/D2. #132 remains open, with
 L1–L6, E1–E3 and Q1/A3 still outstanding. Nothing in this section waives a frozen row.
 
-## D1/D2 diagnostics delivery and evidence
+## D1/D2 diagnostics implementation and evidence
+
+Validated own-branch base: `7e12ad101e31e043a5531825aad58aba399eec59`. The managed commit tool
+injected agent metadata despite receiving only the business title. @Suzuya has explicitly held all
+further local landing/push until one metadata-only cleanup of the frozen local MCP series; retain
+identical trees/author/time and old-to-new commit mappings. No individual history rewrite is allowed.
+Diagnostics are implemented and validated, but local-main acceptance remains pending that cleanup.
 
 This continuation starts from clean local `f176fc33c`, not a second implementation. The owning
 modules are private `diagnostics.rs` / `diagnostics/stderr.rs`, `client_handler.rs`, and existing
@@ -179,6 +185,54 @@ message format/rotation, and `runtime.ts:connectOnce/handleClientClose` owns the
   draining, EOF grace/owner drop, notification-to-file routing, protocol startup/discovery failure,
   disconnect request/manager status, unchanged tool catalog, and disabled/untrusted/explicit-client
   no-log boundaries. Stdio fixtures are Unix-gated; no Windows, real service or official-suite claim.
+
+## Lifecycle retry checkpoint evidence
+
+L3 regressions in `tests/lifecycle_retry.rs` fail on the original implementation (`c6f699a0`):
+HTTP retries/backoff are missing, and the broad handshake fallback also retries permanent failures
+and failed stdio startup. Narrowing that fallback fixes the latter cases. Typed classification in
+`client/retry.rs` initially could not classify status failures because pinned rmcp 3.3 flattened
+non-success POST responses into a formatted string; `9e07746d` failed the three transient cases.
+
+@Suzuya approved a minimal, explicitly pinned compatibility patch after verifying that rmcp has no
+public successful-response injection/decoding seam. Patch only the non-success response metadata;
+keep successful bodies, SSE decoding, OAuth and session recovery unchanged. Do not parse error
+strings, edit the Cargo cache, or add independent SDK retry policy. The source is vendored from the
+checksum-verified locked `rmcp-3.3.0` crate; provenance, reviewed delta and removal criterion belong
+in `vendor/rmcp-3.3.0/PI-PATCH.md`. The approved supervisor and L1/L2/L4–L6 are not yet implemented.
+L3 is implemented locally under the explicit validation exception below; no landing/full-parity claim.
+
+The metadata patch now passes its red→green regression (`92f3d846` red, `cbbbd25d` SDK/product green),
+13 focused SDK HTTP tests, all seven lifecycle product tests, and all 262 standalone SDK library tests
+(`9d808103`). Tests cover typed status/Retry-After, valid/invalid/date values, bounded body omission,
+unchanged JSON-RPC/SSE/redirect behavior, exact 250/1000 ms retries, auth/permanent/stdio exclusion,
+cancellation, and anonymous/provider/stored-OAuth equivalence. The standalone SDK Clippy addition
+reported 15 unchanged upstream findings (13 `result_large_err`, two `too_many_arguments`); a fresh
+checksum-verified pristine archive reproduced the identical findings in `062bd85c`. No upstream
+lint suppression or unrelated SDK edits were added; this is not a workspace-Clippy exception.
+
+Package run `1bd852c3` passed all MCP tests, targeted all-target Clippy `-D warnings`, workspace fmt,
+exact vendor-delta verification, and diff check. The narrower fallback exposed two existing malformed
+legacy fixtures (`inventory.rs`, `tests/config_values.rs`): each now explicitly returns method-not-found
+for `server/discover`, preserving its original no-tool/no-secret-execution assertions. Their owner
+was unreachable through the supplied resume path/session search/message route. No production fallback
+was broadened.
+
+Final-input workspace run `fdd60a75-a1df-4ed5-8f01-0914d64aa335` passed strict workspace/all-target
+Clippy, workspace formatting, exact vendor verification and diff check. Unfiltered
+`cargo test --workspace --no-fail-fast` completed every other target but aborted Coding integration
+in `codemode::depth_limit_store_values_survive_selected_branch_reload_and_disk_resume` with stack
+overflow/SIGABRT—the same clean-main baseline reproduced by `1e2aeabd-2ad8-42de-8309-70eb04359c1b`.
+Supplemental run `e18a6801-7a2c-4182-8d82-637132767a23` passed all 73 remaining Coding integration
+tests, excluding only that exact test. @Suzuya explicitly extended the existing baseline exception
+to this L3-only local checkpoint. **Unfiltered workspace tests are not fully green.** No stack/depth
+change, extra test skip, SDK lint suppression, Git rewrite, landing or push was performed.
+
+The checksum verifier retains all published source bytes outside the two reviewed files. Git
+whitespace exceptions cover only the original upstream fixture's trailing-space doc line and the
+unified patch artifact's blank context lines; they do not disable checking for project code.
+Checkpointing is authorized only through the managed tool; final whole-series metadata cleanup
+and local landing remain held.
 
 ## Existing coverage to preserve
 

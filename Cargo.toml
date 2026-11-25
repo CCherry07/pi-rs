@@ -59,6 +59,11 @@ members = [
     "plugins/tools/pi-plugin-ls",
 ]
 resolver = "2"
+exclude = ["vendor/rmcp-3.3.0"]
+
+# Preserve typed HTTP error metadata; see vendor/rmcp-3.3.0/PI-PATCH.md.
+[patch.crates-io]
+rmcp = { path = "vendor/rmcp-3.3.0" }
 
 [workspace.package]
 version = "0.8.6"

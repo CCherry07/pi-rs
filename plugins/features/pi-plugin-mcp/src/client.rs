@@ -39,6 +39,9 @@ use crate::policy::{McpExposure, McpServerPolicy};
 use crate::resources::create_resource_tools;
 use crate::result::{normalize_input_schema, project_result_with_resources};
 
+mod retry;
+use retry::ConnectionFailure;
+
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -408,41 +411,19 @@ impl McpToolSet {
 
         for (config, policy) in configs {
             let name = config.name.clone();
-            let server = tokio::time::timeout(
+            let discovered = tokio::time::timeout(
                 CONNECT_TIMEOUT,
-                connect_server(config, policy, auth.clone()),
+                retry::connect_discovered(config, policy, auth.clone()),
             )
             .await
-            .map_err(|_| McpError::Timeout(name.clone()))?;
-            let server = match server {
-                Ok(server) => server,
+            .map_err(|_| McpError::Timeout(name))?;
+            let (server, remote_tools) = match discovered {
+                Ok(discovered) => discovered,
                 Err(McpError::AuthorizationRequired(required)) if allow_pending_authorization => {
                     authorization_required.push(required);
                     continue;
                 }
                 Err(error) => return Err(error),
-            };
-            let remote_tools = if server
-                .peer
-                .peer_info()
-                .is_some_and(|info| info.capabilities.tools.is_some())
-            {
-                match tokio::time::timeout(CONNECT_TIMEOUT, server.peer.list_all_tools()).await {
-                    Ok(Ok(tools)) => tools,
-                    Ok(Err(_)) => {
-                        server.handler.stderr.finish().await;
-                        return Err(McpError::ListTools {
-                            server: server.name.clone(),
-                            message: server
-                                .handler
-                                .stderr
-                                .message("server rejected discovery or the connection closed"),
-                        });
-                    }
-                    Err(_) => return Err(McpError::Timeout(name)),
-                }
-            } else {
-                Vec::new()
             };
             inventory.insert(
                 server.name.clone(),
@@ -706,7 +687,7 @@ async fn connect_server(
     config: McpServerConfig,
     policy: McpServerPolicy,
     client_auth: McpClientAuth,
-) -> Result<Arc<ConnectedServer>, McpError> {
+) -> Result<Arc<ConnectedServer>, ConnectionFailure> {
     let McpServerConfig {
         name,
         transport,
@@ -739,7 +720,7 @@ async fn connect_server(
         // Some deployed legacy servers return an uncorrelated JSON-RPC error
         // to server/discover. A fresh transport can still complete the stable
         // initialize handshake; retrying cannot reuse ambiguous transport state.
-        Err(McpError::Initialize { .. }) => {
+        Err(failure) if failure.legacy_fallback => {
             connect_once(
                 &name,
                 &transport,
@@ -764,7 +745,7 @@ async fn connect_once(
     client_auth: &McpClientAuth,
     handler: McpClientHandler,
     lifecycle: ClientLifecycleMode,
-) -> Result<RunningService<RoleClient, McpClientHandler>, McpError> {
+) -> Result<RunningService<RoleClient, McpClientHandler>, ConnectionFailure> {
     let stderr = handler.stderr.clone();
     let result =
         match config {
@@ -834,7 +815,7 @@ async fn connect_once(
         stderr.finish().await;
     }
     result.map_err(|error| {
-        if error.is_authorization_required() {
+        let diagnostic = if error.is_authorization_required() {
             McpError::AuthorizationRequired(McpAuthorizationRequired {
                 server: name.to_string(),
                 provider: provider_auth.map(|auth| auth.provider.clone()),
@@ -849,7 +830,8 @@ async fn connect_once(
                     "handshake failed; check endpoint, credentials and server availability",
                 ),
             }
-        }
+        };
+        ConnectionFailure::handshake(diagnostic, &error)
     })
 }
 
