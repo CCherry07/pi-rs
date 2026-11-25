@@ -14,7 +14,9 @@ use serde::de::{MapAccess, Visitor};
 use serde_json::{Value, json};
 
 use crate::policy::{McpExposure, McpServerPolicy};
-use crate::{McpServerConfig, McpTransport};
+use crate::{
+    McpOAuthClientRegistration, McpOAuthConfig, McpProviderAuth, McpServerConfig, McpTransport,
+};
 
 /// Maximum supported MCP document size, also used to bound callers' disk reads.
 pub const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -26,6 +28,8 @@ pub struct McpConfigEntry {
     transport: Option<McpTransport>,
     enabled: bool,
     policy: McpServerPolicy,
+    oauth: Option<McpOAuthConfig>,
+    auth: Option<McpProviderAuth>,
     policy_override: Option<McpPolicyOverride>,
 }
 
@@ -65,6 +69,10 @@ impl McpConfigEntry {
 
     pub(crate) fn is_override(&self) -> bool {
         self.policy_override.is_some()
+    }
+
+    pub(crate) fn has_provider_auth(&self) -> bool {
+        self.auth.is_some()
     }
 
     pub(crate) fn apply_override(self, base: &Self) -> Result<Self, String> {
@@ -126,6 +134,13 @@ impl McpConfigEntry {
         let mut transport = self
             .transport
             .ok_or("Enabled MCP server needs a transport")?;
+        let mut oauth = self.oauth;
+        if let Some(secret) = oauth
+            .as_mut()
+            .and_then(|oauth| oauth.client_secret.as_mut())
+        {
+            *secret = expand_with(secret, &lookup)?;
+        }
         match &mut transport {
             McpTransport::Stdio {
                 command,
@@ -169,6 +184,8 @@ impl McpConfigEntry {
         Ok(McpServerConfig {
             name: self.name,
             transport,
+            oauth,
+            auth: self.auth,
         })
     }
 }
@@ -291,13 +308,8 @@ fn parse_entry(
     mut config: serde_json::Map<String, Value>,
     ordered_exposures: Vec<(String, Value)>,
 ) -> Result<McpConfigEntry, String> {
-    for field in ["oauth", "auth"] {
-        if config.contains_key(field) {
-            return Err(format!(
-                "MCP server {name}: {field} is not supported; configure authentication headers explicitly"
-            ));
-        }
-    }
+    let oauth_value = config.remove("oauth");
+    let auth_value = config.remove("auth");
     let has_transport = ["command", "url", "type"]
         .iter()
         .any(|field| config.contains_key(*field));
@@ -358,7 +370,14 @@ fn parse_entry(
         exposure,
         tool_exposure,
     });
+    let mut oauth = None;
+    let mut auth = None;
     let transport = if !has_transport {
+        if oauth_value.is_some() || auth_value.is_some() {
+            return Err(format!(
+                "MCP server {name}: project policy overrides cannot set authentication"
+            ));
+        }
         None
     } else {
         if config.get("type") == Some(&json!("streamable-http")) {
@@ -382,6 +401,12 @@ fn parse_entry(
                 return Err(format!("MCP server {name}: command is empty"));
             }
             McpTransport::Http { url, headers } => {
+                oauth = oauth_value
+                    .map(|value| parse_oauth(name, value))
+                    .transpose()?;
+                auth = auth_value
+                    .map(|value| parse_provider_auth(name, value))
+                    .transpose()?;
                 let placeholder = |value: &str| expand_with(value, |_| Ok("placeholder".into()));
                 let checked_url = placeholder(url)?;
                 let checked_url = if url.starts_with('$') {
@@ -389,15 +414,34 @@ fn parse_entry(
                 } else {
                     checked_url
                 };
-                let config = McpServerConfig::http(name, checked_url).headers(
-                    headers
-                        .iter()
-                        .map(|(key, value)| Ok((key.clone(), placeholder(value)?)))
-                        .collect::<Result<_, String>>()?,
-                );
+                let mut checked_oauth = oauth.clone();
+                if let Some(secret) = checked_oauth
+                    .as_mut()
+                    .and_then(|oauth| oauth.client_secret.as_mut())
+                {
+                    *secret = placeholder(secret)?;
+                }
+                let config = McpServerConfig {
+                    name: name.into(),
+                    transport: McpTransport::Http {
+                        url: checked_url,
+                        headers: headers
+                            .iter()
+                            .map(|(key, value)| Ok((key.clone(), placeholder(value)?)))
+                            .collect::<Result<_, String>>()?,
+                    },
+                    oauth: checked_oauth,
+                    auth: auth.clone(),
+                };
                 crate::validate_configs(&[config]).map_err(|e| e.to_string())?;
             }
-            _ => {}
+            McpTransport::Stdio { .. } => {
+                if oauth_value.is_some() || auth_value.is_some() {
+                    return Err(format!(
+                        "MCP server {name}: oauth and auth are only valid for HTTP servers"
+                    ));
+                }
+            }
         }
         Some(transport)
     };
@@ -406,8 +450,104 @@ fn parse_entry(
         transport,
         enabled: enabled.unwrap_or(true),
         policy,
+        oauth,
+        auth,
         policy_override,
     })
+}
+
+fn parse_oauth(name: &str, value: Value) -> Result<McpOAuthConfig, String> {
+    let oauth: McpOAuthConfig = serde_json::from_value(value)
+        .map_err(|_| format!("MCP server {name}: oauth must use valid OAuth fields"))?;
+    if oauth
+        .client_id
+        .as_ref()
+        .is_some_and(|value| value.is_empty())
+    {
+        return Err(format!(
+            "MCP server {name}: oauth.clientId must not be empty"
+        ));
+    }
+    if oauth.callback_port == Some(0) {
+        return Err(format!(
+            "MCP server {name}: oauth.callbackPort must be a port number"
+        ));
+    }
+    if let Some(callback) = &oauth.callback_url {
+        let callback_url = url::Url::parse(callback).ok();
+        let valid = callback_url.as_ref().is_some_and(|url| {
+            url.scheme() == "http"
+                && is_loopback_host(url.host_str())
+                && url.query().is_none()
+                && url.fragment().is_none()
+        });
+        if !valid {
+            return Err(format!(
+                "MCP server {name}: oauth.callbackUrl must be an http URI on localhost, 127.0.0.1, or [::1] without query or fragment"
+            ));
+        }
+        if let (Some(configured), Some(port)) =
+            (callback_url.and_then(|url| url.port()), oauth.callback_port)
+            && configured != port
+        {
+            return Err(format!(
+                "MCP server {name}: oauth.callbackUrl and oauth.callbackPort name different ports"
+            ));
+        }
+    }
+    if oauth
+        .client_name
+        .as_ref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err(format!(
+            "MCP server {name}: oauth.clientName must be a non-empty string"
+        ));
+    }
+    if oauth.client_registration == Some(McpOAuthClientRegistration::Cimd) {
+        if oauth.client_id.is_some() || oauth.client_name.is_some() {
+            return Err(format!(
+                "MCP server {name}: oauth.clientRegistration \"cimd\" cannot be combined with oauth.clientId or oauth.clientName"
+            ));
+        }
+        if let Some(callback) = &oauth.callback_url {
+            let callback = url::Url::parse(callback).expect("callback validated");
+            if !matches!(callback.host_str(), Some("localhost" | "127.0.0.1"))
+                || callback.path() != "/callback"
+            {
+                return Err(format!(
+                    "MCP server {name}: oauth.clientRegistration \"cimd\" requires oauth.callbackUrl on localhost or 127.0.0.1 with path /callback"
+                ));
+            }
+        }
+    }
+    if let Some(metadata) = &oauth.auth_server_metadata_url {
+        let metadata = url::Url::parse(metadata).ok();
+        let valid = metadata.as_ref().is_some_and(|url| {
+            url.scheme() == "https" || (url.scheme() == "http" && is_loopback_host(url.host_str()))
+        });
+        if !valid {
+            return Err(format!(
+                "MCP server {name}: oauth.authServerMetadataUrl must be an https URL, or http on localhost, 127.0.0.1, or [::1]"
+            ));
+        }
+    }
+    Ok(oauth)
+}
+
+fn parse_provider_auth(name: &str, value: Value) -> Result<McpProviderAuth, String> {
+    let auth: McpProviderAuth = serde_json::from_value(value)
+        .map_err(|_| format!("MCP server {name}: auth.provider must be a provider name"))?;
+    if auth.provider.trim().is_empty() {
+        return Err(format!(
+            "MCP server {name}: auth.provider must be a provider name"
+        ));
+    }
+    Ok(auth)
+}
+
+fn is_loopback_host(host: Option<&str>) -> bool {
+    matches!(host, Some("localhost" | "127.0.0.1" | "[::1]" | "::1"))
 }
 
 fn parse_exposure(name: &str, field: &str, value: &Value) -> Result<McpExposure, String> {

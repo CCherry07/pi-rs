@@ -2012,7 +2012,10 @@ a host-resolved trust decision and enforces it before project reads/writes; it h
 project trust and calls that library directly. MCP does not live in `settings.json`.
 Documents use `mcpServers`, keyed by server name, with an optional `version: 1` marker. Each entry has
 `type: "stdio"` (command, args, env, cwd) or `type: "http"` (url, headers), and optional
-`enabled` (default true). The version marker and empty `mcpServers` object are optional; UTF-8 BOM
+`enabled` (default true). HTTP entries may also select `oauth` client settings or global-only
+`auth.provider`; stdio entries and project policy overrides cannot carry authentication. Full project
+HTTP entries may use OAuth after trust, but cannot select a host provider credential. The version
+marker and empty `mcpServers` object are optional; UTF-8 BOM
 is accepted. Missing type is inferred from URL before command, and `streamable-http` aliases HTTP.
 Unknown fields survive management edits. Full project transport entries replace a complete global
 entry by name. Entries without command/url/type may override only enabled/exposure/toolExposure
@@ -2027,8 +2030,28 @@ file. Invalid JSON remains readable/editable. Authentication values should use `
 server connects, not when configuration is listed or saved. Relative explicit stdio cwd now resolves
 from the active session cwd, matching Pi; omitted cwd uses that directory too. Existing configurations
 that intended a path relative to the configuration file should use an absolute path.
-Transport debug/error surfaces omit header, argument and URL values. HTTP redirects are disabled by the SDK.
-Child stderr is discarded rather than written outside the frontend renderer.
+Transport debug/error surfaces omit header, argument, URL and secret values. Static headers retain
+precedence. OAuth client secrets keep request-time environment expansion. HTTP OAuth metadata fetches
+and protocol requests reject redirects; configured metadata and advertised endpoints must use HTTPS
+except for loopback fixtures. Child stderr is discarded rather than written outside the frontend renderer.
+
+`pi-plugin-mcp` owns OAuth independently of terminal and Coding adapters. The local library persists
+OAuth state in private `<agent-dir>/mcp-auth.json` records keyed by the normalized server name plus
+canonical URL, under an advisory lock with atomic replacement. A candidate connection may use a stored
+access token and makes one reactive refresh-and-retry after a server rejects it; missing or rejected
+credentials surface authorization-required rather than launching UI. Hosts explicitly call
+`start_oauth_sign_in`, open its authorization URL, and return either a loopback callback URL or a pasted
+redirect URL to the same state machine. The flow supports pre-registered clients, Pi's Client ID Metadata
+Documents and Dynamic Client Registration; configured authorization-server metadata is fetched only from
+a validated URL. `AbortSignal` cancels discovery, registration and token exchange by dropping the in-flight
+request. Sign-out removes only the exact name-plus-URL identity.
+
+Provider authentication is a separate request-time `McpProviderTokenResolver` interface on
+`McpClientAuth`. It neither imports provider implementations nor depends on `pi-coding`; a host attaches
+the resolver to the candidate library/tool set. The token is resolved anew for every POST, GET/SSE and
+session deletion so refreshes do not require rebuilding a generation. Resolver failures and all logs are
+secret-free. Project MCP files cannot name a provider and therefore cannot borrow a user-level provider
+credential merely by gaining project trust.
 
 `ProductSessionFactory` reloads files after trust resolution and prepares a fresh connected pool
 for every candidate product generation. The immutable local-library MCP plugin owns discovered tools plus the
@@ -2071,8 +2094,10 @@ use the normal `ActiveToolsChange` records without forcing lazy session files to
 Managed child sessions use the same activation rules within their allowed tool catalog; the MCP
 plugin does not branch on execution origin. Connections still prepare before publication;
 asynchronous discovery is separate.
-Invalid flag types reject the candidate rather than accumulating per-entry Pi diagnostics. OAuth
-and auth remain unsupported. Description contributes a server summary.
+Invalid flag types reject the candidate rather than accumulating per-entry Pi diagnostics. OAuth and
+provider-auth values remain connection dependencies rather than registry mutations. Description
+contributes a server summary. Browser launching, loopback listener ownership, pasted-URL prompting and
+interactive account management remain host UI work and are deliberately not `/mcp` or TUI commands.
 Transport-only public config resolution accepts only plain direct policy instead of silently dropping
 codemode (including omitted exposure) or other policy; explicit `McpToolSet::connect` callers such as
 ACP request direct tools without local discovery or script-entry activation.
@@ -2090,9 +2115,10 @@ MCP tools with `readOnlyHint: true` may run in parallel. All other tools are seq
 mutation completes before subsequent calls; annotations affect scheduling, not authorization.
 
 The pinned official Rust SDK handles Streamable HTTP negotiation, JSON and SSE framing,
-legacy-initialize compatibility, session headers and reconnects. Standalone 2024 HTTP+SSE is
-explicitly rejected; OAuth browser/discovery flows are not implemented (static/environment-backed
-headers are supported). `pi-acp` advertises HTTP but not legacy SSE and converts client-supplied
+legacy-initialize compatibility, session headers, reconnects, OAuth discovery/client registration and
+reactive token refresh. Standalone 2024 HTTP+SSE is explicitly rejected. Static/environment-backed
+headers remain supported and an explicit static Authorization header bypasses managed OAuth.
+`pi-acp` advertises HTTP but not legacy SSE and converts client-supplied
 headers without local environment expansion. The CLI ACP host sets `load_mcp_config = false`,
 including for empty client server lists; embedded ACP hosts must do the same. ACP overlays remain
 transient and never enter Pi v4 storage. This consolidation does not add an MCP feature switch:
