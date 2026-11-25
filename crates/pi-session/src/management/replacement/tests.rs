@@ -364,6 +364,7 @@ async fn dropping_a_prepared_session_rolls_back_staged_external_state() {
         SessionGenerationOverlay::default(),
         None,
         None,
+        LiveRuntimeScopeId::new(),
     )
     .await
     .unwrap();

@@ -529,10 +529,30 @@ async fn mcp_reload_connection_failure_keeps_the_previous_connection_usable() {
         .to_string(),
     )
     .unwrap();
-    assert!(fixture.session.reload().await.is_err());
-    assert!(Arc::ptr_eq(&before, &fixture.session.current()));
+    fixture.session.reload().await.unwrap();
+    assert!(!Arc::ptr_eq(&before, &fixture.session.current()));
+    let status =
+        super::mcp_test_support::wait_for_status(&fixture.session, "unavailable", "failed").await;
+    assert!(
+        status
+            .lines()
+            .any(|line| line.starts_with("fixture ·") && line.contains("connected")),
+        "{status}"
+    );
     fixture.assert_tool("mcp__fixture__echo", true);
+    assert!(
+        !fixture
+            .session
+            .current()
+            .catalog()
+            .tool_specs()
+            .iter()
+            .any(|tool| tool.name.starts_with("mcp__unavailable__"))
+    );
+    assert!(fixture.requests.read().unwrap().is_empty());
+    assert!(!fixture.session.path().exists());
     fixture.invoke("mcp__fixture__echo", "echo").await;
+    fixture.assert_discoveries(1);
     fixture.shutdown().await;
 }
 
