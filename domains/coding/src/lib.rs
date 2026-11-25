@@ -8,6 +8,7 @@ mod credentials;
 mod dynamic_providers;
 mod features;
 mod generation;
+mod mcp;
 mod pi;
 pub mod plugins;
 mod project_trust;
@@ -25,6 +26,7 @@ pub use credentials::{
 };
 pub use features::Features;
 pub use generation::ProductSessionFactory;
+pub use mcp::mcp_client_auth;
 pub use pi::{Pi, PiBuilder};
 pub use pi_plugin_memory_hermes::curator;
 pub use project_trust::{

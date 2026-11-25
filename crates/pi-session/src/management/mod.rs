@@ -92,6 +92,7 @@ enum SessionReplacementRequest {
         position: ForkPosition,
     },
     Reload,
+    Refresh,
 }
 
 impl SessionReplacementRequest {
@@ -126,6 +127,7 @@ impl SessionReplacementRequest {
                 Ok(ResolvedSessionTransition::Fork { entry_id, position })
             }
             Self::Reload => Ok(ResolvedSessionTransition::Reload),
+            Self::Refresh => Ok(ResolvedSessionTransition::Refresh),
         }
     }
 }
@@ -451,6 +453,7 @@ impl MultiSessionManagerInner {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(registration_id.to_string(), session.clone());
+        session.current().bind_generation_owner(session.downgrade());
         self.factory.session_registered(&session);
         Ok(session)
     }
@@ -526,6 +529,9 @@ impl ManagedSessionReplacement {
         let transition = request.resolve(&self.owner, &self.manager)?;
         let replacement = self.owner.slot.transition(transition).await?;
         if replacement == AgentSessionReplacement::Replaced {
+            self.owner
+                .current()
+                .bind_generation_owner(self.owner.downgrade());
             self.manager.factory.session_registered(&self.owner);
         }
         Ok(replacement)

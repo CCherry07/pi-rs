@@ -181,8 +181,47 @@ impl AgentSession {
         submission: SessionSubmission,
         admitted: impl FnOnce() + Send,
     ) -> Result<Option<AgentLoopOutcome>, SessionError> {
-        let _operation = self.activity.begin(ActivityPhase::Preparing).await;
-        self.ensure_open()?;
+        self.run_submission_at_epoch(submission, admitted, self.submission_abort_epoch())
+            .await
+    }
+
+    async fn run_submission_at_epoch(
+        &self,
+        submission: SessionSubmission,
+        admitted: impl FnOnce() + Send,
+        abort_epoch: u64,
+    ) -> Result<Option<AgentLoopOutcome>, SessionError> {
+        let _operation = loop {
+            self.check_submission_epoch(abort_epoch)?;
+            if let Some(current) = self.refreshed_generation().await? {
+                return Box::pin(current.run_submission_at_epoch(
+                    submission,
+                    admitted,
+                    abort_epoch,
+                ))
+                .await;
+            }
+            let operation = self.activity.begin(ActivityPhase::Preparing).await;
+            self.check_submission_epoch(abort_epoch)?;
+            if let Some(current) = self.replacement_generation() {
+                drop(operation);
+                return Box::pin(current.run_submission_at_epoch(
+                    submission,
+                    admitted,
+                    abort_epoch,
+                ))
+                .await;
+            }
+            // A previous activity or another submitter may have won admission
+            // while we waited. Recheck at the actual boundary; never hold the
+            // activity gate while asking the manager to replace this generation.
+            if self.generation_is_stale()? {
+                drop(operation);
+                continue;
+            }
+            self.ensure_open()?;
+            break operation;
+        };
         let (prepared, run_id) = match submission {
             SessionSubmission::Text {
                 display_text,
@@ -466,6 +505,9 @@ impl AgentSession {
     /// Requests cancellation without waiting for the operation gate. Any
     /// undelivered queue items are retained for [`Self::clear_queue`].
     pub fn abort(&self) {
+        if let Some(epoch) = self.submission_abort_epoch.get() {
+            epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
         self.activity.abort();
         self.runtime.abort();
     }

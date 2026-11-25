@@ -195,21 +195,30 @@ continues to ignore that file until the normal project-trust service says the pr
 server connects; disabled servers are successful rows. JSON includes `servers`, `errors`, and an
 optional untrusted-project `note`. Add/remove never create a session or require model credentials.
 
-OAuth `login` uses the real `McpLibrary::begin_login` state machine: open the displayed URL manually,
-then paste the complete callback URL (hidden input in the terminal). `/mcp login <server>` uses the
-semantic input dialog and supports command cancellation. There is no browser launcher or loopback
-listener; after approval the browser may show a connection error, but its address can still be pasted.
-The configured callback URL/port is honored; the manual default is `http://127.0.0.1:53682/callback`.
-No access token is saved until the real code exchange succeeds. `logout` removes only the selected
-server-name/URL credential identity. Both commands reject provider/header authentication; `--local`
-requires a trusted, project-defined transport, not merely a policy override of a global server.
-Inspection and generation connections use the same durable `<agent-dir>/mcp-auth.json` store.
+`McpLibrary::login` validates the defining scope, probes first, hands a typed auth challenge to the
+installed `McpOAuthHost`, and reconnects after the real exchange. Already-authorized servers skip UI.
+The CLI's native host owns browser launch and loopback listening, with hidden pasted-redirect fallback;
+the default embedding host remains manual (`127.0.0.1:53682/callback` unless configured). Native callbacks
+use an ephemeral port by default and honor configured URL/port plus the actual CIMD redirect path.
+`begin_login` remains available for low-level callers. No token is fabricated when authorization starts.
+Shell login supports `--timeout <seconds>` (default 300); semantic login is bounded to 300 seconds and
+observes command cancellation. Both semantic login and logout request a complete generation reload.
+`logout` removes only the selected name/URL credentials. Provider/header auth is rejected by these
+commands; `--local` requires a trusted project-defined transport rather than an inherited policy override.
+Inspection and generation connections share private `<agent-dir>/mcp-auth.json` state. Coding supplies
+a request-time stored-first provider-token resolver; no Coding policy or browser code lives here.
 
-Automatic browser/loopback authorization, a Coding provider-token resolver, login timeout flags,
-OAuth add flags, live connection logs and per-tool exposure editing in the semantic manager remain
-unimplemented. Configure OAuth fields or `toolExposure` directly in the file. This is a shell/manager
-subset, not full legacy UI parity. OAuth network/store behavior is covered by deterministic local
-fixtures, not real-account sign-ins.
+Product preparation retains only typed authorization-required servers as pending so `/mcp` remains
+reachable. Inspection reports `needs-auth` as unsuccessful; unrelated config/connection failures remain
+fatal to generation preparation. Strict tool-only pools, including ACP, still return a typed error.
+`McpCredentialWatch` exposes opaque revisions for eligible identities, excluding pending authorization
+and unrelated credentials. Coding captures revisions before connecting and asks its generic session
+owner to replace the entire generation before the next idle submission if credentials changed.
+ACP has no browser or local discovery and reuses credentials only when its host explicitly injects a store.
+
+OAuth add flags, live connection logs and per-tool semantic editing remain unimplemented. Configure
+OAuth fields or `toolExposure` in the file. This is not full legacy UI parity. Tests use deterministic
+local fixtures, never real-account sign-ins.
 
 ## Configuration and boundaries
 

@@ -11,7 +11,7 @@ const HELP: &str = "Usage:
   pi mcp add <server> [options] --url <url>
   pi mcp remove <server> [-l]
   pi mcp list [--json]
-  pi mcp login <server> [-l]
+  pi mcp login <server> [-l] [--timeout <seconds>]
   pi mcp logout <server> [-l]
 
 Configure and check MCP servers without starting a session.
@@ -21,7 +21,7 @@ Commands:
   add <server>            Add or replace a server in mcp.json
   remove <server>         Remove a server from mcp.json
   list                    Show state, tools, and errors (exits 1 on failure)
-  login <server>          OAuth sign-in with a manually pasted callback URL (terminal required)
+  login <server>          Browser OAuth sign-in with loopback/pasted callback (terminal required)
   logout <server>         Delete stored OAuth credentials for this server
 
 Options for add and remove:
@@ -38,6 +38,7 @@ Options for add:
   --description <text>    What the server offers, shown in the system prompt
 
 Other options:
+  --timeout <seconds>     Whole-login timeout (default 300; login only)
   --json                  Print the list as JSON";
 
 #[derive(Clone, Debug)]
@@ -79,7 +80,11 @@ pub(crate) async fn run(arguments: &[String], context: &McpCommandContext) -> Re
         &context.agent_dir,
         Some(&context.cwd),
         context.project_trusted,
-    );
+    )
+    .with_client_auth(pi_coding::mcp_client_auth(&context.agent_dir))
+    .with_oauth_host(std::sync::Arc::new(
+        crate::mcp_oauth::NativeMcpOAuthHost::default(),
+    ));
     match command.as_str() {
         "add" => add(rest, context, &library),
         "remove" => remove(rest, context, &library),
@@ -97,7 +102,10 @@ async fn authorize(
     arguments: &[String],
     library: &McpLibrary,
 ) -> Result<i32, String> {
-    let known = BTreeMap::from([("local", OptionKind::Flag)]);
+    let mut known = BTreeMap::from([("local", OptionKind::Flag)]);
+    if command == "login" {
+        known.insert("timeout", OptionKind::Value);
+    }
     let parsed = match parse_options(arguments, &known, usize::MAX) {
         Ok(parsed) => parsed,
         Err(error) => return command_error(error),
@@ -108,7 +116,20 @@ async fn authorize(
     let scope = parsed.flags.contains("local").then_some(McpScope::Project);
     let name = &parsed.positional[0];
     let result = if command == "login" {
-        login(library, name, scope).await
+        let seconds = match parsed.values.get("timeout") {
+            Some(value) => match value.parse::<u64>() {
+                Ok(value @ 1..=86400) => value,
+                _ => return command_error("--timeout must be an integer from 1 to 86400 seconds"),
+            },
+            None => 300,
+        };
+        login(
+            library,
+            name,
+            scope,
+            std::time::Duration::from_secs(seconds),
+        )
+        .await
     } else {
         library.logout(name, scope)
     };
@@ -125,28 +146,23 @@ async fn login(
     library: &McpLibrary,
     name: &str,
     scope: Option<McpScope>,
+    timeout: std::time::Duration,
 ) -> Result<String, String> {
     if !std::io::stdin().is_terminal() {
-        return Err("MCP login requires a terminal to paste the callback URL; automatic browser/loopback login is not implemented".into());
+        return Err(
+            "MCP login requires a terminal; run pi mcp login in a terminal, then retry the session"
+                .into(),
+        );
     }
-    let (_, signal) = pi_core::AbortHandle::new();
-    let (mut flow, redirect) = library
-        .begin_login(name, scope, signal.clone())
-        .await
-        .map_err(|error| error.to_string())?;
-    println!(
-        "Open this URL in your browser:\n{}\nAfter authorization, copy the complete callback URL from the address bar, even if the browser cannot connect. No callback listener is running.",
-        redirect.authorization_url
-    );
-    let response = rpassword::prompt_password("Paste the complete callback URL (hidden input): ")
-        .map_err(|_| "Could not read MCP OAuth callback URL".to_string())?;
-    if response.trim().is_empty() {
-        return Err("MCP OAuth sign-in cancelled".into());
-    }
-    flow.complete_redirect_url(response.trim(), signal)
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(format!("Signed in to MCP server {name:?}."))
+    let (abort, signal) = pi_core::AbortHandle::new();
+    let count = tokio::select! {
+        biased;
+        _ = tokio::signal::ctrl_c() => { abort.abort(); return Err("MCP OAuth sign-in cancelled".into()); }
+        result = tokio::time::timeout(timeout, library.login(name, scope, std::sync::Arc::new(crate::mcp_oauth::ShellOAuthPrompt), signal)) => {
+            result.map_err(|_| "MCP login timed out; retry pi mcp login".to_string())?.map_err(|error| error.to_string())?
+        }
+    };
+    Ok(format!("Signed in to MCP server {name:?} ({count} tools)."))
 }
 
 fn add(
@@ -382,6 +398,7 @@ fn render_text(inspection: &McpInspection, context: &McpCommandContext, note: Op
                 report.tools.len(),
                 if report.tools.len() == 1 { "" } else { "s" }
             ),
+            McpServerState::NeedsAuth => "needs sign-in".into(),
             McpServerState::Disabled => "disabled".into(),
             McpServerState::Failed => "failed".into(),
         };

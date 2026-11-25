@@ -54,6 +54,7 @@ pi-shell.workspace = true
 pi-settings.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
 tokio.workspace = true
 thiserror.workspace = true
 tempfile = "3.21.0"

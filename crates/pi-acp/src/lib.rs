@@ -24,7 +24,9 @@ use pi_core::{
     AgentEvent, ContentBlock as PiContentBlock, Message, ModelId, ProviderId, StreamEvent,
     TextContent as PiTextContent, ThinkingLevel, UserMessage,
 };
-use pi_plugin_mcp::{McpServerConfig, McpToolSet};
+use pi_plugin_mcp::{
+    McpClientAuth, McpError, McpOAuthCredentialStore, McpServerConfig, McpToolSet,
+};
 use pi_session::{
     AgentSessionEvent, MultiSessionManager, PiSession, SessionEntry, SessionGenerationOverlay,
     SessionHeader,
@@ -33,6 +35,9 @@ use pi_utils::time::unix_timestamp_ms as now_ms;
 use tokio::sync::Mutex;
 
 use permissions::{PendingPermission, PermissionGate};
+
+#[cfg(test)]
+mod mcp_auth_tests;
 
 const MODEL_CONFIG_ID: &str = "model";
 const THINKING_CONFIG_ID: &str = "thought_level";
@@ -47,6 +52,9 @@ pub struct AcpOptions {
     /// Request permission for every tool call in an ACP prompt when set.
     /// Disabled by default; project trust is independent of tool authorization.
     pub tool_permission_timeout: Option<Duration>,
+    /// Optional host-owned OAuth store. ACP never discovers local MCP configuration
+    /// or starts browser authorization; only exact name/URL credentials are reused.
+    pub mcp_oauth_store: Option<McpOAuthCredentialStore>,
 }
 
 impl AcpOptions {
@@ -56,7 +64,13 @@ impl AcpOptions {
             agent_name: "pi-rs".to_string(),
             agent_version: env!("CARGO_PKG_VERSION").to_string(),
             tool_permission_timeout: None,
+            mcp_oauth_store: None,
         }
+    }
+
+    pub fn mcp_oauth_store(mut self, store: McpOAuthCredentialStore) -> Self {
+        self.mcp_oauth_store = Some(store);
+        self
     }
 
     pub fn agent_name(mut self, name: impl Into<String>) -> Self {
@@ -286,7 +300,12 @@ impl AcpState {
     ) -> agent_client_protocol::Result<acp::NewSessionResponse> {
         reject_additional_directories(&request.additional_directories)?;
         let cwd = canonical_session_cwd(&request.cwd)?;
-        let (overlay, mcp) = generation_overlay(request.mcp_servers, &cwd).await?;
+        let (overlay, mcp) = generation_overlay(
+            request.mcp_servers,
+            &cwd,
+            self.options.mcp_oauth_store.as_ref(),
+        )
+        .await?;
         let (overlay, permission_requests) =
             PermissionGate::attach(overlay, self.options.tool_permission_timeout);
         let path = self
@@ -382,7 +401,8 @@ impl AcpState {
                 "session cwd does not match the stored session",
             ));
         }
-        let (overlay, mcp) = generation_overlay(mcp_servers, &cwd).await?;
+        let (overlay, mcp) =
+            generation_overlay(mcp_servers, &cwd, self.options.mcp_oauth_store.as_ref()).await?;
         let (overlay, permission_requests) =
             PermissionGate::attach(overlay, self.options.tool_permission_timeout);
         let session = match self
@@ -684,12 +704,25 @@ impl AcpState {
 async fn generation_overlay(
     servers: Vec<acp::McpServer>,
     cwd: &Path,
+    oauth_store: Option<&McpOAuthCredentialStore>,
 ) -> agent_client_protocol::Result<(SessionGenerationOverlay, Option<McpToolSet>)> {
     if servers.is_empty() {
         return Ok((SessionGenerationOverlay::new(), None));
     }
     let configs = mcp_configs(servers, cwd)?;
-    let tools = McpToolSet::connect(configs).await.map_err(internal_error)?;
+    let auth = oauth_store.map_or_else(McpClientAuth::default, |store| {
+        McpClientAuth::default().with_oauth_store(store.clone())
+    });
+    let tools = McpToolSet::connect_with_auth(configs, auth).await.map_err(|error| {
+        if let McpError::AuthorizationRequired(required) = error {
+            acp::Error::auth_required().data(serde_json::json!({
+                "server": required.server,
+                "message": format!("{}; authorize externally, then retry ACP session creation. ACP does not open a browser or load local MCP definitions.", required.guidance())
+            }))
+        } else {
+            internal_error(error)
+        }
+    })?;
     let overlay_tools = tools.clone();
     let overlay = SessionGenerationOverlay::new().with_plugin(move || overlay_tools.plugin());
     Ok((overlay, Some(tools)))

@@ -23,6 +23,7 @@ pub struct PiBuilder {
     interactive_project_trust: bool,
     js_plugin_host: Option<Arc<dyn JsPluginHost>>,
     plugin_ui_bridge: Option<Arc<dyn PluginUiBridge>>,
+    mcp_oauth_host: Option<Arc<dyn pi_plugin_mcp::McpOAuthHost>>,
 }
 
 impl Pi {
@@ -33,6 +34,7 @@ impl Pi {
             interactive_project_trust: false,
             js_plugin_host: None,
             plugin_ui_bridge: None,
+            mcp_oauth_host: None,
         }
     }
 
@@ -94,6 +96,11 @@ impl PiBuilder {
         self
     }
 
+    pub fn mcp_oauth_host(mut self, host: Arc<dyn pi_plugin_mcp::McpOAuthHost>) -> Self {
+        self.mcp_oauth_host = Some(host);
+        self
+    }
+
     pub fn js_plugin_host(mut self, host: Arc<dyn JsPluginHost>) -> Self {
         self.js_plugin_host = Some(host);
         self
@@ -119,6 +126,9 @@ impl PiBuilder {
         let agent_dir = self.config.agent_dir.clone();
         let mut factory = ProductSessionFactory::new(self.config, project_trust.clone(), settings)
             .with_plugin_context(self.presentation_mode, PluginContextBinding::new());
+        if let Some(host) = self.mcp_oauth_host {
+            factory = factory.with_mcp_oauth_host(host);
+        }
         if let Some(host) = self.js_plugin_host {
             factory = factory.with_js_plugin_host(host);
         }

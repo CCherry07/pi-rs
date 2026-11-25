@@ -6,6 +6,7 @@ mod config;
 mod input;
 mod markdown;
 mod mcp_commands;
+mod mcp_oauth;
 mod output;
 mod package_commands;
 mod plugin_commands;
@@ -384,6 +385,9 @@ async fn run(
     let mut factory = ProductSessionFactory::new(config, trust.service.clone(), settings)
         .with_plugin_context(cli_mode.presentation_mode(), plugin_context_binding.clone())
         .with_plugin_ui_bridge(plugin_ui);
+    if matches!(cli_mode, CLIMode::Tui { .. }) {
+        factory = factory.with_mcp_oauth_host(Arc::new(mcp_oauth::NativeMcpOAuthHost::default()));
+    }
     if let Some(bridge) = rpc_ui.clone() {
         factory = factory.with_session_binding(move |session| {
             // Managed child generations have their own observers; only the RPC
@@ -407,7 +411,9 @@ async fn run(
         let result = tokio::select! {
             result = pi_acp::serve_stdio(
                 sessions.clone(),
-                cli.acp_options(sessions_dir),
+                cli.acp_options(sessions_dir).mcp_oauth_store(
+                    pi_plugin_mcp::McpOAuthCredentialStore::new(agent_dir.join("mcp-auth.json"))
+                ),
             ) => result.map_err(|error| error.to_string()),
             () = plugin_context_binding.wait_for_shutdown() => Ok(()),
         };

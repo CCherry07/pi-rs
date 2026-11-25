@@ -253,6 +253,8 @@ pub enum McpError {
     Timeout(String),
     #[error("failed to start MCP server {server}: {message}")]
     Start { server: String, message: String },
+    #[error(transparent)]
+    AuthorizationRequired(McpAuthorizationRequired),
     #[error("failed to initialize MCP server {server}: {message}")]
     Initialize { server: String, message: String },
     #[error("failed to list tools from MCP server {server}: {message}")]
@@ -262,6 +264,45 @@ pub enum McpError {
     #[error("failed to shut down MCP server {server}: {message}")]
     Shutdown { server: String, message: String },
 }
+
+/// Actionable authentication state. The server's challenge is deliberately
+/// excluded from Debug/Display because it may contain endpoint or account data.
+#[derive(Clone)]
+pub struct McpAuthorizationRequired {
+    pub server: String,
+    pub provider: Option<String>,
+    pub static_authorization: bool,
+    pub(crate) challenge: Option<String>,
+}
+
+impl McpAuthorizationRequired {
+    pub fn guidance(&self) -> String {
+        if self.static_authorization {
+            "update the configured Authorization header".into()
+        } else if let Some(provider) = &self.provider {
+            format!("use pi auth login {provider}")
+        } else {
+            format!("use pi mcp login {}", self.server)
+        }
+    }
+}
+
+impl std::fmt::Display for McpAuthorizationRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "MCP server {} requires authorization; {}",
+            self.server,
+            self.guidance()
+        )
+    }
+}
+impl std::fmt::Debug for McpAuthorizationRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+impl std::error::Error for McpAuthorizationRequired {}
 
 /// Connected MCP servers and the Pi tools discovered from them.
 ///
@@ -283,6 +324,7 @@ impl std::fmt::Debug for McpToolSet {
 }
 
 struct McpPool {
+    authorization_required: Vec<McpAuthorizationRequired>,
     servers: Vec<Arc<ConnectedServer>>,
     tools: Vec<Arc<McpTool>>,
     resource_tools: Vec<Arc<dyn Tool>>,
@@ -330,6 +372,20 @@ impl McpToolSet {
         configs: Vec<(McpServerConfig, McpServerPolicy)>,
         auth: McpClientAuth,
     ) -> Result<Self, McpError> {
+        Self::connect_generation(configs, auth, false).await
+    }
+
+    pub(crate) fn authorization_required(&self) -> &[McpAuthorizationRequired] {
+        &self.inner.authorization_required
+    }
+
+    /// Product preparation may keep the control plane reachable for auth-only
+    /// failures. Invalid configuration and all other connection failures remain fatal.
+    pub(crate) async fn connect_generation(
+        configs: Vec<(McpServerConfig, McpServerPolicy)>,
+        auth: McpClientAuth,
+        allow_pending_authorization: bool,
+    ) -> Result<Self, McpError> {
         validate_configs(
             &configs
                 .iter()
@@ -337,6 +393,7 @@ impl McpToolSet {
                 .collect::<Vec<_>>(),
         )?;
         let mut servers = Vec::with_capacity(configs.len());
+        let mut authorization_required = Vec::new();
         let mut tools = Vec::new();
         let mut names = HashSet::new();
 
@@ -347,7 +404,15 @@ impl McpToolSet {
                 connect_server(config, policy, auth.clone()),
             )
             .await
-            .map_err(|_| McpError::Timeout(name.clone()))??;
+            .map_err(|_| McpError::Timeout(name.clone()))?;
+            let server = match server {
+                Ok(server) => server,
+                Err(McpError::AuthorizationRequired(required)) if allow_pending_authorization => {
+                    authorization_required.push(required);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let remote_tools = if server
                 .peer
                 .peer_info()
@@ -403,6 +468,7 @@ impl McpToolSet {
         );
         Ok(Self {
             inner: Arc::new(McpPool {
+                authorization_required,
                 servers,
                 tools,
                 resource_tools,
@@ -656,7 +722,7 @@ async fn connect_once(
             let has_static_authorization = headers.contains_key(&http::header::AUTHORIZATION);
             let transport_config =
                 StreamableHttpClientTransportConfig::with_uri(url.clone()).custom_headers(headers);
-            if let Some(provider_auth) = provider_auth {
+            if let Some(provider_auth) = provider_auth.filter(|_| !has_static_authorization) {
                 let resolver =
                     client_auth
                         .provider_tokens
@@ -708,9 +774,22 @@ async fn connect_once(
             handler.serve_with_lifecycle(transport, lifecycle).await
         }
     }
-    .map_err(|_| McpError::Initialize {
-        server: name.to_string(),
-        message: "handshake failed; check endpoint, credentials and server availability".into(),
+    .map_err(|error| {
+        if error.is_authorization_required() {
+            McpError::AuthorizationRequired(McpAuthorizationRequired {
+                server: name.to_string(),
+                provider: provider_auth.map(|auth| auth.provider.clone()),
+                static_authorization: matches!(config, McpTransport::Http { headers, .. }
+                    if headers.keys().any(|key| key.eq_ignore_ascii_case("authorization"))),
+                challenge: error.auth_challenge().map(str::to_owned),
+            })
+        } else {
+            McpError::Initialize {
+                server: name.to_string(),
+                message: "handshake failed; check endpoint, credentials and server availability"
+                    .into(),
+            }
+        }
     })
 }
 
@@ -1268,6 +1347,7 @@ mod tests {
                 servers: vec![Arc::clone(&connected)],
                 tools: vec![Arc::new(tool)],
                 resource_tools: Vec::new(),
+                authorization_required: Vec::new(),
             }),
         };
         let (driver, registry) = pi_plugin::RegistriesBuilder::new()

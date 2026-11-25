@@ -37,6 +37,14 @@ pub struct McpLibrary {
     trusted: bool,
     pub(crate) register_tool_search: bool,
     client_auth: McpClientAuth,
+    oauth_host: Arc<dyn crate::McpOAuthHost>,
+}
+
+/// A candidate product plugin plus typed auth-only readiness diagnostics.
+/// Publication and any automatic generation replacement remain host-owned.
+pub struct PreparedMcpGeneration {
+    pub plugin: Arc<dyn Plugin>,
+    pub authorization_required: Vec<crate::McpAuthorizationRequired>,
 }
 
 #[derive(Serialize)]
@@ -131,6 +139,7 @@ impl McpServerDefinition {
 #[serde(rename_all = "kebab-case")]
 pub enum McpServerState {
     Connected,
+    NeedsAuth,
     Disabled,
     Failed,
 }
@@ -167,10 +176,12 @@ pub struct McpInspection {
 impl McpInspection {
     pub fn is_ok(&self) -> bool {
         self.errors.is_empty()
-            && self
-                .servers
-                .iter()
-                .all(|server| server.state != McpServerState::Failed)
+            && self.servers.iter().all(|server| {
+                matches!(
+                    server.state,
+                    McpServerState::Connected | McpServerState::Disabled
+                )
+            })
     }
 }
 
@@ -191,6 +202,7 @@ impl McpLibrary {
             cwd: cwd.map(Path::to_path_buf),
             trusted,
             register_tool_search: true,
+            oauth_host: Arc::new(crate::login::ManualOAuthHost),
             client_auth: McpClientAuth::default().with_oauth_store(McpOAuthCredentialStore::new(
                 agent_dir.join("mcp-auth.json"),
             )),
@@ -201,6 +213,68 @@ impl McpLibrary {
     pub fn with_client_auth(mut self, client_auth: McpClientAuth) -> Self {
         self.client_auth = client_auth;
         self
+    }
+
+    pub fn with_oauth_host(mut self, host: Arc<dyn crate::McpOAuthHost>) -> Self {
+        self.oauth_host = host;
+        self
+    }
+
+    /// Probe before requesting interaction; a successful anonymous or already
+    /// authorized connection is not sent through a new login. Reconnect after
+    /// token exchange so success means the server actually accepts the result.
+    pub async fn login(
+        &self,
+        name: &str,
+        scope: Option<McpScope>,
+        prompt: Arc<dyn crate::McpOAuthPrompt>,
+        signal: AbortSignal,
+    ) -> Result<usize, McpOAuthError> {
+        let operation = async {
+            let config = self
+                .management_oauth_config(name, scope)
+                .map_err(McpOAuthError::Failed)?;
+            let challenge =
+                match McpToolSet::connect_with_auth(vec![config.clone()], self.client_auth.clone())
+                    .await
+                {
+                    Ok(pool) => {
+                        let count = pool.tools().len();
+                        pool.shutdown()
+                            .await
+                            .map_err(|error| McpOAuthError::Failed(error.to_string()))?;
+                        return Ok(count);
+                    }
+                    Err(crate::McpError::AuthorizationRequired(required)) => required.challenge,
+                    Err(error) => return Err(McpOAuthError::Failed(error.to_string())),
+                };
+            let McpTransport::Http { url, .. } = &config.transport else {
+                unreachable!("validated HTTP")
+            };
+            let request = crate::McpOAuthLoginRequest {
+                name: name.into(),
+                server_url: url.clone(),
+                settings: config.oauth.clone().unwrap_or_default(),
+                store: self.client_auth.oauth_store.clone(),
+                challenge,
+            };
+            self.oauth_host
+                .sign_in(request, prompt, signal.clone())
+                .await?;
+            let pool = McpToolSet::connect_with_auth(vec![config], self.client_auth.clone())
+                .await
+                .map_err(|error| McpOAuthError::Failed(format!("Signed in, but {error}")))?;
+            let count = pool.tools().len();
+            pool.shutdown()
+                .await
+                .map_err(|error| McpOAuthError::Failed(error.to_string()))?;
+            Ok(count)
+        };
+        tokio::select! {
+            biased;
+            () = signal.wait() => Err(McpOAuthError::Cancelled),
+            result = operation => result,
+        }
     }
 
     /// Adds request-time provider token lookup while retaining this library's
@@ -598,7 +672,12 @@ impl McpLibrary {
                     report.state = McpServerState::Connected;
                 }
             }
-            Err(error) => report.error = Some(error.to_string()),
+            Err(error) => {
+                if matches!(error, crate::McpError::AuthorizationRequired(_)) {
+                    report.state = McpServerState::NeedsAuth;
+                }
+                report.error = Some(error.to_string());
+            }
         }
         report
     }
@@ -790,9 +869,28 @@ impl McpLibrary {
         Ok(names)
     }
 
+    /// Resolve only eligible credential identities. Capture their revisions before
+    /// preparing connections, so a login racing preparation is observed next turn.
+    pub fn credential_watch(&self) -> Result<crate::McpCredentialWatch, String> {
+        let configs = self
+            .entries()?
+            .into_iter()
+            .filter(|entry| entry.config.enabled())
+            .map(|entry| self.resolve(entry))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(crate::McpCredentialWatch::new(
+            self.client_auth.oauth_store.clone(),
+            configs,
+        ))
+    }
+
     /// Reads eligible configuration and connects before returning an immutable plugin.
     /// The host retains candidate ownership and publishes only after complete generation validation.
     pub async fn prepare(&self) -> Result<Arc<dyn Plugin>, String> {
+        Ok(self.prepare_generation().await?.plugin)
+    }
+
+    pub async fn prepare_generation(&self) -> Result<PreparedMcpGeneration, String> {
         let (entries, auto_enable_codemode) = self.configuration_replacing(None)?;
         let needs_codemode = entries
             .iter()
@@ -806,17 +904,21 @@ impl McpLibrary {
             .filter(|entry| entry.config.enabled())
             .map(|entry| self.resolve_with_policy(entry))
             .collect::<Result<Vec<_>, _>>()?;
-        let pool = McpToolSet::connect_with_policies_and_auth(configs, self.client_auth.clone())
+        let pool = McpToolSet::connect_generation(configs, self.client_auth.clone(), true)
             .await
             .map_err(|e| e.to_string())?;
-        Ok(Arc::new(McpProductPlugin {
-            library: self.clone(),
-            rows,
-            pool,
-            auto_enable_codemode,
-            needs_codemode,
-            needs_tool_search,
-        }))
+        let authorization_required = pool.authorization_required().to_vec();
+        Ok(PreparedMcpGeneration {
+            authorization_required,
+            plugin: Arc::new(McpProductPlugin {
+                library: self.clone(),
+                rows,
+                pool,
+                auto_enable_codemode,
+                needs_codemode,
+                needs_tool_search,
+            }),
+        })
     }
 
     fn resolve_with_policy(
