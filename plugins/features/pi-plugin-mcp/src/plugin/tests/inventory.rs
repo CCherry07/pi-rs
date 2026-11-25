@@ -9,6 +9,7 @@ async fn hidden_remote_tool_selection_and_cancel_are_read_only() {
     let app = axum::Router::new().route("/mcp", axum::routing::post(|axum::Json(request): axum::Json<serde_json::Value>| async move {
         if request["id"].is_null() { return axum::http::StatusCode::ACCEPTED.into_response(); }
         let result = match request["method"].as_str().unwrap() {
+            "server/discover" => return axum::Json(json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32601,"message":"legacy fixture"}})).into_response(),
             "initialize" => json!({"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}}),
             "tools/list" => json!({"tools":[
                 {"name":"a-b","description":"First line\nOmitted detail","inputSchema":{"type":"object"}},

@@ -148,6 +148,9 @@ async fn local_library_valid_token_inspection_never_resolves_its_oauth_secret() 
         .route("/mcp", post(|headers:HeaderMap, axum::Json(request):axum::Json<serde_json::Value>| async move {
             assert_eq!(headers["authorization"], "Bearer fixture-valid-token");
             if request["id"].is_null() {return StatusCode::ACCEPTED.into_response();}
+            if request["method"] == "server/discover" {
+                return axum::Json(json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32601,"message":"legacy fixture"}})).into_response();
+            }
             let result = if request["method"] == "initialize" {
                 json!({"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}})
             } else { json!({"tools":[]}) };
