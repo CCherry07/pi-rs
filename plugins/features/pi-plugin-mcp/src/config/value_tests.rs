@@ -75,6 +75,8 @@ async fn headers_resolve_at_connection_and_oauth_secret_waits_for_explicit_auth(
     );
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     let resolved = config
+        .into_connection_definition()
+        .unwrap()
         .resolve_for_connect(context(dir.path()), true, AbortHandle::new().1)
         .await
         .unwrap();

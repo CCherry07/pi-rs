@@ -205,11 +205,13 @@ impl McpConfigEntry {
         lookup: &impl Fn(&str) -> Result<String, String>,
         value: impl Fn(&str) -> Result<String, String>,
     ) -> Result<McpServerConfig, String> {
-        let mut transport = self
-            .transport
-            .ok_or("Enabled MCP server needs a transport")?;
-        let mut oauth = self.oauth;
-        let use_oauth = self.auth.is_none()
+        let McpServerConfig {
+            name,
+            mut transport,
+            mut oauth,
+            auth,
+        } = self.config;
+        let use_oauth = auth.is_none()
             && matches!(&transport, McpTransport::Http { headers, .. } if !headers.keys().any(|name| name.eq_ignore_ascii_case("authorization")));
         if use_oauth
             && let Some(secret) = oauth
@@ -257,10 +259,10 @@ impl McpConfigEntry {
             }
         }
         Ok(McpServerConfig {
-            name: self.name,
+            name,
             transport,
             oauth,
-            auth: self.auth,
+            auth,
         })
     }
 }
@@ -760,6 +762,53 @@ mod tests {
                 config_dir: &self.config_dir,
                 default_cwd: &self.default_cwd,
             }
+        }
+    }
+
+    #[test]
+    fn connection_definition_keeps_only_unresolved_transport_and_auth() {
+        let selected = entry(json!({
+            "url": "${MCP_DEFINITION_ENDPOINT}",
+            "headers": {"X-Secret": "!printf $MCP_DEFINITION_SECRET"},
+            "oauth": {"clientSecret": "${MCP_DEFINITION_SECRET}"},
+            "auth": {"provider": "fixture-provider"}
+        }));
+        let mut other_policy = selected.clone();
+        other_policy.enabled = false;
+        other_policy.policy = McpServerPolicy {
+            exposure: McpExposure::Hidden,
+            tool_exposure: vec![("private".into(), McpExposure::Direct)],
+            timeout: Duration::from_secs(1),
+            description: Some("generation-local description".into()),
+            root: Some(PathBuf::from("/different-root")),
+            log_path: Some(PathBuf::from("/different-log")),
+        };
+        let definition = selected.into_connection_definition().unwrap();
+        assert_eq!(
+            definition,
+            other_policy.into_connection_definition().unwrap()
+        );
+        assert_eq!(definition.config.name, "server");
+        assert!(matches!(
+            &definition.config.transport,
+            McpTransport::Http { url, headers }
+                if url == "${MCP_DEFINITION_ENDPOINT}"
+                    && headers["X-Secret"] == "!printf $MCP_DEFINITION_SECRET"
+        ));
+        assert_eq!(
+            definition.config.oauth.unwrap().client_secret.as_deref(),
+            Some("${MCP_DEFINITION_SECRET}")
+        );
+        assert_eq!(definition.config.auth.unwrap().provider, "fixture-provider");
+    }
+
+    #[test]
+    fn connection_definition_preserves_missing_transport_diagnostics() {
+        for config in [json!({"enabled": false}), json!({"exposure": "hidden"})] {
+            assert_eq!(
+                entry(config).into_connection_definition().unwrap_err(),
+                "Enabled MCP server needs a transport"
+            );
         }
     }
 
