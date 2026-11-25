@@ -993,6 +993,16 @@ impl McpLibrary {
             .await
             .map_err(|e| e.to_string())?;
         let authorization_required = pool.authorization_required().to_vec();
+        let mut library = self.clone();
+        library.generation = None;
+        library.server_readiness.clear();
+        library.server_directory = None;
+        library.pending_direct.clear();
+        library.preserved_tool_selection.clear();
+        library.tool_selection_candidates.clear();
+        library.tool_selection_reader = None;
+        library.selection_ambiguities = 0;
+        library.denied_selection_count = 0;
         Ok(PreparedMcpGeneration {
             authorization_required,
             plugin: Arc::new(McpProductPlugin {

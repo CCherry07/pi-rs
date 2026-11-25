@@ -65,6 +65,12 @@ impl Plugin for McpProductPlugin {
             }
         }
         if active.len() != before {
+            // This getter is effective-only. Merge live desired absent intent only
+            // when adding a helper, so a no-op startup never writes selection and
+            // an earlier hook's explicit deselection cannot be resurrected.
+            self.library
+                .merge_preserved_tool_selection(&mut active)
+                .map_err(PluginError::Failure)?;
             context.session.set_active_tools(active.clone())?;
         }
         if !(has_codemode && active.iter().any(|name| name == "codemode")
