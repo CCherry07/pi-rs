@@ -28,8 +28,9 @@ mod provider;
 mod registry;
 mod tool;
 pub use command::{
-    Command, CommandCatalogEntry, CommandContext, CommandError, CommandMetadata, CommandOutcome,
-    CommandSource, CommandSourceInfo, CommandSourceOrigin, CommandSourceScope, CommandSpec,
+    Command, CommandCatalogEntry, CommandCompletions, CommandContext, CommandError,
+    CommandMetadata, CommandOutcome, CommandSource, CommandSourceInfo, CommandSourceOrigin,
+    CommandSourceScope, CommandSpec,
 };
 pub use error::{CoreError, Result};
 pub use model_runtime::{ModelRuntime, ProviderStatus};

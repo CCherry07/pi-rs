@@ -1015,6 +1015,19 @@ configuration files or plugin ID conventions.
 13. `before_provider_request` runs after a concrete provider has serialized its final wire payload and before transport. Replacements chain in provider-plugin order; hook errors are diagnosed and skipped so later provider hooks still receive the last valid payload.
 14. Built-in HTTP providers cross the shared `post_json_with_provider_hooks` Interface after assembling their final headers. `before_provider_headers` chains a header map in provider-plugin order, preserves `null` deletion tombstones until all hooks finish, and only then produces transport-ready strings. `after_provider_response` observes status and decoded response headers before the body stream can be consumed. Both hooks isolate failures as diagnostics and continue in registration order.
 
+Registered commands can supply finite ordered `UiCompletion` argument candidates through
+`RegisterContext::register_command_with_completions`. Registries freeze the candidates with the
+command and reject duplicates before changing either. `FrozenRegistries::command_completions` and
+`SessionCatalog` expose detached generation snapshots; tool-scoped views without commands also
+exclude their completion metadata. The generic positional matcher preserves owner order, exact
+preceding words, current-word prefixes and trailing continuation spaces. It is not a shell parser
+or an executable completion callback. The CLI owns selection/rendering and refreshes this snapshot
+on generation replacement; it contains no MCP/server-name completion dispatch. Merely completing a
+draft cannot execute a command, connect a server or materialize a session. Failed candidates leave
+the old command/completion catalog intact. This additive registration/catalog contract uses the
+existing native exact-build fingerprint and requires SDK rebuilds without changing command vtables,
+exported descriptors, loader policy or lifecycle ordering.
+
 ## Unified plugin ownership and preparation
 
 This is a deliberate Rust API change, preserving Pi hook semantics and Pi v4 storage. `pi-plugin`
@@ -2068,16 +2081,27 @@ Provider authentication is a separate request-time `McpProviderTokenResolver` in
 the resolver to the candidate library/tool set. The token is resolved anew for every POST, GET/SSE and
 session deletion so refreshes do not require rebuilding a generation. Resolver failures and all logs are
 secret-free. Project MCP files cannot name a provider and therefore cannot borrow a user-level provider
-credential merely by gaining project trust. Coding and the CLI do not yet inject this resolver;
-provider-auth support here is an embedding seam, not end-to-end Coding credential integration.
+credential merely by gaining project trust. Coding and the CLI inject their shared stored-first
+credential resolver at this seam, without borrowing a model's explicit CLI key. Explicit
+Authorization headers retain precedence over provider and managed OAuth credentials.
 
 `ProductSessionFactory` reloads files after trust resolution and prepares a fresh connected pool
 for every candidate product generation. The immutable local-library MCP plugin owns discovered tools plus the
 registered `/mcp` command. Explicit `McpToolSet` callers such as ACP instead receive tools only and
 never trigger local-file discovery or command registration. The CLI's `pi mcp add/remove/list` path
 runs before product/session construction and preserves command-specific exit codes. Bare `/mcp` uses
-semantic plugin selectors; reconnect proves the named connection first, while policy changes save the
-candidate file, then request the existing whole-session reload. Connection, discovery, registration
+semantic state-dependent selectors, including a read-only offered-tool inventory that retains hidden
+tools without registering them. Trusted project-only enable/disable creates a policy override without
+copying global transports or credentials. Omitted login/logout/reconnect names select the sole eligible
+or sole pending OAuth candidate, otherwise prompt; noninteractive ambiguity requires a name. MCP owns
+its action/name completion metadata, published through the generic frozen command catalog. Back,
+read-only selection and cancellation do not write or reload. Reconnect proves the named connection
+first, while policy changes save the candidate file, then request the existing whole-session reload.
+HTTP add can author typed unresolved OAuth settings without resolving secrets or initiating sign-in;
+invalid options leave bytes unchanged. Inspection includes optional provider identity and unknown-name
+errors give configured-name/trust guidance without reading ignored project definitions. Shell OAuth
+allows non-TTY callbacks/already-authorized probes and positive finite fractional timeout seconds;
+only pasted input needs a terminal. Connection, discovery, registration
 or configuration failure rejects the candidate without swapping the current generation. Configuration
 already saved on disk remains pending; errors direct the user to retry reload or revert those edits.
 Pool ownership is reference-counted;

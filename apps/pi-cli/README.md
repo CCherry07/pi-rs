@@ -164,9 +164,19 @@ replacement, and reject stale revisions. Add/remove preserve unrelated invalid d
 configuration can be repaired. `list` returns exit code `1` for configuration or enabled-server
 connection failures and `0` when every enabled server connects; disabled entries are not failures.
 Malformed entries do not hide valid rows. JSON includes `servers`, `errors` and, when applicable,
-an untrusted-project `note`; server reports include tool exposure overrides and source provenance.
+an untrusted-project `note`; server reports include tool exposure overrides, source provenance and
+optional `authProvider`. Unknown login/logout names suggest nearby configured names without exposing
+credentials or reading untrusted definitions. HTTP add supports `--oauth-client-id`,
+`--oauth-client-secret`, `--oauth-callback-port`, `--oauth-client-name` and
+`--oauth-client-registration auto|cimd|dcr`; these author unresolved values without signing in.
 
-Inside a session, bare `/mcp` opens semantic server/action selectors in interactive frontends.
+Inside a session, bare `/mcp` opens state-dependent server/action selectors. The read-only Tools view
+includes hidden tools, original remote names, first-line descriptions and differing effective exposure;
+selection and cancellation do not change policy. Global servers can be enabled/disabled only in the
+trusted current project, leaving global configuration and credentials unchanged. Back returns to the
+parent selector. `/mcp login`, `/mcp logout` and `/mcp reconnect` can omit the name: they pick the sole
+eligible/preferred server or open a selector; ambiguous noninteractive requests require a name.
+The native composer completes these actions and eligible names from plugin-owned generation metadata.
 `/mcp reconnect <name>` proves a fresh connection before atomically rebuilding the generation;
 `enable`, `disable`, `exposure`, and `reload` also publish only a fully prepared replacement, so a
 failed reload keeps the current registry alive, while saved configuration remains on disk for retry
@@ -174,8 +184,10 @@ or correction. This manager supports server-wide exposure; edit `toolExposure` i
 per-tool changes. OAuth `pi mcp login <server> [--timeout <seconds>]` and TUI `/mcp login <server>`
 open a browser and listen on an ephemeral loopback port (or the configured callback URL/port).
 If launching or listening fails, open the displayed URL and paste the complete redirected address;
-shell input is hidden. Cancellation/timeout closes the listener and restores shell input. The whole
-login defaults to 300 seconds; the shell flag accepts 1–86400 seconds. A successful login performs
+shell input is hidden. Without a TTY, browser callbacks and already-authorized probes still work;
+only pasted input is disabled. Cancellation/timeout closes the listener and restores shell input.
+The whole login defaults to 300 seconds; the shell flag accepts positive finite fractional seconds
+within the representable duration range. A successful login performs
 a real code exchange and reconnect; semantic login/logout then replace the complete generation.
 Embeddings without a native OAuth host retain a manual semantic redirect flow. `logout` deletes only
 that server's name/URL credentials. `--local` requires a trusted project-defined transport.
@@ -184,7 +196,9 @@ shared stored-first provider credential resolver (`pi auth login`), and explicit
 take precedence. Typed `needs-auth` servers remain visible without blocking the management generation;
 unrelated errors still reject preparation. External credential changes are picked up before the next
 idle provider submission, transactionally, without freshness-only session records.
-OAuth add flags, live logs and per-tool manager editing remain separate non-auth gaps.
+Server log-file capture, configuration-value resolution, connection lifecycle, extension registration
+and official conformance remain separate parity work. The pinned legacy manager likewise has no
+per-tool editing UI or interactive live log viewer.
 
 ## Tool selection
 

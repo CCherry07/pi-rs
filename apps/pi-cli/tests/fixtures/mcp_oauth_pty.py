@@ -75,7 +75,10 @@ def exercise(binary, origin, mode):
         environment = dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"], OAUTH_URL_FILE=str(root / "authorization-url"), TERM="xterm-256color")
         master, slave = pty.openpty()
         original = termios.tcgetattr(slave)
-        process = subprocess.Popen([str(binary), "--cwd", str(root), "--agent-dir", str(agent), "--no-approve", "mcp", "login", "account", "--timeout", "1" if mode == "timeout" else "10"], stdin=slave, stdout=slave, stderr=slave, env=environment)
+        piped = mode.startswith("pipe-")
+        timeout = "0.5" if mode == "pipe-timeout" else "1" if mode == "timeout" else "10"
+        arguments = [str(binary), "--cwd", str(root), "--agent-dir", str(agent), "--no-approve", "mcp", "login", "account", "--timeout", timeout]
+        process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL if piped else slave, stdout=slave, stderr=slave, env=environment)
         output = bytearray()
         acted = False
         deadline = time.monotonic() + 15
@@ -85,12 +88,15 @@ def exercise(binary, origin, mode):
                 ready, _, _ = select.select([master], [], [], 0.05)
                 if ready:
                     output.extend(os.read(master, 65536))
-                if acted or b"Waiting for callback;" not in output or termios.tcgetattr(slave)[3] & termios.ICANON:
+                input_ready = (root / "authorization-url").exists() if piped else b"Waiting for callback;" in output and not termios.tcgetattr(slave)[3] & termios.ICANON
+                if acted or not input_ready:
+                    continue
+                params = urllib.parse.parse_qs(urllib.parse.urlsplit((root / "authorization-url").read_text()).query)
+                if "state" not in params or "redirect_uri" not in params:
                     continue
                 acted = True
-                params = urllib.parse.parse_qs(urllib.parse.urlsplit((root / "authorization-url").read_text()).query)
                 callback = params["redirect_uri"][0] + "?" + urllib.parse.urlencode({"code": "fixture-code", "state": params["state"][0]})
-                if mode == "callback":
+                if mode in ("callback", "pipe-callback"):
                     with urllib.request.urlopen(callback, timeout=3) as response:
                         assert response.status == 200
                 elif mode == "paste":
@@ -99,13 +105,22 @@ def exercise(binary, origin, mode):
                     os.write(master, b"\x03")
             while select.select([master], [], [], 0)[0]:
                 output.extend(os.read(master, 65536))
-            assert acted, (mode, "never reached cancellable raw input", bytes(output))
+            assert acted, (mode, "never reached callback/input readiness", bytes(output))
+            if piped:
+                assert b"Waiting for callback;" not in output, "non-TTY login started a terminal reader"
             assert termios.tcgetattr(slave) == original, (mode, "terminal was not restored")
-            assert process.returncode == (0 if mode in ("callback", "paste") else 1), (mode, process.returncode, bytes(output))
+            assert process.returncode == (0 if mode in ("callback", "paste", "pipe-callback") else 1), (mode, process.returncode, bytes(output))
             assert b"fixture-code" not in output and b"fixture-token" not in output, (mode, "callback/token leaked")
             assert not (agent / "sessions").exists()
-            if mode in ("callback", "paste"):
+            if mode in ("callback", "paste", "pipe-callback"):
                 assert b"Signed in" in output and b"1 tools" in output, bytes(output)
+                if piped:
+                    # An already-authenticated non-TTY probe must not open the browser again.
+                    (root / "authorization-url").unlink()
+                    again = subprocess.run(arguments, stdin=subprocess.DEVNULL, capture_output=True, env=environment, timeout=5)
+                    assert again.returncode == 0, again.stderr
+                    assert not (root / "authorization-url").exists()
+                    assert b"fixture-token" not in again.stdout + again.stderr
             elif mode == "cancel":
                 assert b"cancelled" in output, bytes(output)
             else:
@@ -125,7 +140,7 @@ def main():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        for mode in ("callback", "paste", "cancel", "timeout"):
+        for mode in ("callback", "paste", "cancel", "timeout", "pipe-callback", "pipe-timeout"):
             exercise(binary, f"http://127.0.0.1:{server.server_port}", mode)
     finally:
         server.shutdown()

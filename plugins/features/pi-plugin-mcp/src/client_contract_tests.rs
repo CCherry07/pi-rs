@@ -326,6 +326,19 @@ async fn collision_names_remain_stable_when_list_order_or_exposure_changes() {
         let pool = McpToolSet::connect_with_policies(vec![(config, policy)])
             .await
             .unwrap();
+        let inventory = pool.offered_tools("fixture");
+        assert_eq!(inventory.len(), 2);
+        let raw = inventory.iter().find(|tool| tool.name == "a-b").unwrap();
+        assert_eq!(
+            raw.exposure,
+            if hide {
+                McpExposure::Hidden
+            } else {
+                McpExposure::Codemode
+            }
+        );
+        assert!(inventory.iter().any(|tool| tool.name == "a_b"));
+        assert!(pool.offered_tools("unknown").is_empty());
         let names: BTreeMap<_, _> = pool
             .tools()
             .into_iter()

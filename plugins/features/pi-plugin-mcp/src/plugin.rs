@@ -1,5 +1,7 @@
 //! Local MCP product plugin and management command; explicit client pools stay tool-only.
-use crate::{McpExposure, McpLibrary, McpScope, McpServerRow, McpToolSet};
+mod manager;
+
+use crate::{McpExposure, McpLibrary, McpScope, McpServerRow, McpServerState, McpToolSet};
 use async_trait::async_trait;
 use pi_core::PluginId;
 use pi_plugin::{
@@ -25,11 +27,13 @@ impl Plugin for McpProductPlugin {
         self.pool
             .plugin_with_tool_search_registration(self.library.register_tool_search)
             .register(context)?;
-        context.register_command(Arc::new(McpCommand {
+        let command = Arc::new(McpCommand {
             library: self.library.clone(),
             rows: self.rows.clone(),
             pool: self.pool.clone(),
-        }))
+        });
+        let completions = command.argument_completions();
+        context.register_command_with_completions(command, completions)
     }
 
     async fn session_start(
@@ -118,18 +122,18 @@ impl crate::McpOAuthPrompt for SemanticOAuthPrompt {
 }
 
 impl McpCommand {
-    fn server_state(&self, row: &McpServerRow) -> &'static str {
+    fn server_state(&self, row: &McpServerRow) -> McpServerState {
         if !row.enabled {
-            "disabled"
+            McpServerState::Disabled
         } else if self
             .pool
             .authorization_required()
             .iter()
             .any(|required| required.server == row.name)
         {
-            "needs sign-in"
+            McpServerState::NeedsAuth
         } else {
-            "connected"
+            McpServerState::Connected
         }
     }
     async fn test_connection(
@@ -208,141 +212,23 @@ impl McpCommand {
         )
         .await
     }
+}
 
-    async fn manage(&self, context: CommandContext) -> Result<CommandOutcome, CommandError> {
-        if self.rows.is_empty() {
-            context.ui.notify(
-                NoticeLevel::Info,
-                "No MCP servers configured. Use `pi mcp add` or edit mcp.json.",
-            )?;
-            return Ok(CommandOutcome::Handled);
-        }
-        let options = self
-            .rows
-            .iter()
-            .map(|row| {
-                format!(
-                    "{} · {} · {} · {}",
-                    row.name,
-                    self.server_state(row),
-                    row.exposure.as_str(),
-                    scope_label(row.scope)
-                )
-            })
-            .collect();
-        let Some(index) = context.ui.select("MCP servers", options).await? else {
-            return Ok(CommandOutcome::Handled);
-        };
-        let Some(row) = self.rows.get(index).cloned() else {
-            return Ok(CommandOutcome::Handled);
-        };
-        let actions = vec![
-            "Inspect".into(),
-            if row.enabled {
-                "Reconnect".into()
-            } else {
-                "Enable".into()
-            },
-            if row.enabled {
-                "Disable".into()
-            } else {
-                "Keep disabled".into()
-            },
-            "Change exposure".into(),
-            "Sign in".into(),
-            "Sign out".into(),
-        ];
-        let Some(action) = context
-            .ui
-            .select(format!("MCP server {}", row.name), actions)
-            .await?
-        else {
-            return Ok(CommandOutcome::Handled);
-        };
-        match action {
-            0 => {
-                let (direct, deferred, codemode) = self.pool.tool_exposure_counts(&row.name);
-                context.ui.notify(
-                    NoticeLevel::Info,
-                    format!(
-                        "{}\ntransport: {}\nscope: {}\nstate: {}\nexposure: {}\ntools: {direct} direct, {deferred} deferred, {codemode} codemode{}",
-                        row.name,
-                        row.transport,
-                        scope_label(row.scope),
-                        self.server_state(&row),
-                        row.exposure.as_str(),
-                        if self.pool.has_resources(&row.name) {
-                            "\nresources: available"
-                        } else {
-                            ""
-                        }
-                    ),
-                )?;
+fn tool_menu_options(tools: &[crate::client::McpOfferedTool], default: McpExposure) -> Vec<String> {
+    tools
+        .iter()
+        .map(|tool| {
+            let mut line = tool.name.clone();
+            if tool.exposure != default {
+                line.push_str(&format!(" [{}]", tool.exposure.as_str()));
             }
-            1 if row.enabled => self.reconnect_and_reload(&context, &row.name).await?,
-            1 => {
-                self.library
-                    .set_enabled(row.scope, &row.name, true)
-                    .map_err(CommandError::Execution)?;
-                self.reload_after_change(&context, format!("Enabled MCP server {:?}", row.name))
-                    .await?;
+            let description = tool.description.lines().next().unwrap_or_default();
+            if !description.is_empty() {
+                line.push_str(&format!(" — {description}"));
             }
-            2 if row.enabled => {
-                self.library
-                    .set_enabled(row.scope, &row.name, false)
-                    .map_err(CommandError::Execution)?;
-                self.reload_after_change(&context, format!("Disabled MCP server {:?}", row.name))
-                    .await?;
-            }
-            2 => {}
-            3 => {
-                let exposures = [
-                    McpExposure::Codemode,
-                    McpExposure::Deferred,
-                    McpExposure::Direct,
-                    McpExposure::Hidden,
-                ];
-                let Some(selected) = context
-                    .ui
-                    .select(
-                        format!("Exposure for {}", row.name),
-                        exposures
-                            .iter()
-                            .map(|exposure| exposure.as_str().to_string())
-                            .collect(),
-                    )
-                    .await?
-                else {
-                    return Ok(CommandOutcome::Handled);
-                };
-                let Some(exposure) = exposures.get(selected).copied() else {
-                    return Ok(CommandOutcome::Handled);
-                };
-                self.library
-                    .set_exposure(row.scope, &row.name, exposure)
-                    .map_err(CommandError::Execution)?;
-                self.reload_after_change(
-                    &context,
-                    format!(
-                        "Set MCP server {:?} exposure to {}",
-                        row.name,
-                        exposure.as_str()
-                    ),
-                )
-                .await?;
-            }
-            4 => self.login(&context, &row.name, None).await?,
-            5 => {
-                let message = self
-                    .library
-                    .logout(&row.name, None)
-                    .map_err(CommandError::Execution)?;
-                self.reload_after_change(&context, message).await?;
-            }
-            _ => {}
-        }
-        Ok(CommandOutcome::Handled)
-    }
+            line
+        })
+        .collect()
 }
 
 fn parse_scoped_name(arguments: &str) -> Result<(&str, McpScope), CommandError> {
@@ -367,7 +253,7 @@ fn scope_label(scope: McpScope) -> &'static str {
 }
 
 fn mcp_usage() -> String {
-    "Use /mcp [status|paths|reconnect <name>|enable <name> [--local]|disable <name> [--local]|exposure <name> <direct|codemode|deferred|hidden> [--local]|reload]".into()
+    "Use /mcp [status|paths|login [name]|logout [name]|reconnect [name]|enable <name> [--local]|disable <name> [--local]|exposure <name> <direct|codemode|deferred|hidden> [--local]|reload]".into()
 }
 
 #[async_trait]
@@ -376,7 +262,7 @@ impl Command for McpCommand {
         CommandSpec {
             name: "mcp".into(),
             description: "Manage MCP servers: inspect, reconnect, enable or disable, and change exposure".into(),
-            argument_hint: Some("[status|paths|reconnect <name>|enable <name>|disable <name>|exposure <name> <mode>|reload]".into()),
+            argument_hint: Some("[status|paths|login [name]|logout [name]|reconnect [name]|enable <name>|disable <name>|exposure <name> <mode>|reload]".into()),
         }
     }
     async fn execute(
@@ -395,6 +281,22 @@ impl Command for McpCommand {
                 () = signal.wait() => Err(CommandError::Aborted),
                 result = self.manage(context) => result,
             };
+        }
+        if matches!(arguments, "login" | "logout" | "reconnect") {
+            if let Some(row) = self.pick_server(&context, arguments != "reconnect").await? {
+                match arguments {
+                    "login" => self.login(&context, &row.name, None).await?,
+                    "logout" => {
+                        let message = self
+                            .library
+                            .logout(&row.name, None)
+                            .map_err(CommandError::Execution)?;
+                        self.reload_after_change(&context, message).await?;
+                    }
+                    _ => self.reconnect_and_reload(&context, &row.name).await?,
+                }
+            }
+            return Ok(CommandOutcome::Handled);
         }
         let output = match arguments {
             "reload" => {
@@ -428,7 +330,8 @@ impl Command for McpCommand {
                             if row.enabled {
                                 let (direct, deferred, codemode) = self.pool.tool_exposure_counts(&row.name);
                                 format!(
-                                    "{direct} direct tools · {deferred} deferred tools · {codemode} codemode tools{}",
+                                    "{} · {direct} direct tools · {deferred} deferred tools · {codemode} codemode tools{}",
+                                    self.server_state(row).as_str(),
                                     if self.pool.has_resources(&row.name) {
                                         " · resources available"
                                     } else {
@@ -463,6 +366,7 @@ impl Command for McpCommand {
             }
             _ if arguments.starts_with("reconnect ") => {
                 let name = arguments[10..].trim();
+                self.eligible_server(name, false)?;
                 self.reconnect_and_reload(&context, name).await?;
                 return Ok(CommandOutcome::Handled);
             }
@@ -522,6 +426,7 @@ impl Command for McpCommand {
                     .strip_prefix(if login { "login " } else { "logout " })
                     .unwrap_or_default();
                 let (name, scope) = parse_scoped_name(rest)?;
+                self.eligible_server(name, true)?;
                 let scope = (scope == McpScope::Project).then_some(scope);
                 if login {
                     self.login(&context, name, scope).await?;
@@ -534,11 +439,6 @@ impl Command for McpCommand {
                 }
                 return Ok(CommandOutcome::Handled);
             }
-            "login" | "logout" | "reconnect" => {
-                return Err(CommandError::InvalidArguments(
-                    "Name an MCP server. Login opens a browser when supported, with a pasted redirect fallback.".into(),
-                ));
-            }
             _ => return Err(CommandError::InvalidArguments(mcp_usage())),
         };
         context.ui.notify(NoticeLevel::Info, output)?;
@@ -549,6 +449,8 @@ impl Command for McpCommand {
 #[cfg(test)]
 mod tests {
     mod auth;
+    mod inventory;
+    mod management;
     use super::*;
     use pi_plugin::{
         ModelsContextAccess, PluginContextEpoch, PluginContextResult, SessionContextAccess,
@@ -628,19 +530,44 @@ mod tests {
         }
     }
 
+    #[test]
+    fn tool_menu_retains_remote_names_and_shows_effective_exposure_read_only() {
+        let tools = [
+            crate::client::McpOfferedTool {
+                name: "a-b".into(),
+                description: "First line\nNot in menu".into(),
+                exposure: McpExposure::Hidden,
+            },
+            crate::client::McpOfferedTool {
+                name: "a_b".into(),
+                description: String::new(),
+                exposure: McpExposure::Codemode,
+            },
+        ];
+        assert_eq!(
+            tool_menu_options(&tools, McpExposure::Codemode),
+            ["a-b [hidden] — First line", "a_b"]
+        );
+    }
+
     #[tokio::test]
     async fn semantic_manager_cancels_inspects_and_hands_off_after_policy_reload() {
         for (answers, expected_exposure, changed) in [
             (vec![None], "codemode", false),
-            (vec![Some(0), None], "codemode", false),
-            (vec![Some(0), Some(0)], "codemode", false),
-            (vec![Some(0), Some(3), None], "codemode", false),
+            (vec![Some(0), None, None], "codemode", false),
+            (vec![Some(0), Some(0), None, None], "codemode", false),
+            (vec![Some(0), Some(1), None, None], "codemode", false),
+            (vec![Some(0), Some(3), None, None, None], "codemode", false),
+            (
+                vec![Some(0), Some(3), Some(0), None, None],
+                "codemode",
+                false,
+            ),
             (vec![Some(0), Some(3), Some(2)], "direct", true),
         ] {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("mcp.json");
-            let original =
-                r#"{"future":true,"mcpServers":{"docs":{"command":"unused","enabled":false}}}"#;
+            let original = r#"{"future":true,"mcpServers":{"docs":{"command":"unused"}}}"#;
             std::fs::write(&path, original).unwrap();
             let library = McpLibrary::new(directory.path(), None, false);
             let command = McpCommand {

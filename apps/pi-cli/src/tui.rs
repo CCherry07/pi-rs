@@ -697,6 +697,7 @@ struct App {
     status: String,
     queue: QueueSnapshot,
     command_specs: Vec<CommandSpec>,
+    command_completions: Vec<pi_plugin::CommandCompletions>,
     model_specs: Vec<ModelSpec>,
     registered_plugins: RegisteredPluginInventory,
     session_choices: Vec<SessionChoice>,
@@ -820,6 +821,7 @@ impl App {
             status: status.to_string(),
             queue: snapshot.queue.clone(),
             command_specs: session.catalog().command_specs(),
+            command_completions: session.catalog().command_completions(),
             model_specs: session.catalog().available_models(),
             registered_plugins,
             session_choices,
@@ -2255,6 +2257,8 @@ fn push_history_message(transcript: &mut Vec<TranscriptItem>, message: &pi_sessi
 
 #[cfg(test)]
 mod tests {
+    mod command_completions;
+
     use super::*;
     use pi_session::{
         AgentSessionOptions, CompactionEntry, MultiSessionManager, PreparedSessionGeneration,
@@ -2341,6 +2345,7 @@ mod tests {
                 description: "Review changes against repository standards".to_string(),
                 argument_hint: Some("[task]".to_string()),
             }],
+            command_completions: Vec::new(),
             model_specs: Vec::new(),
             registered_plugins: RegisteredPluginInventory::default(),
             session_choices: Vec::new(),

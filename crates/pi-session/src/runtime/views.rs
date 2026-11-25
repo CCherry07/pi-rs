@@ -134,6 +134,10 @@ impl<'a> SessionCatalog<'a> {
         self.runtime.command_specs()
     }
 
+    pub fn command_completions(&self) -> Vec<pi_plugin::CommandCompletions> {
+        self.runtime.command_completions()
+    }
+
     pub fn command_catalog(&self) -> Vec<pi_plugin::CommandCatalogEntry> {
         self.runtime.command_catalog()
     }

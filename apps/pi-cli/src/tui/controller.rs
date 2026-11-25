@@ -820,7 +820,40 @@ pub(super) fn suggestions_for_app(app: &App) -> Vec<CommandSuggestion> {
     {
         return resume_suggestions(query, &app.session_choices);
     }
+    let arguments = argument_suggestions(app, &input);
+    if !arguments.is_empty() {
+        return arguments;
+    }
     command_suggestions(&input, &app.command_specs)
+}
+
+fn argument_suggestions(app: &App, input: &str) -> Vec<CommandSuggestion> {
+    let Some((name, prefix)) = input
+        .trim_start()
+        .strip_prefix('/')
+        .and_then(|input| input.split_once(char::is_whitespace))
+    else {
+        return Vec::new();
+    };
+    let Some(completions) = app
+        .command_completions
+        .iter()
+        .find(|entry| entry.name == name)
+    else {
+        return Vec::new();
+    };
+    completions
+        .matching(prefix)
+        .into_iter()
+        .map(|item| CommandSuggestion {
+            invocation: format!("/{name} {}", item.value),
+            label: Some(item.label.clone()),
+            description: item.description.clone().unwrap_or_default(),
+            argument_hint: None,
+            // Choosing metadata completes the draft; only a subsequent Enter executes it.
+            apply_on_enter: false,
+        })
+        .collect()
 }
 
 pub(super) fn completion_panel_visible(app: &App) -> bool {
@@ -828,7 +861,8 @@ pub(super) fn completion_panel_visible(app: &App) -> bool {
     app.dismissed_completion.as_deref() != Some(input.as_str())
         && (command_query(&input).is_some()
             || model_query(&input).is_some()
-            || resume_query(&input).is_some())
+            || resume_query(&input).is_some()
+            || !argument_suggestions(app, &input).is_empty())
 }
 
 pub(super) fn resume_suggestions(query: &str, choices: &[SessionChoice]) -> Vec<CommandSuggestion> {

@@ -63,7 +63,12 @@ pub struct McpDocument {
 #[serde(rename_all = "camelCase")]
 pub struct McpServerRow {
     pub name: String,
+    /// Scope receiving policy edits; may differ from the transport's defining scope.
     pub scope: McpScope,
+    pub defining_scope: McpScope,
+    pub supports_oauth: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_provider: Option<String>,
     pub transport: String,
     pub enabled: bool,
     pub exposure: McpExposure,
@@ -76,6 +81,8 @@ pub struct McpServerDefinition {
     pub transport: McpTransport,
     pub exposure: Option<McpExposure>,
     pub description: Option<String>,
+    /// Unresolved settings: authoring validates them without resolving secrets.
+    pub oauth: Option<crate::McpOAuthConfig>,
 }
 
 impl McpServerDefinition {
@@ -85,6 +92,7 @@ impl McpServerDefinition {
             transport,
             exposure: None,
             description: None,
+            oauth: None,
         }
     }
 
@@ -95,6 +103,11 @@ impl McpServerDefinition {
 
     pub fn description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
+        self
+    }
+
+    pub fn oauth(mut self, oauth: crate::McpOAuthConfig) -> Self {
+        self.oauth = Some(oauth);
         self
     }
 
@@ -131,6 +144,9 @@ impl McpServerDefinition {
         if let Some(description) = &self.description {
             object.insert("description".into(), json!(description));
         }
+        if let Some(oauth) = &self.oauth {
+            object.insert("oauth".into(), json!(oauth));
+        }
         Value::Object(object)
     }
 }
@@ -142,6 +158,17 @@ pub enum McpServerState {
     NeedsAuth,
     Disabled,
     Failed,
+}
+
+impl McpServerState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Connected => "connected",
+            Self::NeedsAuth => "needs sign-in",
+            Self::Disabled => "disabled",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -156,6 +183,8 @@ pub struct McpServerReport {
     pub exposure: McpExposure,
     pub transport: String,
     pub state: McpServerState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_provider: Option<String>,
     pub tools: Vec<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub tool_exposure: BTreeMap<String, McpExposure>,
@@ -277,6 +306,31 @@ impl McpLibrary {
         }
     }
 
+    pub(crate) fn unknown_server_message(&self, name: &str) -> String {
+        let names = self
+            .inspection_entries()
+            .0
+            .into_iter()
+            .map(|entry| entry.config.name().to_owned())
+            .collect::<Vec<_>>();
+        let suggestion = names
+            .iter()
+            .find(|candidate| name_distance(candidate, name) <= 2)
+            .map(|candidate| format!(" Did you mean {candidate:?}?"))
+            .unwrap_or_default();
+        let ignored = self.cwd.as_ref().filter(|cwd| !self.trusted && cwd.join(".pi/mcp.json").exists())
+            .map(|cwd| format!(" {} is ignored because the project is not trusted; start pi in the project to trust it.", cwd.join(".pi/mcp.json").display()))
+            .unwrap_or_default();
+        format!(
+            "No MCP server named {name:?}.{suggestion}{ignored} Configured: {}.",
+            if names.is_empty() {
+                "none".into()
+            } else {
+                names.join(", ")
+            }
+        )
+    }
+
     /// Adds request-time provider token lookup while retaining this library's
     /// durable OAuth store.
     pub fn with_provider_token_resolver(
@@ -355,7 +409,7 @@ impl McpLibrary {
             .entries()?
             .into_iter()
             .find(|entry| entry.config.name() == name)
-            .ok_or("MCP server not found")?;
+            .ok_or_else(|| self.unknown_server_message(name))?;
         if scope.is_some_and(|scope| scope != entry.scope) {
             return Err("MCP server is defined in another scope; omit --local for an inherited global server".into());
         }
@@ -626,6 +680,7 @@ impl McpLibrary {
             exposure: policy.exposure,
             transport: describe_transport(entry.config.transport()),
             state: McpServerState::Disabled,
+            auth_provider: entry.config.auth_provider().map(str::to_owned),
             tools: Vec::new(),
             tool_exposure: BTreeMap::new(),
             resources: false,
@@ -944,6 +999,9 @@ impl Entry {
         McpServerRow {
             name: self.config.name().to_string(),
             scope: self.management_scope,
+            defining_scope: self.scope,
+            supports_oauth: self.config.supports_oauth(),
+            auth_provider: self.config.auth_provider().map(str::to_owned),
             enabled: self.config.enabled(),
             exposure: self.config.policy().exposure,
             transport: match self.config.transport() {
@@ -954,6 +1012,23 @@ impl Entry {
             .into(),
         }
     }
+}
+
+fn name_distance(left: &str, right: &str) -> usize {
+    let right = right.chars().collect::<Vec<_>>();
+    let mut previous = (0..=right.len()).collect::<Vec<_>>();
+    for (i, a) in left.chars().enumerate() {
+        let mut current = vec![i + 1];
+        for (j, b) in right.iter().enumerate() {
+            current.push(
+                (previous[j + 1] + 1)
+                    .min(current[j] + 1)
+                    .min(previous[j] + usize::from(a != *b)),
+            );
+        }
+        previous = current;
+    }
+    previous[right.len()]
 }
 
 fn merge_entry(
@@ -1478,6 +1553,52 @@ mod tests {
             remaining["mcpServers"]["bad"]["args"],
             json!(["no command"])
         );
+    }
+
+    #[test]
+    fn management_oauth_authoring_validates_without_resolving_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = McpLibrary::new(dir.path(), None, false);
+        let oauth = crate::McpOAuthConfig {
+            client_id: Some("fixture".into()),
+            client_secret: Some("${MCP_SECRET_NOT_READ_WHILE_AUTHORING}".into()),
+            ..Default::default()
+        };
+        let definition = McpServerDefinition::new(
+            "account",
+            McpTransport::Http {
+                url: "https://example.invalid/mcp".into(),
+                headers: BTreeMap::new(),
+            },
+        )
+        .oauth(oauth.clone());
+        assert!(!format!("{definition:?}").contains("MCP_SECRET_NOT_READ_WHILE_AUTHORING"));
+        assert!(!library.add(McpScope::Global, &definition).unwrap());
+        let path = dir.path().join("mcp.json");
+        let before = fs::read(&path).unwrap();
+        let value: Value = serde_json::from_slice(&before).unwrap();
+        assert_eq!(
+            value["mcpServers"]["account"]["oauth"]["clientSecret"],
+            "${MCP_SECRET_NOT_READ_WHILE_AUTHORING}"
+        );
+        let invalid = McpServerDefinition::new(
+            "account",
+            McpTransport::Stdio {
+                command: "never-started".into(),
+                args: vec![],
+                env: BTreeMap::new(),
+                cwd: None,
+            },
+        )
+        .oauth(oauth);
+        assert!(
+            library
+                .add(McpScope::Global, &invalid)
+                .unwrap_err()
+                .contains("only valid for HTTP")
+        );
+        assert_eq!(fs::read(path).unwrap(), before);
+        assert!(!dir.path().join("mcp-auth.json").exists());
     }
 
     #[test]

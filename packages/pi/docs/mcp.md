@@ -9,7 +9,9 @@ means `codemode`, matching Pi. Set `"exposure": "direct"` explicitly to declare 
 Codemode (including its `codemode-deferred` alias) is supported by the independent
 [`pi-plugin-codemode`](codemode.md) script runtime, included in the coding product.
 Top-level `autoEnableCodemode` controls automatic script-entry activation and defaults to `true`.
-`oauth` and `auth` currently produce configuration diagnostics instead of being silently treated as supported.
+HTTP `oauth` settings and global-only `auth.provider` are supported by the transport layer.
+Provider tokens use a host-injected resolver; Coding/CLI install their shared stored-first credential
+resolver without borrowing the selected model's explicit CLI key.
 
 ## Explicit-server API
 
@@ -151,14 +153,88 @@ its transport and credentials. A project override cannot introduce credential fi
 - `read(scope)` returns the raw document, revision, merged server rows and diagnostics.
 - `save(scope, revision, content)` validates and atomically saves with external-change checks,
   preserving unknown JSON fields supplied by the caller.
+- `add`, `remove`, `set_enabled`, and `set_exposure` are the typed management seam used by
+  frontends. They retain unrelated JSON and wildcard declaration order, lock per scope, detect
+  external changes, and atomically replace the file. Add validates the new definition; add/remove
+  preserve unrelated invalid entries so the file can be repaired. Policy edits validate inherited
+  configuration before writing. `contains_definition` checks a scope without confusing inherited rows.
+- `inspect().await` probes configured servers independently and returns serializable state, tools,
+  resource availability, and sanitized failures. A failed server does not hide disabled or healthy
+  rows, including when another entry is malformed; configuration diagnostics make the inspection
+  unsuccessful. Reports include hidden tools, effective per-tool exposure differences and project
+  override provenance and optional `authProvider`. Inspection does not list resource contents or
+  publish tools into a registry.
 - `test(name)` explicitly connects one saved, enabled server, reports its tools and shuts down.
-- `prepare().await` connects the enabled servers and returns an `Arc<dyn Plugin>` with
-  their tools and `/mcp status|paths|test|reload` commands.
+- `prepare().await` connects the enabled servers and returns an `Arc<dyn Plugin>` with their tools
+  and `/mcp` management. Interactive `/mcp` offers state-dependent actions, a read-only Tools view,
+  reconnect, sign-in/out, enable/disable, and server-wide exposure. Tools retain their remote names,
+  first description line and differing effective exposure, including hidden tools; selecting one
+  never edits policy. Back/cancel returns to the enclosing selector without writing or reloading.
+  Global servers offer trusted project-only enable/disable overrides without copying credentials.
+  Omitted login/logout/reconnect names select the sole eligible (or sole pending OAuth) server,
+  otherwise a selector; noninteractive ambiguous requests must name a server. Native CLI argument
+  completion uses plugin-owned generation snapshots, never a live registry mutation.
 
-Reads and saves neither connect nor construct sessions. Preparation completes before a host
-publishes its runtime generation; a failure must leave the previous generation active.
-Commands use ordinary Pi plugin capabilities. Saving configuration does not mutate a live
-registry; `/mcp reload` requests the existing whole-session replacement transaction.
+Reads and saves neither connect nor construct sessions. Shell-level inspection is explicit and does
+not construct a session. Preparation completes before a host publishes its runtime generation; a
+failure must leave the previous generation active. Commands use ordinary Pi plugin capabilities.
+Saving configuration does not mutate a live registry: enable/disable, exposure, reconnect, and
+`/mcp reload` all request the existing whole-session replacement transaction after their candidate
+configuration or connection check succeeds. Reload failure preserves the active generation, not
+its prior disk configuration: saved edits remain on disk, and the error explains retry/revert steps.
+
+## Shell management
+
+The native CLI exposes the session-free control plane through `pi mcp`:
+
+```text
+pi mcp add <server> [--env KEY=VALUE] -- <command> [args...]
+pi mcp add <server> --url <url> [--header KEY=VALUE]
+pi mcp remove <server> [--local]
+pi mcp list [--json]
+pi mcp login <server> [--local]
+pi mcp logout <server> [--local]
+```
+
+`--local` targets `<cwd>/.pi/mcp.json`; otherwise commands target
+`<agent-dir>/mcp.json`. Explicit local authoring is allowed before trust, but list/session loading
+continues to ignore that file until the normal project-trust service says the project is trusted.
+`list` exits `1` when configuration or any enabled connection fails and `0` when every enabled
+server connects; disabled servers are successful rows. JSON includes `servers`, `errors`, and an
+optional untrusted-project `note`. Unknown login/logout names include nearby-name suggestions and
+configured-name/untrusted-project guidance. Add/remove never create a session or require model credentials.
+HTTP authoring accepts `--oauth-client-id`, `--oauth-client-secret`, `--oauth-callback-port`,
+`--oauth-client-name` and `--oauth-client-registration auto|cimd|dcr`. Validation does not resolve
+secret references, run commands, sign in, or create a credential store. Invalid options leave disk unchanged.
+
+`McpLibrary::login` validates the defining scope, probes first, hands a typed auth challenge to the
+installed `McpOAuthHost`, and reconnects after the real exchange. Already-authorized servers skip UI.
+The CLI's native host owns browser launch and loopback listening, with hidden pasted-redirect fallback;
+the default embedding host remains manual (`127.0.0.1:53682/callback` unless configured). Native callbacks
+use an ephemeral port by default and honor configured URL/port plus the actual CIMD redirect path.
+`begin_login` remains available for low-level callers. No token is fabricated when authorization starts.
+Shell login supports positive finite fractional `--timeout <seconds>` (default 300, within Rust's
+representable duration range); semantic login is bounded to 300 seconds and observes cancellation.
+Non-TTY shell input still permits browser callbacks and already-authorized probes; only pasted input
+is disabled, without consuming piped stdin or starting a terminal reader. Both semantic login and logout request a complete generation reload.
+`logout` removes only the selected name/URL credentials. Provider/header auth is rejected by these
+commands; `--local` requires a trusted project-defined transport rather than an inherited policy override.
+Inspection and generation connections share private `<agent-dir>/mcp-auth.json` state. Coding supplies
+a request-time stored-first provider-token resolver; no Coding policy or browser code lives here.
+
+Product preparation retains only typed authorization-required servers as pending so `/mcp` remains
+reachable. Inspection reports `needs-auth` as unsuccessful; unrelated config/connection failures remain
+fatal to generation preparation. Strict tool-only pools, including ACP, still return a typed error.
+`McpCredentialWatch` exposes opaque revisions for eligible identities, excluding pending authorization
+and unrelated credentials. Coding captures revisions before connecting and asks its generic session
+owner to replace the entire generation before the next idle submission if credentials changed.
+ACP has no browser or local discovery and reuses credentials only when its host explicitly injects a store.
+
+This is not a full parity claim. Server log-file capture, command-backed configuration resolution,
+connection lifecycle and extension-registration contracts, and official conformance evidence remain
+separate work. Per-tool editing and an interactive live log viewer are not provided by the pinned
+legacy manager either; edit `toolExposure` in the file. Tests use deterministic local fixtures,
+never real-account sign-ins.
 
 ## Configuration and boundaries
 

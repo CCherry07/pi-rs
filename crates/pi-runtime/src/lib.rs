@@ -1049,6 +1049,13 @@ impl PiRuntime {
         self.current_generation().agent.registries().command_specs()
     }
 
+    pub fn command_completions(&self) -> Vec<pi_plugin::CommandCompletions> {
+        self.current_generation()
+            .agent
+            .registries()
+            .command_completions()
+    }
+
     pub fn command_catalog(&self) -> Vec<pi_plugin::CommandCatalogEntry> {
         self.current_generation()
             .agent
