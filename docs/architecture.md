@@ -1998,18 +1998,25 @@ registers the plugin factory in each generation.
 
 Current `legacy/pi/packages/coding-agent/src/extensions/mcp` provides built-in MCP, with
 server instructions attached to tool namespaces and codemode/deferred/direct exposure.
-Rust uses Pi's codemode default while retaining generation-based connection ownership;
-it does not claim compatibility with Pi's asynchronous exposure or interactive MCP manager.
+Rust uses Pi's codemode default while retaining generation-based connection ownership. Its shell
+add/remove/list subset and interactive inspect, reconnect, enable/disable and server-exposure
+operations use typed management and semantic UI seams. These adapt current Pi behaviors, not the
+full legacy UI: per-tool editing, logs and OAuth remain separate work. Asynchronous connection
+publication remains a deliberate generation-based difference.
 The complete Rust implementation lives in
 `plugins/features/pi-plugin-mcp`, with client, config, library and product-plugin modules rather
 than a separate `pi-mcp` crate or an SDK implementation. `pi-plugin-mcp::config` owns document
 parsing, static transport validation, environment-reference syntax and connection-time path
 resolution behind validated entries and an explicit configuration-directory/default-cwd context.
 `pi_plugin_mcp::McpLibrary` owns independent `<agent-dir>/mcp.json` and `<cwd>/.pi/mcp.json` files,
-scoped merging, revision-safe management and preparation of tools plus `/mcp` commands. It consumes
-a host-resolved trust decision and enforces it before project reads/writes; it has no dependency on
-`pi-coding`, `pi-acp`, `pi-session`, or terminal/frontend types. The Desktop adapter resolves shared
-project trust and calls that library directly. MCP does not live in `settings.json`.
+scoped merging, revision-safe management and preparation of tools plus `/mcp` commands. Its public
+management Interface owns typed add/remove/policy mutations and independent status probes; frontends
+do not parse, merge, validate, or rewrite MCP configuration themselves. It consumes a host-resolved
+trust decision and enforces it before project reads/writes; explicit shell authoring constructs a
+trusted write view only for the requested `--local` mutation, while list/session discovery still use
+the persisted host decision. The crate has no dependency on `pi-coding`, `pi-acp`, `pi-session`, or
+terminal/frontend types. Desktop and CLI Adapters resolve project trust and call that library directly.
+MCP does not live in `settings.json`.
 Documents use `mcpServers`, keyed by server name, with an optional `version: 1` marker. Each entry has
 `type: "stdio"` (command, args, env, cwd) or `type: "http"` (url, headers), and optional
 `enabled` (default true). HTTP entries may also select `oauth` client settings or global-only
@@ -2021,13 +2028,20 @@ Unknown fields survive management edits. Full project transport entries replace 
 entry by name. Entries without command/url/type may override only enabled/exposure/toolExposure
 of an existing global server, preserving that server's credentials without allowing project-defined
 credential fields. A standalone disabled global placeholder remains a Rust compatibility extension.
-Untrusted project files are neither read nor changed; `mcp.json` itself triggers trust.
+Untrusted project files are neither loaded nor changed during session discovery; the explicit
+shell authoring exception above does not persist trust. `mcp.json` itself triggers trust.
 
-Disk reads and saves do not initialize sessions or connect. Saves validate the document, compare
+Disk reads and saves do not initialize sessions or connect. Full-document saves validate the document, compare
 a content revision while holding an advisory lock, and atomically replace a private (0600 on Unix)
-file. Invalid JSON remains readable/editable. Authentication values should use `${VAR}`,
+file. Typed add/remove and policy edits retain unrelated JSON and wildcard declaration order and
+reuse that same atomic transaction. Add validates the new definition; add/remove preserve unrelated
+invalid entries to permit repair. Policy edits still validate inherited configuration. `inspect`
+probes servers independently and returns status/tools/resources/errors without constructing a
+session. Malformed entries yield diagnostics without suppressing valid rows; generation preparation
+remains strict. Reports inventory hidden tools and retain defining-scope/project-override provenance
+without fetching resource contents. Invalid JSON remains readable/editable. Authentication values should use `${VAR}`,
 `${env:VAR}` or whole-value `$VAR`; no shell evaluation occurs. Expansion happens only when a
-server connects, not when configuration is listed or saved. Relative explicit stdio cwd now resolves
+server connects (including explicit inspection), not when raw configuration is read or saved. Relative explicit stdio cwd now resolves
 from the active session cwd, matching Pi; omitted cwd uses that directory too. Existing configurations
 that intended a path relative to the configuration file should use an absolute path.
 Transport debug/error surfaces omit header, argument, URL and secret values. Static headers retain
@@ -2056,8 +2070,13 @@ credential merely by gaining project trust.
 `ProductSessionFactory` reloads files after trust resolution and prepares a fresh connected pool
 for every candidate product generation. The immutable local-library MCP plugin owns discovered tools plus the
 registered `/mcp` command. Explicit `McpToolSet` callers such as ACP instead receive tools only and
-never trigger local-file discovery or command registration. Connection, discovery, registration or configuration failure rejects
-the candidate without swapping the current generation. Pool ownership is reference-counted;
+never trigger local-file discovery or command registration. The CLI's `pi mcp add/remove/list` path
+runs before product/session construction and preserves command-specific exit codes. Bare `/mcp` uses
+semantic plugin selectors; reconnect proves the named connection first, while policy changes save the
+candidate file, then request the existing whole-session reload. Connection, discovery, registration
+or configuration failure rejects the candidate without swapping the current generation. Configuration
+already saved on disk remains pending; errors direct the user to retry reload or revert those edits.
+Pool ownership is reference-counted;
 retiring the last generation owner cancels its transports and child processes. Each server has
 30-second connection and discovery bounds. Request cancellation uses the SDK's negotiated
 notification/stream-close semantics. Server-returned tool content retains normal tool semantics.
