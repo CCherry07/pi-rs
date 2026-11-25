@@ -7,19 +7,29 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::config::{MAX_CONFIG_BYTES, McpConfigContext, McpConfigEntry, parse_document};
-use crate::policy::McpServerPolicy;
+use crate::policy::{McpExposure, McpServerPolicy};
 use crate::{
     McpClientAuth, McpOAuthCredentialStore, McpOAuthError, McpOAuthRedirect, McpOAuthSignIn,
     McpProviderTokenResolver, McpServerConfig, McpToolSet, McpTransport,
 };
 use pi_core::AbortSignal;
+use futures::future::join_all;
 use pi_plugin::Plugin;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::plugin::McpProductPlugin;
 
 const EMPTY: &str = "{\n  \"version\": 1,\n  \"mcpServers\": {}\n}\n";
+
+/// Optional OAuth control-plane Adapter. Transport/auth implementations attach here; the library
+/// never fabricates authorization behavior when no Adapter is installed.
+#[async_trait::async_trait]
+pub trait McpAuthorization: Send + Sync {
+    async fn login(&self, server: &str, scope: McpScope) -> Result<String, String>;
+    async fn logout(&self, server: &str, scope: McpScope) -> Result<String, String>;
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -33,6 +43,7 @@ pub struct McpLibrary {
     agent_dir: PathBuf,
     cwd: Option<PathBuf>,
     trusted: bool,
+    authorization: Option<Arc<dyn McpAuthorization>>,
     pub(crate) register_tool_search: bool,
     client_auth: McpClientAuth,
 }
@@ -56,10 +67,127 @@ pub struct McpServerRow {
     pub scope: McpScope,
     pub transport: String,
     pub enabled: bool,
+    pub exposure: McpExposure,
+}
+
+/// A typed server definition accepted by the management control plane.
+#[derive(Clone, Debug)]
+pub struct McpServerDefinition {
+    pub name: String,
+    pub transport: McpTransport,
+    pub exposure: Option<McpExposure>,
+    pub description: Option<String>,
+}
+
+impl McpServerDefinition {
+    pub fn new(name: impl Into<String>, transport: McpTransport) -> Self {
+        Self {
+            name: name.into(),
+            transport,
+            exposure: None,
+            description: None,
+        }
+    }
+
+    pub fn exposure(mut self, exposure: McpExposure) -> Self {
+        self.exposure = Some(exposure);
+        self
+    }
+
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    fn value(&self) -> Value {
+        let mut object = Map::new();
+        match &self.transport {
+            McpTransport::Http { url, headers } => {
+                object.insert("url".into(), json!(url));
+                if !headers.is_empty() {
+                    object.insert("headers".into(), json!(headers));
+                }
+            }
+            McpTransport::Stdio {
+                command,
+                args,
+                env,
+                cwd,
+            } => {
+                object.insert("command".into(), json!(command));
+                if !args.is_empty() {
+                    object.insert("args".into(), json!(args));
+                }
+                if !env.is_empty() {
+                    object.insert("env".into(), json!(env));
+                }
+                if let Some(cwd) = cwd {
+                    object.insert("cwd".into(), json!(cwd));
+                }
+            }
+        }
+        if let Some(exposure) = self.exposure {
+            object.insert("exposure".into(), json!(exposure.as_str()));
+        }
+        if let Some(description) = &self.description {
+            object.insert("description".into(), json!(description));
+        }
+        Value::Object(object)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum McpServerState {
+    Connected,
+    Disabled,
+    Failed,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerReport {
+    pub name: String,
+    pub scope: McpScope,
+    pub source: PathBuf,
+    #[serde(rename = "override", skip_serializing_if = "Option::is_none")]
+    pub project_override: Option<PathBuf>,
+    pub enabled: bool,
+    pub exposure: McpExposure,
+    pub transport: String,
+    pub state: McpServerState,
+    pub tools: Vec<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub tool_exposure: BTreeMap<String, McpExposure>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub resources: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpInspection {
+    pub servers: Vec<McpServerReport>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+}
+
+impl McpInspection {
+    pub fn is_ok(&self) -> bool {
+        self.errors.is_empty()
+            && self
+                .servers
+                .iter()
+                .all(|server| server.state != McpServerState::Failed)
+    }
 }
 
 struct Entry {
+    /// Scope that owns the transport and its expansion provenance.
     scope: McpScope,
+    /// Scope that owns the effective policy and should receive management writes.
+    management_scope: McpScope,
     config: McpConfigEntry,
 }
 
@@ -71,6 +199,7 @@ impl McpLibrary {
             agent_dir: agent_dir.into(),
             cwd: cwd.map(Path::to_path_buf),
             trusted,
+            authorization: None,
             register_tool_search: true,
             client_auth: McpClientAuth::default().with_oauth_store(McpOAuthCredentialStore::new(
                 agent_dir.join("mcp-auth.json"),
@@ -100,6 +229,29 @@ impl McpLibrary {
     pub fn with_tool_search_registration(mut self, enabled: bool) -> Self {
         self.register_tool_search = enabled;
         self
+    }
+
+    /// Installs the product's real OAuth Adapter for shell and `/mcp` login/logout operations.
+    pub fn with_authorization(mut self, authorization: Arc<dyn McpAuthorization>) -> Self {
+        self.authorization = Some(authorization);
+        self
+    }
+
+    pub async fn login(&self, name: &str, scope: McpScope) -> Result<String, String> {
+        self.path(scope)?;
+        let authorization = self
+            .authorization
+            .as_ref()
+            .ok_or("MCP OAuth login is not available in this build; no credentials were changed")?;
+        authorization.login(name, scope).await
+    }
+
+    pub async fn logout(&self, name: &str, scope: McpScope) -> Result<String, String> {
+        self.path(scope)?;
+        let authorization = self.authorization.as_ref().ok_or(
+            "MCP OAuth logout is not available in this build; no credentials were changed",
+        )?;
+        authorization.logout(name, scope).await
     }
 
     pub(crate) fn path(&self, scope: McpScope) -> Result<PathBuf, String> {
@@ -143,41 +295,7 @@ impl McpLibrary {
                 auto_enable_codemode = value;
             }
             for config in document.servers {
-                let name = config.name().to_string();
-                if scope == McpScope::Project && config.has_provider_auth() {
-                    return Err(format!(
-                        "MCP server {name}: auth is only allowed in global MCP configuration"
-                    ));
-                }
-                if scope == McpScope::Project && config.is_override() {
-                    let base = merged.get(&name).ok_or_else(|| {
-                        format!(
-                            "MCP server {name}: a project policy override needs a global server"
-                        )
-                    })?;
-                    let entry = Entry {
-                        scope: base.scope,
-                        config: config.apply_override(&base.config)?,
-                    };
-                    merged.insert(name, entry);
-                    continue;
-                }
-                // Keep existing standalone disabled placeholders as a Rust compatibility extension.
-                if config.is_override() && config.enabled() {
-                    return Err(format!(
-                        "MCP server {name}: enabled server needs command or url"
-                    ));
-                }
-                let namespace = name.replace('-', "_");
-                if let Some(previous) = merged
-                    .keys()
-                    .find(|previous| **previous != name && previous.replace('-', "_") == namespace)
-                {
-                    return Err(format!(
-                        "MCP server {name}: namespace conflicts with {previous}"
-                    ));
-                }
-                merged.insert(name, Entry { scope, config });
+                merge_entry(&mut merged, scope, config)?;
             }
         }
         Ok((merged.into_values().collect(), auto_enable_codemode))
@@ -202,6 +320,232 @@ impl McpLibrary {
             diagnostic,
             servers,
         })
+    }
+
+    /// Checks the named scope's raw definition without conflating inherited server rows.
+    pub fn contains_definition(&self, scope: McpScope, name: &str) -> Result<bool, String> {
+        let content = read_document(&self.path(scope)?)?.unwrap_or_else(|| "{}".into());
+        let mut document = editable_document(&content)?;
+        Ok(server_object_mut(&mut document)?.contains_key(name))
+    }
+
+    /// Add or replace one validated server, preserving unrelated fields and even invalid entries
+    /// so management can repair a file that cannot currently prepare a generation.
+    pub fn add(&self, scope: McpScope, server: &McpServerDefinition) -> Result<bool, String> {
+        let value = server.value();
+        let checked = parse_document(&json!({"mcpServers": {&server.name: &value}}).to_string())?;
+        if checked.servers[0].is_override() {
+            return Err("An added MCP server needs command or url".into());
+        }
+        let current = self.read(scope)?;
+        let mut document = if current.revision == "missing" {
+            json!({})
+        } else {
+            editable_document(&current.content)?
+        };
+        let servers = server_object_mut(&mut document)?;
+        if servers.keys().any(|name| {
+            name != &server.name && name.replace('-', "_") == server.name.replace('-', "_")
+        }) {
+            return Err(format!(
+                "MCP server {}: namespace conflicts with another server",
+                server.name
+            ));
+        }
+        let replaced = servers.insert(server.name.clone(), value).is_some();
+        self.replace_document(
+            scope,
+            &current.revision,
+            &render_document(&document)?,
+            false,
+        )?;
+        Ok(replaced)
+    }
+
+    /// Remove one server from its defining scope. Missing entries do not write a file.
+    pub fn remove(&self, scope: McpScope, name: &str) -> Result<bool, String> {
+        let current = self.read(scope)?;
+        let mut document = editable_document(&current.content)?;
+        let servers = server_object_mut(&mut document)?;
+        if servers.shift_remove(name).is_none() {
+            return Ok(false);
+        }
+        self.replace_document(
+            scope,
+            &current.revision,
+            &render_document(&document)?,
+            false,
+        )?;
+        Ok(true)
+    }
+
+    /// Enable or disable a server in one scope. A project patch may override a global server.
+    pub fn set_enabled(&self, scope: McpScope, name: &str, enabled: bool) -> Result<(), String> {
+        self.patch_policy(scope, name, |server, is_override| {
+            if enabled && !is_override {
+                server.remove("enabled");
+            } else {
+                server.insert("enabled".into(), json!(enabled));
+            }
+        })
+    }
+
+    /// Change a server's default tool exposure in one scope.
+    pub fn set_exposure(
+        &self,
+        scope: McpScope,
+        name: &str,
+        exposure: McpExposure,
+    ) -> Result<(), String> {
+        self.patch_policy(scope, name, |server, is_override| {
+            if exposure == McpExposure::Codemode && !is_override {
+                server.remove("exposure");
+            } else {
+                server.insert("exposure".into(), json!(exposure.as_str()));
+            }
+        })
+    }
+
+    fn patch_policy(
+        &self,
+        scope: McpScope,
+        name: &str,
+        patch: impl FnOnce(&mut Map<String, Value>, bool),
+    ) -> Result<(), String> {
+        let current = self.read(scope)?;
+        let mut document = editable_document(&current.content)?;
+        let servers = server_object_mut(&mut document)?;
+        if !servers.contains_key(name) {
+            if scope != McpScope::Project
+                || !self
+                    .entries()?
+                    .iter()
+                    .any(|entry| entry.config.name() == name)
+            {
+                return Err(format!("No MCP server named {name:?} in this scope"));
+            }
+            servers.insert(name.into(), Value::Object(Map::new()));
+        }
+        let server = servers
+            .get_mut(name)
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| format!("MCP server {name} must be an object"))?;
+        let is_override = !server
+            .keys()
+            .any(|field| matches!(field.as_str(), "command" | "url" | "type"));
+        patch(server, is_override);
+        self.save(scope, &current.revision, &render_document(&document)?)?;
+        Ok(())
+    }
+
+    /// Probe every configured server independently. A failed server does not hide healthy rows.
+    pub async fn inspect(&self) -> McpInspection {
+        let (entries, errors) = self.inspection_entries();
+        let servers = join_all(entries.into_iter().map(|entry| {
+            let library = self.clone();
+            async move { library.inspect_entry(entry).await }
+        }))
+        .await;
+        McpInspection { servers, errors }
+    }
+
+    fn inspection_entries(&self) -> (Vec<Entry>, Vec<String>) {
+        let mut merged = BTreeMap::new();
+        let mut errors = Vec::new();
+        for scope in [McpScope::Global, McpScope::Project] {
+            if scope == McpScope::Project && (!self.trusted || self.cwd.is_none()) {
+                continue;
+            }
+            let loaded = (|| {
+                let path = self.path(scope)?;
+                let content = read_document(&path)?.unwrap_or_else(|| "{}".into());
+                let mut document = editable_document(&content)?;
+                let servers = server_object_mut(&mut document)?.clone();
+                document
+                    .as_object_mut()
+                    .expect("validated document")
+                    .shift_remove("mcpServers");
+                if let Err(error) = parse_document(&document.to_string()) {
+                    errors.push(format!("{}: {error}", path.display()));
+                }
+                for (name, value) in servers {
+                    let parsed = parse_document(&json!({"mcpServers": {name: value}}).to_string())
+                        .and_then(|mut parsed| {
+                            merge_entry(&mut merged, scope, parsed.servers.remove(0))
+                        });
+                    if let Err(error) = parsed {
+                        errors.push(format!("{}: {error}", path.display()));
+                    }
+                }
+                Ok::<_, String>(())
+            })();
+            if let Err(error) = loaded {
+                errors.push(error);
+            }
+        }
+        (merged.into_values().collect(), errors)
+    }
+
+    async fn inspect_entry(&self, entry: Entry) -> McpServerReport {
+        let policy = entry.config.policy().clone();
+        let mut report = McpServerReport {
+            name: entry.config.name().to_string(),
+            scope: entry.scope,
+            source: self
+                .path(entry.scope)
+                .expect("entry has a configured scope"),
+            project_override: (entry.management_scope != entry.scope).then(|| {
+                self.path(entry.management_scope)
+                    .expect("entry has a configured scope")
+            }),
+            enabled: entry.config.enabled(),
+            exposure: policy.exposure,
+            transport: describe_transport(entry.config.transport()),
+            state: McpServerState::Disabled,
+            tools: Vec::new(),
+            tool_exposure: BTreeMap::new(),
+            resources: false,
+            error: None,
+        };
+        if !report.enabled {
+            return report;
+        }
+        report.state = McpServerState::Failed;
+        let (config, mut inspection_policy) = match self.resolve_with_policy(entry) {
+            Ok(config) => config,
+            Err(error) => {
+                report.error = Some(error);
+                return report;
+            }
+        };
+        // Inspection inventories the remote surface, including hidden tools. It does not
+        // publish a registry or change the generation's actual exposure policy.
+        inspection_policy.exposure = McpExposure::Direct;
+        inspection_policy.tool_exposure.clear();
+        match McpToolSet::connect_with_policies(vec![(config, inspection_policy)]).await {
+            Ok(pool) => {
+                report.tools = pool
+                    .tools()
+                    .into_iter()
+                    .map(|tool| tool.remote_name)
+                    .collect();
+                report.tool_exposure = report
+                    .tools
+                    .iter()
+                    .filter_map(|name| {
+                        let exposure = policy.exposure_for(name);
+                        (exposure != policy.exposure).then(|| (name.clone(), exposure))
+                    })
+                    .collect();
+                report.resources = pool.has_resources(&report.name);
+                report.error = pool.shutdown().await.err().map(|error| error.to_string());
+                if report.error.is_none() {
+                    report.state = McpServerState::Connected;
+                }
+            }
+            Err(error) => report.error = Some(error.to_string()),
+        }
+        report
     }
 
     fn validate_save(&self, scope: McpScope, content: &str) -> Result<(), String> {
@@ -229,8 +573,24 @@ impl McpLibrary {
         expected_revision: &str,
         content: &str,
     ) -> Result<McpDocument, String> {
+        self.replace_document(scope, expected_revision, content, true)?;
+        self.read(scope)
+    }
+
+    fn replace_document(
+        &self,
+        scope: McpScope,
+        expected_revision: &str,
+        content: &str,
+        validate_all: bool,
+    ) -> Result<(), String> {
         let path = self.path(scope)?;
-        self.validate_save(scope, content)?;
+        if content.len() as u64 > MAX_CONFIG_BYTES {
+            return Err("mcp.json exceeds 1 MiB".into());
+        }
+        if validate_all {
+            self.validate_save(scope, content)?;
+        }
         let parent = path.parent().ok_or("Invalid MCP configuration path")?;
         fs::create_dir_all(parent).map_err(io_error)?;
         let mut options = OpenOptions::new();
@@ -248,7 +608,9 @@ impl McpLibrary {
             return Err("MCP configuration changed on disk; reload before saving".into());
         }
         // Re-check inherited definitions after acquiring the target scope's save lock.
-        self.validate_save(scope, content)?;
+        if validate_all {
+            self.validate_save(scope, content)?;
+        }
         let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(io_error)?;
         temp.write_all(content.as_bytes()).map_err(io_error)?;
         temp.as_file().sync_all().map_err(io_error)?;
@@ -257,7 +619,7 @@ impl McpLibrary {
             return Err("MCP configuration changed on disk; reload before saving".into());
         }
         temp.persist(&path).map_err(|e| io_error(e.error))?;
-        self.read(scope)
+        Ok(())
     }
 
     /// Starts an explicit OAuth flow for a configured HTTP server. Connecting
@@ -424,8 +786,9 @@ impl Entry {
     fn row(&self) -> McpServerRow {
         McpServerRow {
             name: self.config.name().to_string(),
-            scope: self.scope,
+            scope: self.management_scope,
             enabled: self.config.enabled(),
+            exposure: self.config.policy().exposure,
             transport: match self.config.transport() {
                 Some(McpTransport::Http { .. }) => "http",
                 Some(McpTransport::Stdio { .. }) => "stdio",
@@ -434,6 +797,98 @@ impl Entry {
             .into(),
         }
     }
+}
+
+fn merge_entry(
+    merged: &mut BTreeMap<String, Entry>,
+    scope: McpScope,
+    config: McpConfigEntry,
+) -> Result<(), String> {
+    let name = config.name().to_string();
+    if scope == McpScope::Project && config.has_provider_auth() {
+        return Err(format!("MCP server {name}: auth is only allowed in global MCP configuration"));
+    }
+    let entry = if scope == McpScope::Project && config.is_override() {
+        let base = merged.get(&name).ok_or_else(|| {
+            format!("MCP server {name}: a project policy override needs a global server")
+        })?;
+        Entry {
+            scope: base.scope,
+            management_scope: McpScope::Project,
+            config: config.apply_override(&base.config)?,
+        }
+    } else {
+        // Keep existing standalone disabled placeholders as a Rust compatibility extension.
+        if config.is_override() && config.enabled() {
+            return Err(format!(
+                "MCP server {name}: enabled server needs command or url"
+            ));
+        }
+        let namespace = name.replace('-', "_");
+        if let Some(previous) = merged
+            .keys()
+            .find(|previous| **previous != name && previous.replace('-', "_") == namespace)
+        {
+            return Err(format!(
+                "MCP server {name}: namespace conflicts with {previous}"
+            ));
+        }
+        Entry {
+            scope,
+            management_scope: scope,
+            config,
+        }
+    };
+    merged.insert(name, entry);
+    Ok(())
+}
+
+fn editable_document(content: &str) -> Result<Value, String> {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+    let value: Value = serde_json::from_str(content).map_err(|error| {
+        format!(
+            "Invalid mcp.json syntax at line {}, column {}",
+            error.line(),
+            error.column()
+        )
+    })?;
+    if !value.is_object() {
+        return Err("mcp.json must be an object".into());
+    }
+    Ok(value)
+}
+
+fn server_object_mut(document: &mut Value) -> Result<&mut Map<String, Value>, String> {
+    let root = document
+        .as_object_mut()
+        .ok_or("mcp.json must be an object")?;
+    let servers = root
+        .entry("mcpServers")
+        .or_insert_with(|| Value::Object(Map::new()));
+    servers
+        .as_object_mut()
+        .ok_or_else(|| "mcp.json needs an mcpServers object".into())
+}
+
+fn render_document(document: &Value) -> Result<String, String> {
+    serde_json::to_string_pretty(document)
+        .map(|content| format!("{content}\n"))
+        .map_err(|error| format!("Could not serialize mcp.json: {error}"))
+}
+
+fn describe_transport(transport: Option<&McpTransport>) -> String {
+    match transport {
+        Some(McpTransport::Http { url, .. }) => url.clone(),
+        Some(McpTransport::Stdio { command, args, .. }) => std::iter::once(command.as_str())
+            .chain(args.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(" "),
+        None => "disabled".into(),
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn read_document(path: &Path) -> Result<Option<String>, String> {
@@ -790,5 +1245,175 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn typed_mutations_keep_unrelated_content_and_support_project_policy_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = dir.path().join("agent");
+        let project = dir.path().join("project");
+        fs::create_dir_all(project.join(".pi")).unwrap();
+        fs::create_dir_all(&agent).unwrap();
+        fs::write(
+            agent.join("mcp.json"),
+            r#"{"future":{"kept":true},"mcpServers":{"old":{"command":"old"}}}"#,
+        )
+        .unwrap();
+        let library = McpLibrary::new(&agent, Some(&project), true);
+        let server = McpServerDefinition::new(
+            "docs",
+            McpTransport::Http {
+                url: "https://example.com/mcp".into(),
+                headers: BTreeMap::from([("X-Team".into(), "core".into())]),
+            },
+        )
+        .exposure(McpExposure::Direct)
+        .description("Product docs");
+        assert!(!library.add(McpScope::Global, &server).unwrap());
+        let value: Value =
+            serde_json::from_str(&fs::read_to_string(agent.join("mcp.json")).unwrap()).unwrap();
+        assert_eq!(value["future"]["kept"], true);
+        assert_eq!(value["mcpServers"]["old"]["command"], "old");
+        assert_eq!(value["mcpServers"]["docs"]["exposure"], "direct");
+        assert_eq!(value["mcpServers"]["docs"]["headers"]["X-Team"], "core");
+
+        library
+            .set_enabled(McpScope::Project, "docs", false)
+            .unwrap();
+        library
+            .set_exposure(McpScope::Project, "docs", McpExposure::Hidden)
+            .unwrap();
+        let project_value: Value =
+            serde_json::from_str(&fs::read_to_string(project.join(".pi/mcp.json")).unwrap())
+                .unwrap();
+        assert_eq!(project_value["mcpServers"]["docs"]["enabled"], false);
+        assert_eq!(project_value["mcpServers"]["docs"]["exposure"], "hidden");
+        assert!(project_value["mcpServers"]["docs"].get("url").is_none());
+        assert!(library.remove(McpScope::Global, "old").unwrap());
+        assert!(!library.remove(McpScope::Global, "missing").unwrap());
+    }
+
+    #[tokio::test]
+    async fn authorization_delegates_only_when_installed_and_never_bypasses_project_trust() {
+        struct Authorization(std::sync::Mutex<Vec<String>>);
+        #[async_trait::async_trait]
+        impl McpAuthorization for Authorization {
+            async fn login(&self, name: &str, scope: McpScope) -> Result<String, String> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(format!("login {name} {scope:?}"));
+                Ok("fixture login".into())
+            }
+            async fn logout(&self, name: &str, scope: McpScope) -> Result<String, String> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(format!("logout {name} {scope:?}"));
+                Ok("fixture logout".into())
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let library = McpLibrary::new(directory.path(), Some(directory.path()), false);
+        assert!(
+            library
+                .login("docs", McpScope::Global)
+                .await
+                .unwrap_err()
+                .contains("no credentials were changed")
+        );
+        assert!(library.logout("docs", McpScope::Global).await.is_err());
+        let authorization = Arc::new(Authorization(std::sync::Mutex::new(vec![])));
+        let library = library.with_authorization(authorization.clone());
+        assert_eq!(
+            library.login("docs", McpScope::Global).await.unwrap(),
+            "fixture login"
+        );
+        assert_eq!(
+            library.logout("docs", McpScope::Global).await.unwrap(),
+            "fixture logout"
+        );
+        assert!(
+            library
+                .login("docs", McpScope::Project)
+                .await
+                .unwrap_err()
+                .contains("trust")
+        );
+        assert_eq!(authorization.0.lock().unwrap().len(), 2);
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn inspection_keeps_valid_entries_and_reports_invalid_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("mcp.json"),
+            r#"{"mcpServers":{"parked":{"command":"unused","enabled":false},"bad":{"args":["no command"]}}}"#,
+        )
+        .unwrap();
+        let library = McpLibrary::new(dir.path(), None, false);
+        let inspection = library.inspect().await;
+        assert!(!inspection.is_ok());
+        assert_eq!(inspection.errors.len(), 1);
+        assert_eq!(inspection.servers.len(), 1);
+        assert_eq!(inspection.servers[0].name, "parked");
+        assert!(
+            library.prepare().await.is_err(),
+            "generation parsing stays strict"
+        );
+        assert!(library.remove(McpScope::Global, "parked").unwrap());
+        let remaining: Value =
+            serde_json::from_str(&fs::read_to_string(dir.path().join("mcp.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            remaining["mcpServers"]["bad"]["args"],
+            json!(["no command"])
+        );
+    }
+
+    #[test]
+    fn management_preserves_tool_pattern_order_and_rejects_invalid_add_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        let original = r#"{"mcpServers":{"docs":{"command":"unused","toolExposure":{"z*":"hidden","*":"direct"}}}}"#;
+        fs::write(&path, original).unwrap();
+        let library = McpLibrary::new(dir.path(), None, false);
+        let bad = McpServerDefinition::new(
+            "bad name",
+            McpServerConfig::stdio("ignored", "cmd").transport,
+        );
+        assert!(library.add(McpScope::Global, &bad).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        library
+            .set_enabled(McpScope::Global, "docs", false)
+            .unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.find("z*").unwrap() < content.find("\"*\"").unwrap());
+        assert_eq!(
+            library.entries().unwrap()[0]
+                .config
+                .policy()
+                .exposure_for("z-secret"),
+            McpExposure::Hidden
+        );
+    }
+
+    #[tokio::test]
+    async fn inspection_keeps_disabled_rows_when_another_server_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("mcp.json"),
+            r#"{"mcpServers":{"broken":{"command":"pi-test-missing-mcp-server"},"parked":{"command":"unused","enabled":false}}}"#,
+        )
+        .unwrap();
+        let inspection = McpLibrary::new(dir.path(), None, false).inspect().await;
+        assert!(!inspection.is_ok());
+        assert!(inspection.errors.is_empty());
+        assert_eq!(inspection.servers.len(), 2);
+        assert_eq!(inspection.servers[0].name, "broken");
+        assert_eq!(inspection.servers[0].state, McpServerState::Failed);
+        assert_eq!(inspection.servers[1].name, "parked");
+        assert_eq!(inspection.servers[1].state, McpServerState::Disabled);
     }
 }
