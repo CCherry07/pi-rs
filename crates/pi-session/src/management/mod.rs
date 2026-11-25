@@ -3,9 +3,11 @@ mod observation;
 mod options;
 mod paths;
 mod replacement;
+mod runtime_scope;
 mod session;
 pub use observation::{SessionObservation, SessionResetReason, SessionUpdate, SessionVersion};
 pub use options::{CreateSessionOptions, OpenSessionOptions, SessionSource};
+pub use runtime_scope::LiveRuntimeScopeId;
 mod isolated;
 pub use isolated::{IsolatedSessionObservation, IsolatedSessionUsageSnapshot};
 pub use replacement::{

@@ -15,6 +15,7 @@ use pi_core::{AssistantMessage, Message};
 use pi_runtime::{PiRuntime, RuntimeRestoreState};
 
 use super::configuration::clamp_thinking_for_model;
+use super::selection_intent::ToolSelection;
 use crate::runtime::events::AgentSessionEventHub;
 use crate::{
     BranchSummaryEntry, SessionContext, SessionContextBuildOptions, SessionEntry, SessionError,
@@ -38,6 +39,7 @@ pub(super) struct ContextCommit {
 }
 
 pub(super) struct ContextUpdates {
+    tool_selection: Arc<ToolSelection>,
     runtime: PiRuntime,
     store: SessionStore,
     options: SessionContextBuildOptions,
@@ -51,8 +53,10 @@ impl ContextUpdates {
         store: SessionStore,
         options: SessionContextBuildOptions,
         events: Arc<AgentSessionEventHub>,
+        tool_selection: Arc<ToolSelection>,
     ) -> Self {
         Self {
+            tool_selection,
             runtime,
             store,
             options,
@@ -251,7 +255,9 @@ impl ContextUpdates {
         origin: crate::EntryAppendOrigin,
     ) -> Result<(), SessionError> {
         match activation {
-            ContextActivation::Restore => restore_runtime_context(&self.runtime, context)?,
+            ContextActivation::Restore => {
+                restore_runtime_context(&self.runtime, context, &self.tool_selection)?
+            }
             ContextActivation::KeepConfiguration => self
                 .runtime
                 .agent()
@@ -282,11 +288,13 @@ impl ContextUpdates {
 pub(super) fn restore_runtime_context(
     runtime: &PiRuntime,
     context: &SessionContext,
+    tool_selection: &ToolSelection,
 ) -> Result<(), SessionError> {
     restore_runtime_context_with_request(
         runtime,
         context,
         crate::InitialModelRequest::default().session(context.model.clone()),
+        tool_selection,
     )
     .map(drop)
 }
@@ -295,6 +303,7 @@ pub(super) fn restore_runtime_context_with_request(
     runtime: &PiRuntime,
     context: &SessionContext,
     request: crate::InitialModelRequest,
+    tool_selection: &ToolSelection,
 ) -> Result<Option<String>, SessionError> {
     let current = runtime.agent().state();
     let selection = request
@@ -309,19 +318,12 @@ pub(super) fn restore_runtime_context_with_request(
         .parse()
         .map_err(SessionError::InvalidPayload)?;
     let thinking_level = clamp_thinking_for_model(runtime, &provider, &model_id, thinking_level);
-    let registered_tools = runtime
-        .tool_specs()
-        .into_iter()
-        .map(|spec| spec.name)
-        .collect::<std::collections::HashSet<_>>();
-    let mut seen = std::collections::HashSet::new();
-    let active_tools = context
-        .active_tool_names
-        .clone()
-        .unwrap_or(current.active_tools)
-        .into_iter()
-        .filter(|name| registered_tools.contains(name) && seen.insert(name.clone()))
-        .collect();
+    let active_tools = tool_selection.effective(
+        context
+            .active_tool_names
+            .clone()
+            .unwrap_or(current.active_tools),
+    );
     runtime.restore_state(RuntimeRestoreState {
         provider_id: provider,
         model_id,

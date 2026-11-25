@@ -23,7 +23,9 @@ use pi_plugin::{
 use rmcp::model::{
     CallToolRequest, CallToolRequestParams, ClientRequest, ServerResult, Tool as McpToolSpec,
 };
-use rmcp::service::{ClientLifecycleMode, ClientServiceExt, RunningService};
+use rmcp::service::{
+    ClientLifecycleMode, ClientServiceExt, RunningService, RunningServiceCancellationToken,
+};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use rmcp::{Peer, RoleClient};
@@ -39,6 +41,7 @@ use crate::policy::{McpExposure, McpServerPolicy};
 use crate::resources::create_resource_tools;
 use crate::result::{normalize_input_schema, project_result_with_resources};
 
+mod discovery;
 mod retry;
 use retry::ConnectionFailure;
 
@@ -341,13 +344,197 @@ struct McpPool {
     resource_tools: Vec<Arc<dyn Tool>>,
 }
 
-pub(crate) struct ConnectedServer {
-    pub(crate) name: String,
-    instructions: Option<String>,
-    policy: McpServerPolicy,
+/// Transport setup data only; never retain a generation's executable policy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct McpConnectionOptions {
+    root: Option<PathBuf>,
+    log_path: Option<PathBuf>,
+}
+
+impl From<&McpServerPolicy> for McpConnectionOptions {
+    fn from(policy: &McpServerPolicy) -> Self {
+        Self {
+            root: policy.root.clone(),
+            log_path: policy.log_path.clone(),
+        }
+    }
+}
+
+/// Shareable data-plane lifetime, independent of generation tools and policy.
+/// The metadata is captured once after the handshake, not a live registry.
+pub(crate) struct McpConnection {
+    name: String,
+    metadata: Option<Arc<rmcp::model::ServerPeerInfo>>,
+    discovery_revision: u64,
+    discovery: discovery::DiscoveryControl,
     handler: McpClientHandler,
     peer: Peer<RoleClient>,
     service: Mutex<Option<RunningService<RoleClient, McpClientHandler>>>,
+    cancellation: std::sync::Mutex<Option<RunningServiceCancellationToken>>,
+}
+
+impl McpConnection {
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn metadata(&self) -> Option<&rmcp::model::ServerPeerInfo> {
+        self.metadata.as_deref()
+    }
+
+    /// Initial discovery covers notifications before this baseline, never ones during it.
+    pub(crate) fn tool_changes(&self) -> Option<(u64, tokio::sync::watch::Receiver<u64>)> {
+        self.metadata()
+            .filter(|info| info.capabilities.tools.is_some())
+            .map(|_| {
+                (
+                    self.discovery_revision,
+                    self.handler.tools_changed.subscribe(),
+                )
+            })
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.peer.is_transport_closed()
+    }
+
+    /// Invalidate the transport synchronously even if an old generation keeps a
+    /// view alive. Cleanup can still be awaited separately through `close`.
+    pub(crate) fn cancel(&self) {
+        self.discovery.cancel();
+        if let Some(cancellation) = self
+            .cancellation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            cancellation.cancel();
+        }
+    }
+
+    fn instructions(&self) -> Option<&str> {
+        self.metadata()
+            .and_then(|info| info.instructions.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
+    pub(crate) async fn close(&self) -> Result<(), McpError> {
+        self.discovery.cancel();
+        let Some(mut service) = self.service.lock().await.take() else {
+            return Ok(());
+        };
+        let result = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
+        self.handler.stderr.finish().await;
+        match result {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err(McpError::Shutdown {
+                server: self.name.clone(),
+                message: "cleanup timed out".to_string(),
+            }),
+            Err(error) => Err(McpError::Shutdown {
+                server: self.name.clone(),
+                message: error.to_string(),
+            }),
+        }
+    }
+}
+
+/// Immutable generation view: request deadlines and exposure remain local even
+/// when another view retains the same connection.
+pub(crate) struct ConnectedServer {
+    pub(crate) name: String,
+    policy: McpServerPolicy,
+    connection: Arc<McpConnection>,
+}
+
+impl ConnectedServer {
+    fn new(connection: Arc<McpConnection>, policy: McpServerPolicy) -> Arc<Self> {
+        Arc::new(Self {
+            name: connection.name().to_string(),
+            policy,
+            connection,
+        })
+    }
+}
+
+#[derive(Default)]
+struct McpToolSetBuilder {
+    inventory: BTreeMap<String, Vec<McpOfferedTool>>,
+    servers: Vec<Arc<ConnectedServer>>,
+    tools: Vec<Arc<McpTool>>,
+    names: HashSet<String>,
+}
+
+impl McpToolSetBuilder {
+    fn add_connection(
+        &mut self,
+        connection: Arc<McpConnection>,
+        remote_tools: Vec<McpToolSpec>,
+        policy: McpServerPolicy,
+    ) -> Result<(), McpError> {
+        let server = ConnectedServer::new(connection, policy);
+        self.inventory.insert(
+            server.name.clone(),
+            remote_tools
+                .iter()
+                .map(|tool| McpOfferedTool {
+                    name: tool.name.to_string(),
+                    description: tool.description.as_deref().unwrap_or_default().to_owned(),
+                    exposure: server.policy.exposure_for(&tool.name),
+                })
+                .collect(),
+        );
+        // Assign before filtering so hidden collision peers cannot change visible names.
+        let mut plain_counts = HashMap::new();
+        let mut remote_names = HashSet::new();
+        for remote in &remote_tools {
+            if !remote_names.insert(remote.name.to_string()) {
+                return Err(McpError::DuplicateTool(format!(
+                    "{}/{}",
+                    server.name, remote.name
+                )));
+            }
+            *plain_counts
+                .entry(qualified_tool_name(&server.name, &remote.name, |_| false))
+                .or_insert(0) += 1;
+        }
+        for remote in remote_tools {
+            let name = qualified_tool_name(&server.name, &remote.name, |candidate| {
+                self.names.contains(candidate)
+                    || plain_counts.get(candidate).is_some_and(|count| *count > 1)
+            });
+            let hidden = server.policy.exposure_for(&remote.name) == McpExposure::Hidden;
+            let tool = Arc::new(McpTool::new(Arc::clone(&server), remote, name));
+            if !self.names.insert(tool.descriptor.name.clone()) {
+                return Err(McpError::DuplicateTool(tool.descriptor.name.clone()));
+            }
+            if !hidden {
+                self.tools.push(tool);
+            }
+        }
+        self.servers.push(server);
+        Ok(())
+    }
+
+    fn finish(self, authorization_required: Vec<McpAuthorizationRequired>) -> McpToolSet {
+        let resource_tools = create_resource_tools(
+            self.servers
+                .iter()
+                .filter(|server| server.resources_visible())
+                .cloned()
+                .collect(),
+        );
+        McpToolSet {
+            inner: Arc::new(McpPool {
+                inventory: self.inventory,
+                authorization_required,
+                servers: self.servers,
+                tools: self.tools,
+                resource_tools,
+            }),
+        }
+    }
 }
 
 impl McpToolSet {
@@ -403,21 +590,13 @@ impl McpToolSet {
                 .map(|(config, _)| config.clone())
                 .collect::<Vec<_>>(),
         )?;
-        let mut servers = Vec::with_capacity(configs.len());
-        let mut inventory = BTreeMap::new();
+        let mut builder = McpToolSetBuilder::default();
         let mut authorization_required = Vec::new();
-        let mut tools = Vec::new();
-        let mut names = HashSet::new();
 
         for (config, policy) in configs {
-            let name = config.name.clone();
-            let discovered = tokio::time::timeout(
-                CONNECT_TIMEOUT,
-                retry::connect_discovered(config, policy, auth.clone()),
-            )
-            .await
-            .map_err(|_| McpError::Timeout(name))?;
-            let (server, remote_tools) = match discovered {
+            let options = McpConnectionOptions::from(&policy);
+            let discovered = connect_inventory(config, options, auth.clone()).await;
+            let (connection, remote_tools) = match discovered {
                 Ok(discovered) => discovered,
                 Err(McpError::AuthorizationRequired(required)) if allow_pending_authorization => {
                     authorization_required.push(required);
@@ -425,64 +604,35 @@ impl McpToolSet {
                 }
                 Err(error) => return Err(error),
             };
-            inventory.insert(
-                server.name.clone(),
-                remote_tools
-                    .iter()
-                    .map(|tool| McpOfferedTool {
-                        name: tool.name.to_string(),
-                        description: tool.description.as_deref().unwrap_or_default().to_owned(),
-                        exposure: server.policy.exposure_for(&tool.name),
-                    })
-                    .collect(),
-            );
-            // Assign before filtering so hidden collision peers cannot change visible names.
-            let mut plain_counts = HashMap::new();
-            let mut remote_names = HashSet::new();
-            for remote in &remote_tools {
-                if !remote_names.insert(remote.name.to_string()) {
-                    return Err(McpError::DuplicateTool(format!(
-                        "{}/{}",
-                        server.name, remote.name
-                    )));
-                }
-                *plain_counts
-                    .entry(qualified_tool_name(&server.name, &remote.name, |_| false))
-                    .or_insert(0) += 1;
-            }
-            for remote in remote_tools {
-                let name = qualified_tool_name(&server.name, &remote.name, |candidate| {
-                    names.contains(candidate)
-                        || plain_counts.get(candidate).is_some_and(|count| *count > 1)
-                });
-                let hidden = server.policy.exposure_for(&remote.name) == McpExposure::Hidden;
-                let tool = Arc::new(McpTool::new(Arc::clone(&server), remote, name));
-                if !names.insert(tool.descriptor.name.clone()) {
-                    return Err(McpError::DuplicateTool(tool.descriptor.name.clone()));
-                }
-                if !hidden {
-                    tools.push(tool);
-                }
-            }
-            servers.push(server);
+            builder.add_connection(connection, remote_tools, policy)?;
         }
+        Ok(builder.finish(authorization_required))
+    }
 
-        let resource_tools = create_resource_tools(
-            servers
-                .iter()
-                .filter(|server| server.resources_visible())
-                .cloned()
-                .collect(),
-        );
-        Ok(Self {
-            inner: Arc::new(McpPool {
-                inventory,
-                authorization_required,
-                servers,
-                tools,
-                resource_tools,
-            }),
-        })
+    /// Projects raw connections into a new immutable generation without reconnecting.
+    /// Failure drops only this candidate's views, never closes shared transports.
+    pub(crate) fn from_connections(
+        connections: Vec<(Arc<McpConnection>, Vec<McpToolSpec>, McpServerPolicy)>,
+        authorization_required: Vec<McpAuthorizationRequired>,
+    ) -> Result<Self, McpError> {
+        // Raw inventories have no validated config envelope. Reuse the identity rules
+        // for both ready and auth-pending servers without inspecting transport values.
+        let identities = connections
+            .iter()
+            .map(|(connection, _, _)| connection.name())
+            .chain(
+                authorization_required
+                    .iter()
+                    .map(|required| required.server.as_str()),
+            )
+            .map(|name| McpServerConfig::stdio(name, "inventory-only"))
+            .collect::<Vec<_>>();
+        validate_configs(&identities)?;
+        let mut builder = McpToolSetBuilder::default();
+        for (connection, remote_tools, policy) in connections {
+            builder.add_connection(connection, remote_tools, policy)?;
+        }
+        Ok(builder.finish(authorization_required))
     }
 
     /// Returns a fresh plugin wrapper backed by the connected client pool.
@@ -586,7 +736,7 @@ impl McpToolSet {
                         .iter()
                         .filter(|server| server.resources_visible())
                         .filter_map(|server| {
-                            server.instructions.as_ref().map(|instructions| {
+                            server.connection.instructions().map(|instructions| {
                                 format!(
                                     "Instructions for MCP resources from `{}`:\n{instructions}",
                                     server.name
@@ -605,8 +755,14 @@ impl McpToolSet {
             .servers
             .iter()
             .find(|server| server.name == name)
-            .filter(|server| server.peer.is_transport_closed())
-            .map(|server| server.handler.stderr.message("Connection closed"))
+            .filter(|server| server.connection.is_closed())
+            .map(|server| {
+                server
+                    .connection
+                    .handler
+                    .stderr
+                    .message("Connection closed")
+            })
     }
 
     pub(crate) fn has_resources(&self, name: &str) -> bool {
@@ -646,8 +802,6 @@ impl McpToolSet {
     }
 
     pub(crate) fn prompt_patch(&self, event: BeforeAgentStartEvent) -> BeforeAgentStartPatch {
-        let mut prompt = event.system_prompt;
-        let base_length = prompt.len();
         // Only enabled servers enter the pool. Like Pi, directory reach follows their
         // configured exposure, independently of the current active entry points.
         let section = render_servers_section(
@@ -659,7 +813,7 @@ impl McpToolSet {
                     (
                         server.name.as_str(),
                         server.policy.description.as_deref(),
-                        server.instructions.as_deref(),
+                        server.connection.instructions(),
                         if server.policy.uses_codemode() {
                             "codemode"
                         } else {
@@ -668,70 +822,52 @@ impl McpToolSet {
                     )
                 }),
         );
-        let changed = section.is_some();
-        if let Some(section) = section {
-            prompt.push_str(&format!("\n\n<mcp_servers>\n{section}\n</mcp_servers>"));
-        }
-        BeforeAgentStartPatch {
-            prompt_state: None,
-            prompt_contributions: if changed {
-                vec![pi_core::PromptContribution {
-                    category: pi_core::ContextCategory::McpTools,
-                    name: "MCP server directory".into(),
-                    text: prompt[base_length..].to_string(),
-                }]
-            } else {
-                Vec::new()
-            },
-            system_prompt: changed.then_some(prompt),
-            ..BeforeAgentStartPatch::default()
-        }
+        crate::directory::prompt_patch(event, section.as_deref())
     }
 
     /// Closes all transports and waits for child-process cleanup.
     pub async fn shutdown(&self) -> Result<(), McpError> {
         let mut first_error = None;
         for server in &self.inner.servers {
-            let Some(mut service) = server.service.lock().await.take() else {
-                continue;
-            };
-            let result = service.close_with_timeout(SHUTDOWN_TIMEOUT).await;
-            server.handler.stderr.finish().await;
-            match result {
-                Ok(Some(_)) => {}
-                Ok(None) => {
-                    first_error.get_or_insert_with(|| McpError::Shutdown {
-                        server: server.name.clone(),
-                        message: "cleanup timed out".to_string(),
-                    });
-                }
-                Err(error) => {
-                    first_error.get_or_insert_with(|| McpError::Shutdown {
-                        server: server.name.clone(),
-                        message: error.to_string(),
-                    });
-                }
+            if let Err(error) = server.connection.close().await {
+                first_error.get_or_insert(error);
             }
         }
         first_error.map_or(Ok(()), Err)
     }
 }
 
+/// Discover raw inventory without retaining any generation-owned policy or tools.
+/// One bound covers every handshake, discovery attempt and classified backoff.
+pub(crate) async fn connect_inventory(
+    config: McpServerConfig,
+    options: McpConnectionOptions,
+    auth: McpClientAuth,
+) -> Result<(Arc<McpConnection>, Vec<McpToolSpec>), McpError> {
+    let name = config.name.clone();
+    tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        retry::connect_discovered(config, options, auth),
+    )
+    .await
+    .map_err(|_| McpError::Timeout(name))?
+}
+
 async fn connect_server(
     config: McpServerConfig,
-    policy: McpServerPolicy,
+    options: McpConnectionOptions,
     client_auth: McpClientAuth,
-) -> Result<Arc<ConnectedServer>, ConnectionFailure> {
+) -> Result<Arc<McpConnection>, ConnectionFailure> {
     let McpServerConfig {
         name,
         transport,
         oauth,
         auth,
     } = config;
-    let mut handler = McpClientHandler::new(policy.root.as_deref());
+    let mut handler = McpClientHandler::new(options.root.as_deref());
     let redactor = crate::diagnostics::Redactor::new(&transport, oauth.as_ref());
     handler.stderr = crate::diagnostics::StderrCapture::new(redactor.clone());
-    handler.log = policy
+    handler.log = options
         .log_path
         .clone()
         .map(|path| crate::diagnostics::ServerLog::new(path, name.clone(), redactor));
@@ -768,7 +904,9 @@ async fn connect_server(
         }
         Err(error) => return Err(error),
     };
-    Ok(connected_server(name, policy, handler, service))
+    let connection = connected_transport(name, handler, service);
+    connection.subscribe_tools().await;
+    Ok(connection)
 }
 
 async fn connect_once(
@@ -869,27 +1007,32 @@ async fn connect_once(
     })
 }
 
-fn connected_server(
+fn connected_transport(
     name: String,
-    policy: McpServerPolicy,
     handler: McpClientHandler,
     service: RunningService<RoleClient, McpClientHandler>,
-) -> Arc<ConnectedServer> {
-    let instructions = service
-        .peer()
-        .peer_info()
-        .and_then(|info| info.instructions.clone())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    Arc::new(ConnectedServer {
+) -> Arc<McpConnection> {
+    let discovery_revision = *handler.tools_changed.borrow();
+    Arc::new(McpConnection {
         name,
         metadata: service.peer().peer_info(),
         discovery_revision,
         discovery: discovery::DiscoveryControl::default(),
         handler,
         peer: service.peer().clone(),
+        cancellation: std::sync::Mutex::new(Some(service.cancellation_token())),
         service: Mutex::new(Some(service)),
     })
+}
+
+#[cfg(test)]
+fn connected_server(
+    name: String,
+    policy: McpServerPolicy,
+    handler: McpClientHandler,
+    service: RunningService<RoleClient, McpClientHandler>,
+) -> Arc<ConnectedServer> {
+    ConnectedServer::new(connected_transport(name, handler, service), policy)
 }
 
 pub fn validate_configs(configs: &[McpServerConfig]) -> Result<(), McpError> {
@@ -1087,7 +1230,7 @@ impl Plugin for McpToolPlugin {
                         name: format!("mcp__{}", identifier_component(&tool.server.name)),
                         aliases: vec![tool.server.name.clone()],
                         description: tool.server.policy.description.clone(),
-                        instructions: tool.server.instructions.clone(),
+                        instructions: tool.server.connection.instructions().map(str::to_owned),
                     }),
                 },
             )?;
@@ -1272,8 +1415,8 @@ impl ConnectedServer {
     fn resources_visible(&self) -> bool {
         self.policy.exposure != McpExposure::Hidden
             && self
-                .peer
-                .peer_info()
+                .connection
+                .metadata()
                 .is_some_and(|info| info.capabilities.resources.is_some())
     }
 
@@ -1285,10 +1428,10 @@ impl ConnectedServer {
         updates: &ToolUpdateSink,
     ) -> Result<ServerResult, McpRequestError> {
         let result = self.request_inner(context, request, tool, updates).await;
-        if matches!(&result, Err(McpRequestError::Service(_))) && self.peer.is_transport_closed() {
-            self.handler.stderr.finish().await;
+        if matches!(&result, Err(McpRequestError::Service(_))) && self.connection.is_closed() {
+            self.connection.handler.stderr.finish().await;
             return Err(McpRequestError::Disconnected(
-                self.handler.stderr.message("Connection closed"),
+                self.connection.handler.stderr.message("Connection closed"),
             ));
         }
         result
@@ -1306,12 +1449,12 @@ impl ConnectedServer {
             .check()
             .map_err(|_| McpRequestError::Aborted)?;
         // Subscribe before sending: a fast server may report progress immediately.
-        let mut progress = self.handler.progress.subscribe();
+        let mut progress = self.connection.handler.progress.subscribe();
         let timeout = self.policy.timeout;
         let deadline = tokio::time::sleep(timeout);
         tokio::pin!(deadline);
         let mut request = tokio::select! {
-            result = self.peer.send_cancellable_request(request, Default::default()) => result.map_err(McpRequestError::Service)?,
+            result = self.connection.peer.send_cancellable_request(request, Default::default()) => result.map_err(McpRequestError::Service)?,
             () = context.signal().wait() => return Err(McpRequestError::Aborted),
             () = &mut deadline => return Err(McpRequestError::Timeout(timeout)),
         };
@@ -1352,6 +1495,9 @@ impl ConnectedServer {
 #[cfg(test)]
 #[path = "client_contract_tests.rs"]
 mod contract_tests;
+
+#[cfg(test)]
+mod snapshot_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1414,7 +1560,13 @@ mod tests {
             handler,
             client,
         );
-        let remote = connected.peer.list_all_tools().await.unwrap().remove(0);
+        let remote = connected
+            .connection
+            .peer
+            .list_all_tools()
+            .await
+            .unwrap()
+            .remove(0);
         let tool = McpTool::new(
             Arc::clone(&connected),
             remote,
@@ -1499,16 +1651,173 @@ mod tests {
                 )
             );
         }
-        connected
-            .service
-            .lock()
-            .await
-            .take()
-            .unwrap()
-            .cancel()
+        connected.connection.close().await.unwrap();
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn raw_inventory_connection_does_not_retain_generation_views() {
+        use rmcp::transport::streamable_http_server::{
+            StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+        };
+        let config = StreamableHttpServerConfig::default().with_legacy_session_mode(false);
+        let cancellation = config.cancellation_token.clone();
+        let service: StreamableHttpService<EchoServer, LocalSessionManager> =
+            StreamableHttpService::new(|| Ok(EchoServer::new()), Default::default(), config);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = McpServerConfig::http(
+            "shared",
+            format!("http://{}/mcp", listener.local_addr().unwrap()),
+        );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, axum::Router::new().nest_service("/mcp", service))
+                .await
+                .unwrap();
+        });
+        let policy = McpServerPolicy {
+            root: Some(PathBuf::from("/tmp")),
+            ..McpServerPolicy::direct()
+        };
+        let options = McpConnectionOptions::from(&policy);
+        let next_policy = McpServerPolicy {
+            timeout: Duration::from_secs(5),
+            exposure: McpExposure::Hidden,
+            description: Some("Next generation".into()),
+            tool_exposure: vec![("echo".into(), McpExposure::Deferred)],
+            ..policy.clone()
+        };
+        // Exposure, descriptions and deadlines never enter transport setup data.
+        assert_eq!(options, McpConnectionOptions::from(&next_policy));
+        let (connection, inventory) = connect_inventory(config, options, McpClientAuth::default())
             .await
             .unwrap();
-        server_task.await.unwrap();
+        assert_eq!(connection.name(), "shared");
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(inventory[0].name, "echo");
+        assert!(connection.metadata().unwrap().capabilities.tools.is_some());
+        assert_eq!(
+            connection.instructions(),
+            Some("Echo server usage guidance.")
+        );
+        assert!(!connection.is_closed());
+
+        let old = ConnectedServer::new(Arc::clone(&connection), policy.clone());
+        let next = ConnectedServer::new(Arc::clone(&connection), next_policy.clone());
+        assert!(Arc::ptr_eq(&old.connection, &next.connection));
+        assert_eq!(old.policy, policy);
+        assert_eq!(next.policy, next_policy);
+        let tool = Arc::new(McpTool::new(
+            Arc::clone(&old),
+            inventory[0].clone(),
+            "mcp__shared__echo".into(),
+        ));
+        let retired_view = Arc::downgrade(&old);
+        let retired_tool = Arc::downgrade(&tool);
+        drop(old);
+        drop(tool);
+        assert!(retired_view.upgrade().is_none());
+        assert!(retired_tool.upgrade().is_none());
+        assert!(!connection.is_closed());
+
+        let (_, signal) = pi_core::AbortHandle::new();
+        let (updates, _) = ToolUpdateSink::channel();
+        let tool = McpTool::new(next, inventory[0].clone(), "mcp__shared__echo".into());
+        let result = tool
+            .execute(
+                ToolContext::standalone(PathBuf::from("/tmp"), signal),
+                "call".into(),
+                serde_json::json!({"text":"still connected"}),
+                updates,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.content,
+            vec![ContentBlock::Text(TextContent::new("still connected"))]
+        );
+        drop(tool);
+        assert_eq!(Arc::strong_count(&connection), 1);
+        connection.close().await.unwrap();
+        connection.close().await.unwrap();
+        assert!(connection.is_closed());
+        // Closing does not erase the negotiated immutable metadata or inventory.
+        assert_eq!(
+            connection.instructions(),
+            Some("Echo server usage guidance.")
+        );
+        assert_eq!(inventory[0].name, "echo");
+        cancellation.cancel();
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn shared_connection_keeps_request_deadlines_on_each_view() {
+        #[derive(Clone)]
+        struct SlowServer;
+        impl ServerHandler for SlowServer {
+            async fn call_tool(
+                &self,
+                _: CallToolRequestParams,
+                _: rmcp::service::RequestContext<rmcp::RoleServer>,
+            ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                Ok(rmcp::model::CallToolResult::success(vec![]).into())
+            }
+        }
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            SlowServer
+                .serve(server_io)
+                .await
+                .unwrap()
+                .waiting()
+                .await
+                .unwrap();
+        });
+        let handler = McpClientHandler::new(None);
+        let service = handler.clone().serve(client_io).await.unwrap();
+        let connection = connected_transport("shared".into(), handler, service);
+        let short = ConnectedServer::new(
+            Arc::clone(&connection),
+            McpServerPolicy {
+                timeout: Duration::from_millis(50),
+                ..Default::default()
+            },
+        );
+        let long = ConnectedServer::new(
+            Arc::clone(&connection),
+            McpServerPolicy {
+                timeout: Duration::from_secs(5),
+                ..Default::default()
+            },
+        );
+        let (_, signal) = pi_core::AbortHandle::new();
+        let context = ToolContext::standalone(PathBuf::from("/tmp"), signal);
+        let (updates, _) = ToolUpdateSink::channel();
+        let request = ClientRequest::CallToolRequest(CallToolRequest::new(
+            CallToolRequestParams::new("slow"),
+        ));
+        let (short_result, long_result) = tokio::join!(
+            short.request(&context, request.clone(), "slow", &updates),
+            long.request(&context, request, "slow", &updates),
+        );
+        assert!(
+            matches!(short_result, Err(McpRequestError::Timeout(timeout))
+            if timeout == Duration::from_millis(50))
+        );
+        assert!(matches!(long_result, Ok(ServerResult::CallToolResult(_))));
+        assert!(!connection.is_closed());
+        // Owner retirement invalidates even views that remain strongly held.
+        connection.cancel();
+        connection.cancel();
+        tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(short.connection.is_closed());
+        assert!(long.connection.is_closed());
+        connection.close().await.unwrap();
     }
 
     #[test]
@@ -1716,9 +2025,15 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let server = connect_server(config, McpServerPolicy::default(), McpClientAuth::default())
-            .await
-            .unwrap();
+        let policy = McpServerPolicy::default();
+        let connection = connect_server(
+            config,
+            McpConnectionOptions::from(&policy),
+            McpClientAuth::default(),
+        )
+        .await
+        .unwrap();
+        let server = ConnectedServer::new(connection, policy);
         let tool = McpTool::new(
             server.clone(),
             McpToolSpec::new(

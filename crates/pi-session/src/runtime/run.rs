@@ -360,10 +360,11 @@ impl AgentSession {
     /// a batch that did commit remains authoritative even if a later listener
     /// failed. This is an in-memory repair and appends no history entry.
     fn restore_discovery_selection_after_failure(&self) -> Result<(), SessionError> {
-        if let Some(selected) = self.store.selected_active_tools()?
-            && selected != self.runtime.active_tools()
-        {
-            self.runtime.set_active_tools(selected)?;
+        if let Some(selected) = self.store.selected_active_tools()? {
+            let effective = self.activity.tool_selection.without_unavailable(selected);
+            if effective != self.runtime.active_tools() {
+                self.runtime.set_active_tools(effective)?;
+            }
         }
         Ok(())
     }

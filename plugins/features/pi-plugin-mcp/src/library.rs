@@ -1,10 +1,13 @@
 //! Product-owned MCP configuration. Disk views never initialize a session or connect.
-//! Connections belong to a generation; local exposure defaults to codemode as in Pi.
+//! Executable views belong to a generation; local exposure defaults to codemode as in Pi.
+mod selection;
+mod supervised;
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+pub use supervised::McpServerReadiness;
 
 use crate::config::{MAX_CONFIG_BYTES, McpConfigContext, McpConfigEntry, parse_document};
 use crate::policy::{McpExposure, McpServerPolicy};
@@ -39,13 +42,33 @@ pub struct McpLibrary {
     client_auth: McpClientAuth,
     oauth_host: Arc<dyn crate::McpOAuthHost>,
     allow_command_values: bool,
+    // Executable objects must never keep the live session's supervisor alive.
+    generation: Option<crate::WeakMcpGenerationReadiness>,
+    server_readiness: BTreeMap<String, McpServerReadiness>,
+    server_directory: Option<String>,
+    pending_direct: Vec<String>,
+    preserved_tool_selection: Vec<String>,
+    tool_selection_candidates: Vec<String>,
+    tool_selection_reader: Option<selection::ToolSelectionReader>,
+    selection_ambiguities: usize,
+    denied_selection_count: usize,
 }
 
-/// A candidate product plugin plus typed auth-only readiness diagnostics.
+/// A candidate product plugin plus immutable typed readiness diagnostics.
 /// Publication and any automatic generation replacement remain host-owned.
 pub struct PreparedMcpGeneration {
     pub plugin: Arc<dyn Plugin>,
     pub authorization_required: Vec<crate::McpAuthorizationRequired>,
+    /// The host moves this sole strong ownership lease into generation freshness.
+    /// Legacy strict preparation does not produce a supervisor lease.
+    pub readiness_watch: Option<crate::McpGenerationReadiness>,
+    pub server_readiness: BTreeMap<String, McpServerReadiness>,
+    /// Exact policy-qualified selection intents absent only because a server is unavailable.
+    /// These are not executable tools; the host must independently enforce its grants.
+    pub temporarily_unavailable_tools: Vec<String>,
+    /// Desired-only identities whose origin/visibility needs a completed inventory.
+    /// A host must never interpret these as executable or newly selected tools.
+    pub unresolved_tool_selection: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -155,6 +178,7 @@ impl McpServerDefinition {
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum McpServerState {
+    Pending,
     Connected,
     Disconnected,
     NeedsAuth,
@@ -165,6 +189,7 @@ pub enum McpServerState {
 impl McpServerState {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Pending => "pending",
             Self::Connected => "connected",
             Self::Disconnected => "disconnected",
             Self::NeedsAuth => "needs sign-in",
@@ -236,6 +261,15 @@ impl McpLibrary {
             trusted,
             register_tool_search: true,
             allow_command_values: false,
+            generation: None,
+            server_readiness: BTreeMap::new(),
+            server_directory: None,
+            pending_direct: Vec::new(),
+            preserved_tool_selection: Vec::new(),
+            tool_selection_candidates: Vec::new(),
+            tool_selection_reader: None,
+            selection_ambiguities: 0,
+            denied_selection_count: 0,
             oauth_host: Arc::new(crate::login::ManualOAuthHost),
             client_auth: McpClientAuth::default().with_oauth_store(McpOAuthCredentialStore::new(
                 agent_dir.join("mcp-auth.json"),
@@ -417,6 +451,7 @@ impl McpLibrary {
             unreachable!("validated HTTP")
         };
         let removed = self.client_auth.oauth_store.sign_out(name, url)?;
+        self.invalidate_active(name);
         Ok(if removed {
             format!("Signed out of MCP server {name:?}.")
         } else {
@@ -577,6 +612,7 @@ impl McpLibrary {
             &render_document(&document)?,
             false,
         )?;
+        self.invalidate_active(name);
         Ok(true)
     }
 
@@ -588,7 +624,11 @@ impl McpLibrary {
             } else {
                 server.insert("enabled".into(), json!(enabled));
             }
-        })
+        })?;
+        if !enabled {
+            self.invalidate_active(name);
+        }
+        Ok(())
     }
 
     /// Change a server's default tool exposure in one scope.
@@ -922,7 +962,9 @@ impl McpLibrary {
         let McpTransport::Http { url, .. } = config.transport else {
             return Ok(false);
         };
-        self.client_auth.oauth_store.sign_out(&config.name, &url)
+        let removed = self.client_auth.oauth_store.sign_out(&config.name, &url)?;
+        self.invalidate_active(name);
+        Ok(removed)
     }
 
     fn resolve_named(&self, name: &str) -> Result<McpServerConfig, String> {
@@ -1004,9 +1046,13 @@ impl McpLibrary {
         library.selection_ambiguities = 0;
         library.denied_selection_count = 0;
         Ok(PreparedMcpGeneration {
+            temporarily_unavailable_tools: Vec::new(),
+            unresolved_tool_selection: Vec::new(),
             authorization_required,
+            readiness_watch: None,
+            server_readiness: BTreeMap::new(),
             plugin: Arc::new(McpProductPlugin {
-                library: self.clone(),
+                library,
                 rows,
                 pool,
                 auto_enable_codemode,

@@ -1120,7 +1120,23 @@ Use `plugin_factory` / `try_plugin_factory` for reloadable agent plugins and `pr
 
 Whole-session product reload preserves the current selected model, including explicitly selected
 models absent from the catalog, instead of reapplying startup CLI model arguments. Restored tool
-selections are intersected with the candidate registry. `pi-coding` supplies non-built-in tools to
+selections normally intersect the candidate registry. A product may additionally classify exact
+selection candidates through `AgentSessionOptions::tool_selection_availability`: `Denied`,
+`TemporarilyUnavailable`, or `UnresolvedUntilInventory`. The convenience
+`temporarily_unavailable_tools` allowance is subordinate to an explicit classification. Desired
+selection remains in the existing v4 selection entries/header baseline; effective selection is
+projected separately. Denied names are pruned, temporary names can resolve on exact registration,
+and unresolved names stay withheld until the product resolves their identity. This is selection
+policy, not a substitute for registry visibility or the tool capability ceiling. Empty policy keeps
+the previous behavior. Passive restore/capture preserves only currently selected withheld names;
+explicit deselection, including an empty selection while pending, replaces that intent.
+
+`RestoredSessionConfiguration::historical_selected_tool_names` is a read-only candidate union from
+the header, selection records across branches/lanes, and accepted recovery writes. It creates no
+wire fields or files and never selects a historical name on the current lane. It lets products
+prepare allowances for in-generation tree checkout. Only the selected lane is desired intent.
+`AgentSession::desired_active_tools` exposes this live distinction to Rust hosts; plugin
+`active_tools` remains effective-only. `pi-coding` supplies non-built-in tools to
 activate for user sessions through `AgentSessionOptions::additional_active_tools`; `pi-session`
 only merges and deduplicates these names. Managed subagents receive no such additions, preserving
 their tool capability ceiling. MCP can reactivate an already permitted entry point on startup.
@@ -2117,8 +2133,68 @@ credential merely by gaining project trust. Coding and the CLI inject their shar
 credential resolver at this seam, without borrowing a model's explicit CLI key. Explicit
 Authorization headers retain precedence over provider and managed OAuth credentials.
 
-`ProductSessionFactory` reloads files after trust resolution and prepares a fresh connected pool
-for every candidate product generation. The immutable local-library MCP plugin owns discovered tools plus the
+`ProductSessionFactory` reloads files after trust resolution and uses
+`McpLibrary::prepare_supervised_generation` to prepare a fresh immutable view over session-scoped
+connections. All eligible servers start concurrently, but only effective enabled direct exposure
+(base exposure or per-tool overrides) participates in one shared ten-second startup budget.
+Indirect-only generations do not wait. Pending, needs-auth and failed servers do not discard healthy
+ready siblings; namespace/registry invariants still reject the complete candidate. The legacy
+standalone `prepare`/`prepare_generation` APIs retain their strict preparation behavior.
+
+MCP's supervisor stores only unresolved transport definitions, auth dependencies, raw protocol
+inventory, epochs and readiness revisions. Resolution, validation and complete connection/discovery
+fit inside a thirty-second attempt; superseded workers cannot publish. Equivalent attempts survive
+cancelled waiters and candidate rebuilds. Reuse requires matching config, transport options, defining
+scope, trust and effective auth identity/revision; policy-only exposure/deadline changes remain
+view-local. Stdio/static Authorization ignore unused auth dependencies; provider resolvers and OAuth
+stores have explicit source identity. Closure observation advances readiness without a polling task.
+Frozen executable views are projected from raw inventories through one shared collision-safe builder.
+
+Ordinary Reload with unchanged connection/trust/auth inputs reuses the transport and its last
+immutable tool/metadata/instructions snapshot; it does not run initialize or list tools merely to
+refresh them. Explicit `/mcp reconnect` or a changed connection fingerprint replaces the transport
+and refreshes both tools and initialize-only instructions. This is an approved Rust divergence from
+legacy `AgentSession.reload` plus MCP `session_shutdown`, which close the old connections.
+
+`tools/list_changed` refreshes tools through the existing peer. Stable notifications and modern SDK
+subscriptions are established before initial discovery; a monotonic event baseline prevents a race
+with that first list. A weak, cancellable slot worker coalesces bursts, performs one list at a time,
+and follows up for events arriving during a list. The refresh-only typed SDK pager uses one bounded
+deadline and explicit request cancellation, because dropping the SDK convenience-list future does
+not cancel its pending request. No HTTP/auth wire implementation or initial-setup retry loop is
+added. Exact connection/attempt fencing discards obsolete completions. Initialize-only metadata is
+unchanged. Failed refresh retains tools and transport with a bounded connected-with-refresh-error
+diagnostic. Inventory or diagnostic transitions advance readiness; equivalent/reordered inventories
+and repeated identical errors do not. Publication still happens only as a complete next-idle
+replacement. A genuine update of a still-published historical slot may conservatively dirty a newer
+candidate once; draining that old source stops subsequent notifications, rather than resetting a
+baseline and hiding races.
+
+Coding filters historical/current selection candidates through the live overlay ceiling, and MCP
+classifies them against trusted configured servers, exposure and actual qualified-name inventory.
+Lossy names, hashes, truncated/overlapping namespaces or mixed exposure can remain unresolved while
+relevant inventory is pending or failed; they are never guessed or prematurely forgotten. Exact
+visible/granted inventory resolves them; completed inventories with no exact match prune them with
+a bounded diagnostic. Any already-named alias whose identity remains ambiguous is quarantined from
+the executable projection after naming, without renaming peers or altering raw transport inventory.
+A generation-local reader captures only a weak `AgentSession`, bound before startup hooks, so MCP
+entrypoint activation merges live desired intent and cannot resurrect an earlier hook's explicit
+clear. The supervisor retains none of this executable selection policy.
+
+The sole strong per-generation supervisor lease lives in an opaque MCP readiness source captured
+by `GenerationFreshness`, separately from executable runtime/plugin/command snapshots. Those views
+and Coding's live-runtime cache hold only weak leases. Unpublished candidates cannot displace a
+published cache owner. Each source pins the exact raw slots and epoch captured by its snapshot, not
+a later current map. The supervisor keeps only weak published-slot references beside its staged
+transport map. Reconciliation releases map ownership rather than cancelling published pins. Dropping
+an unpublished current candidate restores live published slots and cleans up candidate-exclusive
+transports; an older abandoned source cannot roll back a newer epoch or resurrect an authoritative
+remove/logout/reconnect. Equivalent historical pins permit configuration reversion without reopening
+the transport. Last-slot-owner cleanup cancels even when executable inventory remains retained and
+does not itself stale replacement readiness; genuine readiness changes still notify. A successful
+Reload releases the old lease after the new candidate owns the same supervisor.
+New/resume/fork/shutdown retire the old owner. Abrupt owner drop cancels retained transports even if
+old executable views survive. The immutable local-library MCP plugin owns discovered tools plus the
 registered `/mcp` command. Explicit `McpToolSet` callers such as ACP instead receive tools only and
 never trigger local-file discovery or command registration. The CLI's `pi mcp add/remove/list` path
 runs before product/session construction and preserves command-specific exit codes. Bare `/mcp` uses
@@ -2127,8 +2203,10 @@ tools without registering them. Trusted project-only enable/disable creates a po
 copying global transports or credentials. Omitted login/logout/reconnect names select the sole eligible
 or sole pending OAuth candidate, otherwise prompt; noninteractive ambiguity requires a name. MCP owns
 its action/name completion metadata, published through the generic frozen command catalog. Back,
-read-only selection and cancellation do not write or reload. Reconnect proves the named connection
-first, while policy changes save the candidate file, then request the existing whole-session reload.
+read-only selection and cancellation do not write or reload. Supervised reconnect invalidates the
+current attempt/backoff and requests the existing whole-session reload; standalone reconnect still
+proves the named connection first. Successful disable/remove/logout fences stale configuration and
+attempt epochs. Policy changes save the candidate file, then request whole-session reload.
 HTTP add can author typed unresolved OAuth settings without resolving secrets or initiating sign-in;
 invalid options leave bytes unchanged. `McpLibrary::with_command_values(true)` is an explicit
 local-library capability, enabled by Coding/CLI after resolving trust. Only enabled eligible entries
@@ -2153,12 +2231,13 @@ environment expansion remain documented extensions; URL/command/args/cwd never e
 Inspection includes optional provider identity and unknown-name
 errors give configured-name/trust guidance without reading ignored project definitions. Shell OAuth
 allows non-TTY callbacks/already-authorized probes and positive finite fractional timeout seconds;
-only pasted input needs a terminal. Connection, discovery, registration
-or configuration failure rejects the candidate without swapping the current generation. Configuration
-already saved on disk remains pending; errors direct the user to retry reload or revert those edits.
-Pool ownership is reference-counted;
-retiring the last generation owner cancels its transports and child processes. Each server has
-30-second connection and discovery bounds. Request cancellation uses the SDK's negotiated
+only pasted input needs a terminal. Per-server connection/resolution/auth failures in supervised
+preparation become frozen readiness diagnostics; document, identity or registration-invariant failures
+reject the candidate without swapping the current generation. Configuration already saved on disk
+remains pending; errors direct the user to retry reload or revert those edits. Transport ownership is
+reference-counted separately from policy views; the final supervisor owner cancels transports and
+child processes regardless of retained old views. Explicit client pools retain their existing ownership
+and strict connection/discovery contracts. Request cancellation uses the SDK's negotiated
 notification/stream-close semantics. Server-returned tool content retains normal tool semantics.
 Text, images and embedded text/image resources are projected into normal Pi tool results; the full raw
 result remains in result details. Structured-only results fall back to JSON text, empty errors receive
@@ -2191,8 +2270,11 @@ MCP; generic runtimes only expose capability queries and ordinary selection muta
 Startup runs after selection restoration for fresh, reload, resume and fork generations; changes
 use the normal `ActiveToolsChange` records without forcing lazy session files to materialize.
 Managed child sessions use the same activation rules within their allowed tool catalog; the MCP
-plugin does not branch on execution origin. Connections still prepare before publication;
-asynchronous discovery is separate.
+plugin does not branch on execution origin. Every publication contains a complete immutable snapshot;
+later connection readiness is published only through the existing next-idle generation transaction.
+Unlike Pi's tool-call-time selective registration, a server becoming ready during a turn cannot add
+tools or hand execution to a new generation in that same turn. Pending diagnostics make this deliberate
+Rust timing divergence visible; tool execution is never replayed merely to adopt a newer inventory.
 Invalid flag types reject the candidate rather than accumulating per-entry Pi diagnostics. OAuth and
 provider-auth values remain connection dependencies rather than registry mutations. Description
 contributes a server summary. `McpLibrary::login` validates defining scope, probes first, sends the
@@ -2218,6 +2300,15 @@ requirements. Pending authorization/client registration and unrelated credential
 Coding captures revisions before connection preparation so external login racing a probe is not lost;
 external login, replacement and logout trigger whole-generation replacement before the next idle
 submission, including for already-ready transports that may cache OAuth tokens.
+
+`pi-session::LiveRuntimeScopeId` is a domain-neutral, opaque, process-local identity supplied on
+`SessionGenerationRequest` before initial preparation. Reload and freshness refresh preserve it;
+initial creation, New, Resume (including the same file), and Fork/Branch allocate a fresh candidate
+scope. The scope changes only at successful publication, so failed preparation retains the current
+identity. A checked process-wide allocator never wraps. Session path is deliberately not live identity:
+independent managers may open the same persisted path through one shared factory. Coding uses the
+scope only for its weak MCP lease cache. The ID has no wire, UI or Pi-v4 representation and never
+materializes a lazy session file.
 
 `pi-session::GenerationFreshness` is domain-neutral: it names no MCP service or credential policy.
 Admission rechecks freshness after waiting for a prior activity. Automatic replacement reserves idle

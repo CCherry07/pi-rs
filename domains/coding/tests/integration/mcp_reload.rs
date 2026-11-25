@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use axum::response::IntoResponse;
@@ -54,6 +55,12 @@ async fn fixture_provider_response(
     )
 }
 
+#[derive(Default)]
+struct DiscoveryCounts {
+    initialize: AtomicUsize,
+    tools_list: AtomicUsize,
+}
+
 struct McpFixture {
     directory: tempfile::TempDir,
     pi: Pi,
@@ -61,6 +68,7 @@ struct McpFixture {
     url: String,
     tool_name: Arc<RwLock<String>>,
     tool_calls: Arc<RwLock<Vec<String>>>,
+    discoveries: Arc<DiscoveryCounts>,
     requests: Arc<RwLock<Vec<Value>>>,
     server_task: tokio::task::JoinHandle<()>,
 }
@@ -73,14 +81,17 @@ impl McpFixture {
     async fn with_policy(enabled: bool, policy: Value) -> Self {
         let tool_name = Arc::new(RwLock::new("echo".to_string()));
         let tool_calls = Arc::new(RwLock::new(Vec::new()));
+        let discoveries = Arc::new(DiscoveryCounts::default());
         let router = axum::Router::new().route(
             "/mcp",
             axum::routing::post({
                 let tool_name = Arc::clone(&tool_name);
                 let tool_calls = Arc::clone(&tool_calls);
+                let discoveries = Arc::clone(&discoveries);
                 move |axum::Json(request): axum::Json<Value>| {
                     let tool_name = Arc::clone(&tool_name);
                     let tool_calls = Arc::clone(&tool_calls);
+                    let discoveries = Arc::clone(&discoveries);
                     async move {
                         let id = &request["id"];
                         if id.is_null() {
@@ -94,16 +105,22 @@ impl McpFixture {
                                 }))
                                 .into_response();
                             }
-                            "initialize" => json!({
-                                "protocolVersion": "2025-03-26",
-                                "capabilities": {"tools": {}},
-                                "serverInfo": {"name": "reload-fixture", "version": "1"},
-                                "instructions": format!("Fixture guidance for {}.", tool_name.read().unwrap())
-                            }),
-                            "tools/list" => json!({"tools": [{
-                                "name": tool_name.read().unwrap().clone(),
-                                "inputSchema": {"type": "object"}
-                            }]}),
+                            "initialize" => {
+                                discoveries.initialize.fetch_add(1, Ordering::AcqRel);
+                                json!({
+                                    "protocolVersion": "2025-03-26",
+                                    "capabilities": {"tools": {}},
+                                    "serverInfo": {"name": "reload-fixture", "version": "1"},
+                                    "instructions": format!("Fixture guidance for {}.", tool_name.read().unwrap())
+                                })
+                            }
+                            "tools/list" => {
+                                discoveries.tools_list.fetch_add(1, Ordering::AcqRel);
+                                json!({"tools": [{
+                                    "name": tool_name.read().unwrap().clone(),
+                                    "inputSchema": {"type": "object"}
+                                }]})
+                            }
                             "tools/call" => {
                                 tool_calls.write().unwrap().push(
                                     request["params"]["name"].as_str().unwrap().to_string(),
@@ -175,6 +192,7 @@ impl McpFixture {
             url,
             tool_name,
             tool_calls,
+            discoveries,
             requests,
             server_task,
         }
@@ -208,6 +226,19 @@ impl McpFixture {
             json!({"version": 1, "mcpServers": {"fixture": server}}).to_string(),
         )
         .unwrap();
+    }
+
+    fn assert_discoveries(&self, expected: usize) {
+        assert_eq!(
+            self.discoveries.initialize.load(Ordering::Acquire),
+            expected,
+            "transport opens"
+        );
+        assert_eq!(
+            self.discoveries.tools_list.load(Ordering::Acquire),
+            expected,
+            "inventory snapshots"
+        );
     }
 
     fn assert_tool(&self, name: &str, expected: bool) {
@@ -308,7 +339,7 @@ impl Drop for McpFixture {
 }
 
 #[tokio::test]
-async fn mcp_guidance_reaches_the_main_model_and_tracks_generation_replacement() {
+async fn mcp_guidance_is_cached_on_reload_and_refreshed_on_reconnect_or_fingerprint_change() {
     let fixture = McpFixture::new(true).await;
     let assert_guidance = |expected: Option<&str>| {
         let requests = fixture.requests.read().unwrap();
@@ -360,7 +391,35 @@ async fn mcp_guidance_reaches_the_main_model_and_tracks_generation_replacement()
         .prompt("Continue after reload.")
         .await
         .unwrap();
+    assert_guidance(Some("Fixture guidance for echo."));
+    fixture.assert_discoveries(1);
+
+    fixture
+        .session
+        .current()
+        .prompt("/mcp reconnect fixture")
+        .await
+        .unwrap();
+    fixture
+        .session
+        .current()
+        .prompt("Continue after reconnect.")
+        .await
+        .unwrap();
     assert_guidance(Some("Fixture guidance for renamed."));
+    fixture.assert_discoveries(2);
+
+    *fixture.tool_name.write().unwrap() = "fingerprinted".into();
+    fixture.set_policy(json!({"headers":{"x-fixture-generation":"changed"}}));
+    fixture.session.reload().await.unwrap();
+    fixture
+        .session
+        .current()
+        .prompt("Continue after connection-input change.")
+        .await
+        .unwrap();
+    assert_guidance(Some("Fixture guidance for fingerprinted."));
+    fixture.assert_discoveries(3);
 
     fixture.set_enabled(false);
     fixture.session.reload().await.unwrap();
@@ -493,14 +552,36 @@ async fn mcp_reload_removes_disabled_or_deleted_servers() {
 }
 
 #[tokio::test]
-async fn mcp_reload_reconciles_a_changed_remote_tool_catalog() {
+async fn mcp_catalog_is_cached_on_reload_and_refreshed_on_reconnect_or_fingerprint_change() {
     let fixture = McpFixture::new(true).await;
     fixture.assert_tool("mcp__fixture__echo", true);
     *fixture.tool_name.write().unwrap() = "renamed".into();
     fixture.session.reload().await.unwrap();
+    fixture.assert_tool("mcp__fixture__echo", true);
+    fixture.assert_tool("mcp__fixture__renamed", false);
+    fixture.invoke("mcp__fixture__echo", "echo").await;
+    fixture.assert_discoveries(1);
+
+    fixture
+        .session
+        .current()
+        .prompt("/mcp reconnect fixture")
+        .await
+        .unwrap();
     fixture.assert_tool("mcp__fixture__echo", false);
     fixture.assert_tool("mcp__fixture__renamed", true);
     fixture.invoke("mcp__fixture__renamed", "renamed").await;
+    fixture.assert_discoveries(2);
+
+    *fixture.tool_name.write().unwrap() = "fingerprinted".into();
+    fixture.set_policy(json!({"headers":{"x-fixture-generation":"changed"}}));
+    fixture.session.reload().await.unwrap();
+    fixture.assert_tool("mcp__fixture__renamed", false);
+    fixture.assert_tool("mcp__fixture__fingerprinted", true);
+    fixture
+        .invoke("mcp__fixture__fingerprinted", "fingerprinted")
+        .await;
+    fixture.assert_discoveries(3);
     fixture.shutdown().await;
 }
 
@@ -517,13 +598,13 @@ async fn mcp_reload_failure_keeps_the_previous_connection_usable() {
 }
 
 #[tokio::test]
-async fn mcp_reload_connection_failure_keeps_the_previous_connection_usable() {
+async fn mcp_reload_isolates_an_unavailable_sibling_and_reuses_the_healthy_connection() {
     let fixture = McpFixture::new(true).await;
     let before = fixture.session.current();
     fs::write(
         fixture.config_path(),
         json!({"version": 1, "mcpServers": {
-            "fixture": {"type": "http", "url": fixture.url},
+            "fixture": {"type": "http", "url": fixture.url, "exposure":"direct"},
             "unavailable": {"type": "stdio", "command": fixture.directory.path().join("missing-server")}
         }})
         .to_string(),

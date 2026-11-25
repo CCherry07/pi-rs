@@ -5,6 +5,7 @@ use pi_agent::{Agent, AgentLoopOutcome, AgentLoopStop};
 use pi_core::{AbortHandle, AgentEvent, ContentBlock, ImageContent, Message, UserMessage};
 
 use super::PromptOutcome;
+use super::selection_intent::ToolSelection;
 use crate::runtime::events::AgentSessionEventHub;
 use crate::{
     AgentMessage, LaneRecord, LaneRecordEntry, MAIN_LANE, NewLaneRecord, OperationError,
@@ -100,6 +101,7 @@ impl Cancellation {
 /// performed after the low-level Agent has finished. Durable delivery remains a
 /// separate fact: a settling activity is busy but no longer accepts run input.
 pub(super) struct SessionActivity {
+    pub(super) tool_selection: Arc<ToolSelection>,
     store: SessionStore,
     events: Arc<AgentSessionEventHub>,
     gate: tokio::sync::Mutex<()>,
@@ -118,9 +120,11 @@ impl SessionActivity {
         store: SessionStore,
         events: Arc<AgentSessionEventHub>,
         recovered_queue: RecoveredQueue,
+        tool_selection: Arc<ToolSelection>,
     ) -> Self {
         let (phase, _) = watch::channel(ActivityPhase::Idle);
         Self {
+            tool_selection,
             store,
             events,
             gate: tokio::sync::Mutex::new(()),
@@ -503,10 +507,12 @@ impl SessionActivity {
         let mut state = self.lock();
         let selection = active_tools
             .map(|tools| {
-                let unchanged = self.store.selected_active_tools()?.as_deref() == Some(tools);
+                let previous = self.store.selected_active_tools()?;
+                let desired = self.tool_selection.capture(previous.as_deref(), tools);
+                let unchanged = previous.as_ref() == Some(&desired);
                 Ok::<_, SessionError>((!unchanged).then(|| {
                     SessionEntry::ActiveToolsChange(crate::ActiveToolsEntry {
-                        active_tool_names: tools.to_vec(),
+                        active_tool_names: desired,
                     })
                 }))
             })

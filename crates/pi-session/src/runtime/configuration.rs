@@ -84,19 +84,42 @@ impl AgentSession {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// The current branch's durable desired selection, including exact names
+    /// retained while temporarily absent. This does not declare or register tools.
+    /// An explicit empty selection stays empty; only a missing selection falls
+    /// back to the generation's effective runtime defaults. Reading is passive.
+    pub fn desired_active_tools(&self) -> Result<Vec<String>, SessionError> {
+        Ok(self
+            .store
+            .selected_active_tools()?
+            .unwrap_or_else(|| self.runtime.active_tools()))
+    }
+
+    /// Pi plugin setters ignore unrelated unknown names, unlike the strict Rust
+    /// setter. Exact policy-allowed absent names still carry explicit intent.
+    pub(crate) fn set_active_tools_from_plugin(
+        &self,
+        tools: Vec<String>,
+    ) -> Result<(), SessionError> {
+        self.set_active_tools(self.activity.tool_selection.plugin_request(tools))
+    }
+
     pub fn set_active_tools(
         &self,
         tools: impl IntoIterator<Item = impl Into<String>>,
     ) -> Result<(), SessionError> {
         let _operation = self.try_begin_operation()?;
+        let desired: Vec<String> = tools.into_iter().map(Into::into).collect();
         let prepared = self
             .runtime
             .prepare_configuration(RuntimeConfigurationPatch {
-                active_tools: Some(tools.into_iter().map(Into::into).collect()),
+                active_tools: Some(self.activity.tool_selection.explicit_effective(&desired)?),
                 ..RuntimeConfigurationPatch::default()
             })?;
+        // Validate executable names and render before committing either view.
+        // Unlike passive capture, an explicit selection replaces all intent.
         let entry = SessionEntry::ActiveToolsChange(ActiveToolsEntry {
-            active_tool_names: prepared.configuration().active_tools.clone(),
+            active_tool_names: self.activity.tool_selection.reconcile(desired),
         });
         self.commit_configuration(prepared, vec![entry], None)
     }

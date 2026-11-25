@@ -83,12 +83,12 @@ fn transient_status(status: http::StatusCode) -> bool {
 /// or its backoff timer; there is no detached retry work.
 pub(super) async fn connect_discovered(
     config: McpServerConfig,
-    policy: McpServerPolicy,
+    options: McpConnectionOptions,
     auth: McpClientAuth,
-) -> Result<(Arc<ConnectedServer>, Vec<McpToolSpec>), McpError> {
+) -> Result<(Arc<McpConnection>, Vec<McpToolSpec>), McpError> {
     let http = matches!(config.transport, McpTransport::Http { .. });
     for attempt in 0..=CONNECT_RETRY_DELAYS.len() {
-        match discover_once(config.clone(), policy.clone(), auth.clone()).await {
+        match discover_once(config.clone(), options.clone(), auth.clone()).await {
             Ok(result) => return Ok(result),
             Err(failure) => {
                 let Some(delay) = CONNECT_RETRY_DELAYS

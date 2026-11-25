@@ -10,7 +10,7 @@ use rmcp::model::{
 };
 use rmcp::service::{NotificationContext, RequestContext};
 use rmcp::{ClientHandler, ErrorData, RoleClient};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 #[derive(Clone)]
 pub(crate) struct McpClientHandler {
@@ -18,6 +18,7 @@ pub(crate) struct McpClientHandler {
     pub(crate) log: Option<ServerLog>,
     pub(crate) stderr: StderrCapture,
     pub(crate) progress: broadcast::Sender<ProgressNotificationParam>,
+    pub(crate) tools_changed: watch::Sender<u64>,
 }
 
 impl McpClientHandler {
@@ -40,6 +41,7 @@ impl McpClientHandler {
             log: None,
             stderr: StderrCapture::default(),
             progress: broadcast::channel(64).0,
+            tools_changed: watch::channel(0).0,
         }
     }
 }
@@ -68,6 +70,12 @@ impl ClientHandler for McpClientHandler {
         if let Some(log) = &self.log {
             log.write(params);
         }
+    }
+
+    async fn on_tool_list_changed(&self, _context: NotificationContext<RoleClient>) {
+        // Keep the revision even before a supervisor subscribes, including initial discovery.
+        self.tools_changed
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
     }
 
     async fn on_progress(

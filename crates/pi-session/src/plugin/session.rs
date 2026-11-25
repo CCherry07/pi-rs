@@ -343,19 +343,8 @@ impl SessionContextAccess for PiPluginContext {
     }
 
     fn set_active_tools(&self, tool_names: Vec<String>) -> Result<(), PluginContextError> {
-        let session = self.session()?;
-        let available = session
-            .runtime()
-            .tool_specs()
-            .into_iter()
-            .map(|tool| tool.name)
-            .collect::<HashSet<_>>();
-        session
-            .set_active_tools(
-                tool_names
-                    .into_iter()
-                    .filter(|tool| available.contains(tool)),
-            )
+        self.session()?
+            .set_active_tools_from_plugin(tool_names)
             .map_err(context_failed)
     }
 
