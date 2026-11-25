@@ -3,6 +3,8 @@ use crate::McpProviderTokenResolver;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const ENDPOINT: &str = "PI_MCP_SUPERVISOR_VALIDATION_ENDPOINT";
+const CHILD_TEST: &str =
+    "supervisor::input::tests::expanded_local_provider_url_is_validated_before_auth_or_transport";
 
 struct AuthTripwire(Arc<AtomicUsize>);
 
@@ -16,20 +18,59 @@ impl McpProviderTokenResolver for AuthTripwire {
     }
 }
 
+#[test]
 fn equivalence_tracks_effective_auth_source_without_reading_credentials() {
     let make = |config: McpServerConfig, auth| {
+        ConnectionInput::new(
+            config,
+            (&crate::policy::McpServerPolicy::direct()).into(),
+            auth,
+            [0; 32],
+        )
+        .unwrap()
     };
     let http = McpServerConfig::http("server", "http://127.0.0.1/mcp");
     let auth = McpClientAuth::default();
     assert!(make(http.clone(), auth.clone()).equivalent(&make(http.clone(), auth.clone())));
+    assert!(
+        !make(http.clone(), auth.clone()).equivalent(&make(http.clone(), McpClientAuth::default()))
+    );
 
+    let file =
+        |path| McpClientAuth::default().with_oauth_store(crate::McpOAuthCredentialStore::new(path));
+    assert!(
+        make(http.clone(), file("not-created/auth.json"))
+            .equivalent(&make(http.clone(), file("not-created/auth.json")))
+    );
+    assert!(
+        !make(http.clone(), file("not-created/auth.json"))
+            .equivalent(&make(http.clone(), file("not-created/other.json")))
+    );
 
     let calls = Arc::new(AtomicUsize::new(0));
     let provider = http.clone().provider_auth("fixture-provider");
     let resolver: Arc<dyn McpProviderTokenResolver> = Arc::new(AuthTripwire(calls.clone()));
     let provider_auth = |resolver| McpClientAuth::default().with_provider_tokens(resolver);
+    assert!(
+        make(provider.clone(), provider_auth(resolver.clone()))
+            .equivalent(&make(provider.clone(), provider_auth(resolver)))
+    );
+    assert!(
+        !make(
+            provider.clone(),
+            provider_auth(Arc::new(AuthTripwire(calls.clone())))
+        )
+        .equivalent(&make(
+            provider,
+            provider_auth(Arc::new(AuthTripwire(calls.clone())))
+        ))
+    );
 
     // Explicit headers and stdio do not use these distinct stores or providers.
+    let header = http.headers(BTreeMap::from([(
+        "aUtHoRiZaTiOn".into(),
+        "Bearer fixture".into(),
+    )]));
     assert!(make(header.clone(), auth.clone()).equivalent(&make(header, McpClientAuth::default())));
     let stdio = McpServerConfig::stdio("server", "never-executed");
     assert!(make(stdio.clone(), auth).equivalent(&make(stdio, McpClientAuth::default())));
@@ -108,6 +149,10 @@ fn expanded_local_provider_url_is_validated_before_auth_or_transport() {
             let error = result.err().expect("invalid expanded URL must fail");
             assert!(matches!(error, McpError::InvalidHttp { .. }), "{error}");
             let message = error.to_string();
+            let expected = if std::env::var(ENDPOINT)
+                .unwrap()
+                .contains("provider.invalid")
+            {
                 "provider auth requires https or a loopback URL"
             } else {
                 "no URL userinfo or fragment"
