@@ -38,6 +38,7 @@ pub struct McpLibrary {
     pub(crate) register_tool_search: bool,
     client_auth: McpClientAuth,
     oauth_host: Arc<dyn crate::McpOAuthHost>,
+    allow_command_values: bool,
 }
 
 /// A candidate product plugin plus typed auth-only readiness diagnostics.
@@ -214,6 +215,7 @@ impl McpInspection {
     }
 }
 
+#[derive(Clone)]
 struct Entry {
     /// Scope that owns the transport and its expansion provenance.
     scope: McpScope,
@@ -231,6 +233,7 @@ impl McpLibrary {
             cwd: cwd.map(Path::to_path_buf),
             trusted,
             register_tool_search: true,
+            allow_command_values: false,
             oauth_host: Arc::new(crate::login::ManualOAuthHost),
             client_auth: McpClientAuth::default().with_oauth_store(McpOAuthCredentialStore::new(
                 agent_dir.join("mcp-auth.json"),
@@ -241,6 +244,14 @@ impl McpLibrary {
     /// Installs host-owned auth dependencies without coupling MCP to a product domain.
     pub fn with_client_auth(mut self, client_auth: McpClientAuth) -> Self {
         self.client_auth = client_auth;
+        self
+    }
+
+    /// Explicitly permits command-backed values for eligible local configuration at connection
+    /// time. This never grants project trust and never applies to transport-only/ACP servers.
+    /// Read/save/credential metadata remain non-executing. Disabled entries never run helpers.
+    pub fn with_command_values(mut self, enabled: bool) -> Self {
+        self.allow_command_values = enabled;
         self
     }
 
@@ -260,11 +271,15 @@ impl McpLibrary {
         signal: AbortSignal,
     ) -> Result<usize, McpOAuthError> {
         let operation = async {
+            let entry = self
+                .management_oauth_entry(name, scope)
+                .map_err(McpOAuthError::Failed)?;
             let config = self
-                .management_oauth_config(name, scope)
+                .resolve_connection(entry.clone(), signal.clone())
+                .await
                 .map_err(McpOAuthError::Failed)?;
             let challenge =
-                match McpToolSet::connect_with_auth(vec![config.clone()], self.client_auth.clone())
+                match McpToolSet::connect_with_auth(vec![config.clone()], self.connection_auth())
                     .await
                 {
                     Ok(pool) => {
@@ -283,14 +298,22 @@ impl McpLibrary {
             let request = crate::McpOAuthLoginRequest {
                 name: name.into(),
                 server_url: url.clone(),
-                settings: config.oauth.clone().unwrap_or_default(),
+                settings: self
+                    .local_values()
+                    .oauth(config.oauth.clone().unwrap_or_default(), signal.clone())
+                    .await
+                    .map_err(McpOAuthError::Failed)?,
                 store: self.client_auth.oauth_store.clone(),
                 challenge,
             };
             self.oauth_host
                 .sign_in(request, prompt, signal.clone())
                 .await?;
-            let pool = McpToolSet::connect_with_auth(vec![config], self.client_auth.clone())
+            let config = self
+                .resolve_connection(entry, signal.clone())
+                .await
+                .map_err(McpOAuthError::Failed)?;
+            let pool = McpToolSet::connect_with_auth(vec![config], self.connection_auth())
                 .await
                 .map_err(|error| McpOAuthError::Failed(format!("Signed in, but {error}")))?;
             let count = pool.tools().len();
@@ -357,8 +380,12 @@ impl McpLibrary {
         scope: Option<McpScope>,
         signal: AbortSignal,
     ) -> Result<(McpOAuthSignIn, McpOAuthRedirect), McpOAuthError> {
+        let entry = self
+            .management_oauth_entry(name, scope)
+            .map_err(McpOAuthError::Failed)?;
         let config = self
-            .management_oauth_config(name, scope)
+            .resolve_oauth_entry(entry, signal.clone())
+            .await
             .map_err(McpOAuthError::Failed)?;
         let McpTransport::Http { url, .. } = &config.transport else {
             unreachable!("validated HTTP")
@@ -402,6 +429,10 @@ impl McpLibrary {
         name: &str,
         scope: Option<McpScope>,
     ) -> Result<McpServerConfig, String> {
+        self.resolve_identity(self.management_oauth_entry(name, scope)?)
+    }
+
+    fn management_oauth_entry(&self, name: &str, scope: Option<McpScope>) -> Result<Entry, String> {
         if let Some(scope) = scope {
             self.path(scope)?;
         }
@@ -413,23 +444,15 @@ impl McpLibrary {
         if scope.is_some_and(|scope| scope != entry.scope) {
             return Err("MCP server is defined in another scope; omit --local for an inherited global server".into());
         }
-        let config = self.resolve(entry)?;
-        if let Some(auth) = &config.auth {
+        if let Some(provider) = entry.config.auth_provider() {
             return Err(format!(
-                "This MCP server uses provider credentials; use pi auth login/logout {}",
-                auth.provider
+                "This MCP server uses provider credentials; use pi auth login/logout {provider}"
             ));
         }
-        match &config.transport {
-            McpTransport::Http { headers, .. }
-                if !headers
-                    .keys()
-                    .any(|name| name.eq_ignore_ascii_case("authorization")) =>
-            {
-                Ok(config)
-            }
-            _ => Err("MCP OAuth requires an HTTP server without an Authorization header".into()),
+        if !entry.config.supports_oauth() {
+            return Err("MCP OAuth requires an HTTP server without an Authorization header".into());
         }
+        Ok(entry)
     }
 
     pub(crate) fn path(&self, scope: McpScope) -> Result<PathBuf, String> {
@@ -690,7 +713,7 @@ impl McpLibrary {
             return report;
         }
         report.state = McpServerState::Failed;
-        let (config, mut inspection_policy) = match self.resolve_with_policy(entry) {
+        let (config, mut inspection_policy) = match self.resolve_with_policy(entry).await {
             Ok(config) => config,
             Err(error) => {
                 report.error = Some(error);
@@ -703,7 +726,7 @@ impl McpLibrary {
         inspection_policy.tool_exposure.clear();
         match McpToolSet::connect_with_policies_and_auth(
             vec![(config, inspection_policy)],
-            self.client_auth.clone(),
+            self.connection_auth(),
         )
         .await
         {
@@ -822,12 +845,12 @@ impl McpLibrary {
         signal: AbortSignal,
     ) -> Result<(McpOAuthSignIn, McpOAuthRedirect), McpOAuthError> {
         let entry = self
-            .entries()
-            .map_err(McpOAuthError::Failed)?
-            .into_iter()
-            .find(|entry| entry.config.name() == name)
-            .ok_or_else(|| McpOAuthError::Failed("MCP server not found".into()))?;
-        let config = self.resolve(entry).map_err(McpOAuthError::Failed)?;
+            .management_oauth_entry(name, None)
+            .map_err(McpOAuthError::Failed)?;
+        let config = self
+            .resolve_oauth_entry(entry, signal.clone())
+            .await
+            .map_err(McpOAuthError::Failed)?;
         if config.auth.is_some() {
             return Err(McpOAuthError::Failed(
                 "provider-authenticated MCP servers do not use OAuth sign-in".into(),
@@ -862,7 +885,13 @@ impl McpLibrary {
         name: &str,
         signal: AbortSignal,
     ) -> Result<(), McpOAuthError> {
-        let config = self.resolve_named(name).map_err(McpOAuthError::Failed)?;
+        let entry = self
+            .management_oauth_entry(name, None)
+            .map_err(McpOAuthError::Failed)?;
+        let config = self
+            .resolve_oauth_entry(entry, signal.clone())
+            .await
+            .map_err(McpOAuthError::Failed)?;
         let McpTransport::Http { url, .. } = &config.transport else {
             return Err(McpOAuthError::Failed(
                 "OAuth refresh requires an HTTP MCP server".into(),
@@ -902,7 +931,7 @@ impl McpLibrary {
             .into_iter()
             .find(|entry| entry.config.name() == name)
             .ok_or("MCP server not found")?;
-        self.resolve(entry)
+        self.resolve_identity(entry)
     }
 
     pub async fn test(&self, name: &str) -> Result<Vec<String>, String> {
@@ -914,11 +943,10 @@ impl McpLibrary {
         if !entry.config.enabled() {
             return Err("Enable and save the server before testing".into());
         }
-        let config = self.resolve_with_policy(entry)?;
-        let pool =
-            McpToolSet::connect_with_policies_and_auth(vec![config], self.client_auth.clone())
-                .await
-                .map_err(|e| e.to_string())?;
+        let config = self.resolve_with_policy(entry).await?;
+        let pool = McpToolSet::connect_with_policies_and_auth(vec![config], self.connection_auth())
+            .await
+            .map_err(|e| e.to_string())?;
         let names = pool.tool_names();
         pool.shutdown().await.map_err(|e| e.to_string())?;
         Ok(names)
@@ -931,7 +959,7 @@ impl McpLibrary {
             .entries()?
             .into_iter()
             .filter(|entry| entry.config.enabled())
-            .map(|entry| self.resolve(entry))
+            .map(|entry| self.resolve_identity(entry))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(crate::McpCredentialWatch::new(
             self.client_auth.oauth_store.clone(),
@@ -954,12 +982,14 @@ impl McpLibrary {
             .iter()
             .any(|entry| entry.config.enabled() && entry.config.policy().uses_deferred());
         let rows = entries.iter().map(Entry::row).collect();
-        let configs = entries
-            .into_iter()
-            .filter(|entry| entry.config.enabled())
-            .map(|entry| self.resolve_with_policy(entry))
-            .collect::<Result<Vec<_>, _>>()?;
-        let pool = McpToolSet::connect_generation(configs, self.client_auth.clone(), true)
+        let configs = futures::future::try_join_all(
+            entries
+                .into_iter()
+                .filter(|entry| entry.config.enabled())
+                .map(|entry| self.resolve_with_policy(entry)),
+        )
+        .await?;
+        let pool = McpToolSet::connect_generation(configs, self.connection_auth(), true)
             .await
             .map_err(|e| e.to_string())?;
         let authorization_required = pool.authorization_required().to_vec();
@@ -976,21 +1006,69 @@ impl McpLibrary {
         })
     }
 
-    fn resolve_with_policy(
+    async fn resolve_with_policy(
         &self,
         entry: Entry,
     ) -> Result<(McpServerConfig, McpServerPolicy), String> {
         let mut policy = entry.config.policy().clone();
         policy.root = Some(self.cwd.as_ref().unwrap_or(&self.agent_dir).clone());
-        Ok((self.resolve(entry)?, policy))
+        Ok((
+            self.resolve_connection(entry, pi_core::AbortHandle::new().1)
+                .await?,
+            policy,
+        ))
     }
 
-    fn resolve(&self, entry: Entry) -> Result<McpServerConfig, String> {
+    fn resolve_identity(&self, entry: Entry) -> Result<McpServerConfig, String> {
+        self.path(entry.scope)?;
+        entry.config.resolve_identity()
+    }
+
+    fn local_values(&self) -> crate::config::LocalValues {
+        crate::config::LocalValues {
+            cwd: self.cwd.as_ref().unwrap_or(&self.agent_dir).clone(),
+            allow_commands: self.allow_command_values,
+        }
+    }
+
+    fn connection_auth(&self) -> McpClientAuth {
+        let mut auth = self.client_auth.clone();
+        auth.local_values = Some(self.local_values());
+        auth
+    }
+
+    async fn resolve_oauth_entry(
+        &self,
+        entry: Entry,
+        signal: AbortSignal,
+    ) -> Result<McpServerConfig, String> {
+        if !entry.config.enabled() {
+            return Err("Enable the MCP server before connecting or signing in".into());
+        }
+        let mut config = self.resolve_identity(entry)?;
+        if let Some(settings) = config.oauth.take() {
+            config.oauth = Some(self.local_values().oauth(settings, signal).await?);
+        }
+        Ok(config)
+    }
+
+    async fn resolve_connection(
+        &self,
+        entry: Entry,
+        signal: AbortSignal,
+    ) -> Result<McpServerConfig, String> {
         let path = self.path(entry.scope)?;
-        entry.config.resolve_transport(McpConfigContext {
-            config_dir: path.parent().ok_or("Invalid MCP configuration path")?,
-            default_cwd: self.cwd.as_ref().unwrap_or(&self.agent_dir),
-        })
+        entry
+            .config
+            .resolve_for_connect(
+                McpConfigContext {
+                    config_dir: path.parent().ok_or("Invalid MCP configuration path")?,
+                    default_cwd: self.cwd.as_ref().unwrap_or(&self.agent_dir),
+                },
+                self.allow_command_values,
+                signal,
+            )
+            .await
     }
 }
 
@@ -1254,8 +1332,8 @@ mod tests {
         assert_eq!(library.read(McpScope::Global).unwrap().content, content);
     }
 
-    #[test]
-    fn project_policy_overrides_keep_global_transport_and_replace_only_selected_policy() {
+    #[tokio::test]
+    async fn project_policy_overrides_keep_global_transport_and_replace_only_selected_policy() {
         let dir = tempfile::tempdir().unwrap();
         let agent = dir.path().join("agent");
         let project = dir.path().join("project");
@@ -1287,7 +1365,7 @@ mod tests {
             entry.config.policy().exposure_for("read-file"),
             crate::policy::McpExposure::Direct
         );
-        let (_, policy) = library.resolve_with_policy(entry).unwrap();
+        let (_, policy) = library.resolve_with_policy(entry).await.unwrap();
         assert_eq!(policy.root.as_deref(), Some(project.as_path()));
 
         let current = library.read(McpScope::Project).unwrap();
@@ -1383,8 +1461,8 @@ mod tests {
         assert!(!library.entries().unwrap()[0].config.enabled());
     }
 
-    #[test]
-    fn scoped_resolution_supplies_configuration_and_session_directories() {
+    #[tokio::test]
+    async fn scoped_resolution_supplies_configuration_and_session_directories() {
         let dir = tempfile::tempdir().unwrap();
         let agent = dir.path().join("agent");
         let project = dir.path().join("project");
@@ -1407,7 +1485,10 @@ mod tests {
                 "default" => project.clone(),
                 name => panic!("unexpected entry {name}"),
             };
-            let resolved = library.resolve(entry).unwrap();
+            let resolved = library
+                .resolve_connection(entry, pi_core::AbortHandle::new().1)
+                .await
+                .unwrap();
             assert!(
                 matches!(resolved.transport, McpTransport::Stdio { cwd: Some(cwd), .. } if cwd == expected)
             );
@@ -1419,7 +1500,10 @@ mod tests {
             .into_iter()
             .find(|entry| entry.config.name() == "default")
             .unwrap();
-        let resolved = global.resolve(entry).unwrap();
+        let resolved = global
+            .resolve_connection(entry, pi_core::AbortHandle::new().1)
+            .await
+            .unwrap();
         assert!(
             matches!(resolved.transport, McpTransport::Stdio { cwd: Some(cwd), .. } if cwd == agent)
         );

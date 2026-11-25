@@ -848,9 +848,19 @@ and trusted `<project>/.pi/mcp.json`:
 
 Project entries replace global servers by name; use `{ "enabled": false }` to disable a global
 server in one project. Project files require the normal `/trust` decision. Missing `type` is
-inferred from `command` or `url`. Environment references resolve only when connecting; missing
-variables fail visibly, and shell expressions are never executed. Explicit relative `cwd` is
-relative to the configuration directory; omitted `cwd` uses the session's working directory.
+inferred from `command` or `url`. Env/header values support embedded `$VAR` / `${VAR}` references,
+`$$` / `$!` escapes, and the Rust `${env:VAR}` spelling. Missing or empty references fail visibly.
+Explicit relative `cwd` and omitted `cwd` both use the session's working directory.
+
+Enabled, trusted local configurations may use leading `!command` in env/header/OAuth client-secret
+values: treat these files as executable configuration. Env/header helpers run afresh when connecting;
+OAuth secrets resolve only for explicit sign-in or a needed refresh, never for a usable stored token.
+Helpers have a ten-second limit, separate 1 MiB stdout/stderr caps, process-tree cleanup, and require
+nonempty trimmed UTF-8 stdout. Commands and captured output are excluded from errors, transcripts
+and output files. Concurrent token refresh is shared without sharing callers' cancellation state,
+and a request gets at most one 401-triggered retry. Parsing, saving and metadata queries do not run
+helpers; neither do disabled entries, untrusted project entries or ACP servers. URL/command/args/cwd
+retain their existing Rust path/environment expansion, but never execute value helpers.
 
 `http` means Streamable HTTP, including both JSON and SSE responses. The old standalone HTTP+SSE
 transport is not supported. Static/environment-backed authentication headers are supported;
@@ -866,7 +876,8 @@ embedded ACP hosts must opt into credential reuse.
 /mcp reload           # atomically rebuild the current session
 ```
 
-Every enabled server must connect and finish discovery for a candidate generation to activate.
+Authorization-required entries retain management access without publishing unavailable tools.
+Other enabled servers must connect and finish discovery for a candidate generation to activate.
 Connection and discovery each have a 30-second per-server timeout. Invalid configuration or an
 unavailable server leaves an existing session unchanged on reload. Fix the file (or disable that
 server) before creating a new session. MCP tools are named `mcp__<server>__<tool>`; names must remain

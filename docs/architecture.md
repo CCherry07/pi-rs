@@ -2098,7 +2098,27 @@ its action/name completion metadata, published through the generic frozen comman
 read-only selection and cancellation do not write or reload. Reconnect proves the named connection
 first, while policy changes save the candidate file, then request the existing whole-session reload.
 HTTP add can author typed unresolved OAuth settings without resolving secrets or initiating sign-in;
-invalid options leave bytes unchanged. Inspection includes optional provider identity and unknown-name
+invalid options leave bytes unchanged. `McpLibrary::with_command_values(true)` is an explicit
+local-library capability, enabled by Coding/CLI after resolving trust. Only enabled eligible entries
+may resolve `!command` in env/header values immediately before connection, and in OAuth client-secret
+values only for explicit sign-in or a needed refresh. A usable stored token never needs its secret.
+MCP owns the uncached ten-second limit, separate 1 MiB byte caps, strict UTF-8,
+trim/nonempty success and secret-free errors; `pi-shell::capture` owns process execution/cleanup.
+Parsing, saving, metadata inspection and credential watches never run helpers; credential watches
+and logout resolve only the name/URL identity, not env/header/client-secret values. Static
+Authorization still bypasses OAuth helpers. Transport-only/ACP inputs gain no execution capability.
+Because rmcp freezes connection-time client settings, a private MCP auth adapter resolves local
+settings inside a single-flight refresh and supplies typed `OAuthClientConfig` to rmcp. rmcp remains
+the OAuth protocol/exchange owner: no serialized request rewriting or SDK fork. A shared refresh
+owns its bounded helper and exchange lifetime; cancelling a caller stops its wait, not another
+caller's work or a token save already owed. Overlapping requests share success or failure, and each
+request gets at most one 401-triggered retry. Conditional store writes prevent a detached refresh
+from overwriting a newer login or resurrecting logout. Explicit transport/ACP clients retain the
+SDK auth path without the local settings capability.
+Value templates match Pi's embedded `$VAR`/`${VAR}` and `$$`/`$!` escaping, with missing/empty env
+references rejected and resolved bytes never rescanned. Existing Rust `${env:VAR}` and transport-field
+environment expansion remain documented extensions; URL/command/args/cwd never execute value helpers.
+Inspection includes optional provider identity and unknown-name
 errors give configured-name/trust guidance without reading ignored project definitions. Shell OAuth
 allows non-TTY callbacks/already-authorized probes and positive finite fractional timeout seconds;
 only pasted input needs a terminal. Connection, discovery, registration
@@ -2916,6 +2936,15 @@ Interactive bash execution keeps the last 2,000 lines or 50KB in the session mes
 tail is truncated, `pi-shell` streams the complete combined output to a temporary file and persists
 its `fullOutputPath`, so restored context and NDJSON frontends can expose the same continuation
 handle without placing the complete output in provider context.
+
+Programmatic secret-bearing helpers use the separate `pi-shell::capture` primitive, not interactive
+shell output capture. `ShellCaptureRequest` requires a timeout, abort signal and independent stdout /
+stderr byte caps. It keeps raw streams separate, creates no output files, emits no transcript/log
+chunks and returns exit status, stop reason and per-stream truncation structurally. Its Debug view
+shows lengths only. Timeout, cancellation, overflow, I/O failure and dropped futures reuse the existing
+process-tree guard; a descendant holding inherited pipes is still bounded after its parent exits.
+The caller owns UTF-8 decoding, trimming and domain-specific error policy. This public, domain-neutral
+seam does not alter ordinary shell-tool persistence or shell lifecycle contracts.
 
 `validate_record_log()` and `reduce_lane_state()` mirror the newest Harness recovery reducer. They
 reject contradictory operation, attempt, queue, tool, provisioned-entry, and deferred-handle logs,

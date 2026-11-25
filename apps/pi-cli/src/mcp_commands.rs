@@ -89,6 +89,7 @@ pub(crate) async fn run(arguments: &[String], context: &McpCommandContext) -> Re
         Some(&context.cwd),
         context.project_trusted,
     )
+    .with_command_values(true)
     .with_client_auth(pi_coding::mcp_client_auth(&context.agent_dir))
     .with_oauth_host(std::sync::Arc::new(
         crate::mcp_oauth::NativeMcpOAuthHost::default(),

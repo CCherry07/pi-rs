@@ -235,6 +235,7 @@ impl SessionGenerationFactory for ProductSessionFactory {
                 project_trusted,
             )
             .with_tool_search_registration(false)
+            .with_command_values(true)
             .with_client_auth(crate::mcp_client_auth(&config.agent_dir));
             if let Some(host) = &self.mcp_oauth_host {
                 library = library.with_oauth_host(host.clone());

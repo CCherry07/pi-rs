@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
 
+mod capture;
 mod operations;
 mod process_tree;
+pub use capture::{ShellCapture, ShellCaptureRequest, ShellCaptureStatus, capture};
 mod user_output;
 pub use operations::{ShellOperations, ShellOperationsRequest, execute_with_operations};
 
