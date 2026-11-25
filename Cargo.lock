@@ -3161,6 +3161,7 @@ dependencies = [
  "pi-plugin-anthropic",
  "pi-plugin-copilot",
  "pi-plugin-manager",
+ "pi-plugin-mcp",
  "pi-plugin-models",
  "pi-plugin-openai",
  "pi-plugin-openrouter",

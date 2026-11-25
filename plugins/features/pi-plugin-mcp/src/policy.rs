@@ -1,14 +1,44 @@
 //! Generation-local MCP policy, separate from transport credentials and configuration storage.
 
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Duration;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum McpExposure {
+use serde::{Deserialize, Serialize};
+
+/// How a configured MCP server exposes its tools to the model.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum McpExposure {
     Direct,
     Codemode,
     Deferred,
     Hidden,
+}
+
+impl McpExposure {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Codemode => "codemode",
+            Self::Deferred => "deferred",
+            Self::Hidden => "hidden",
+        }
+    }
+}
+
+impl FromStr for McpExposure {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "direct" => Ok(Self::Direct),
+            "codemode" | "codemode-deferred" => Ok(Self::Codemode),
+            "deferred" => Ok(Self::Deferred),
+            "hidden" => Ok(Self::Hidden),
+            _ => Err("exposure must be direct, codemode, deferred or hidden".into()),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

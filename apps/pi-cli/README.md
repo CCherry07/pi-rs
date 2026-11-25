@@ -136,6 +136,45 @@ Environment variables are supported as an alternative, including `OPENAI_API_KEY
 and a service-account file; Bedrock supports its AWS profile/static credential chain and
 `AWS_BEARER_TOKEN_BEDROCK`. Explicit CLI credentials take precedence over stored credentials.
 
+## MCP management
+
+Manage local MCP configuration without creating a model session:
+
+```bash
+# Add or replace a global stdio server
+pi mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem .
+
+# Add a project-local Streamable HTTP server
+pi mcp add --local docs --url https://example.com/mcp --exposure deferred
+
+# Probe configured servers; JSON is suitable for scripts
+pi mcp list
+pi mcp list --json
+
+# Remove from the same scope that defines it
+pi mcp remove filesystem
+pi mcp remove --local docs
+```
+
+Global configuration is `<agent-dir>/mcp.json`; `--local` writes `<cwd>/.pi/mcp.json`. An explicit
+local add/remove is allowed before trust, matching Pi authoring behavior, but the project file remains
+ignored by `list` and sessions until the existing project-trust decision permits it. Writes preserve
+unrelated JSON and wildcard ordering, validate new definitions, use a per-scope lock and atomic
+replacement, and reject stale revisions. Add/remove preserve unrelated invalid definitions so
+configuration can be repaired. `list` returns exit code `1` for configuration or enabled-server
+connection failures and `0` when every enabled server connects; disabled entries are not failures.
+Malformed entries do not hide valid rows. JSON includes `servers`, `errors` and, when applicable,
+an untrusted-project `note`; server reports include tool exposure overrides and source provenance.
+
+Inside a session, bare `/mcp` opens semantic server/action selectors in interactive frontends.
+`/mcp reconnect <name>` proves a fresh connection before atomically rebuilding the generation;
+`enable`, `disable`, `exposure`, and `reload` also publish only a fully prepared replacement, so a
+failed reload keeps the current registry alive, while saved configuration remains on disk for retry
+or correction. This manager supports server-wide exposure; edit `toolExposure` in the file for
+per-tool changes. OAuth `pi mcp login/logout` is intentionally not
+claimed yet: the commands report that the authorization Adapter is unavailable and never fabricate
+or mutate credentials.
+
 ## Tool selection
 
 New sessions start with `read`, `bash`, `edit`, and `write`, in that order. Optional `grep`,
@@ -298,6 +337,7 @@ Common commands:
 | `/session`                    | Show session details, usage, and the latest request’s estimated context breakdown                     |
 | `/reload`                     | Atomically rebuild plugins, models, resources, and session extensions |
 | `/features [global\|project]` | Select optional capabilities, save, and reload the current session    |
+| `/mcp [action]`               | Inspect and transactionally manage configured MCP servers              |
 | `/trust`                      | Review or change trust for the current project                        |
 | `/copy`                       | Copy the last completed assistant response                            |
 | `/clear`                      | Clear the visible transcript without deleting the session             |

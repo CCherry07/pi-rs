@@ -27,4 +27,8 @@ pub use client::{
     McpError, McpOAuthClientRegistration, McpOAuthConfig, McpProviderAuth, McpServerConfig,
     McpToolDescriptor, McpToolSet, McpTransport, validate_configs,
 };
-pub use library::{McpDocument, McpLibrary, McpScope, McpServerRow};
+pub use library::{
+    McpAuthorization, McpDocument, McpInspection, McpLibrary, McpScope, McpServerDefinition,
+    McpServerReport, McpServerRow, McpServerState,
+};
+pub use policy::McpExposure;

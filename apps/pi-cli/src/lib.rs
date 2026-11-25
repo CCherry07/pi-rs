@@ -5,6 +5,7 @@ mod clipboard;
 mod config;
 mod input;
 mod markdown;
+mod mcp_commands;
 mod output;
 mod package_commands;
 mod plugin_commands;
@@ -191,6 +192,36 @@ async fn run_with_exit_code(
     }) = &cli.command
     {
         return auth::check(&config::resolve_app_config(&cli)?, command).await;
+    }
+    if let Some(CliCommand::Mcp { arguments }) = &cli.command {
+        let config = config::resolve_app_config(&cli)?;
+        let settings = SettingsManager::new(&config.agent_dir);
+        let default_trust = settings
+            .load(&SettingsContext::new(&config.cwd, false))
+            .default_project_trust();
+        let (project_trust, _requests) = ProjectTrustService::new(
+            &config.agent_dir,
+            config.trust_override,
+            false,
+            default_trust,
+        )
+        .map_err(|error| error.to_string())?;
+        let trusted = match project_trust
+            .evaluate(&config.cwd)
+            .map_err(|error| error.to_string())?
+        {
+            ProjectTrustEvaluation::Known(trusted) => trusted,
+            ProjectTrustEvaluation::Ask(_) => false,
+        };
+        return mcp_commands::run(
+            arguments,
+            &mcp_commands::McpCommandContext {
+                cwd: config.cwd,
+                agent_dir: config.agent_dir,
+                project_trusted: trusted,
+            },
+        )
+        .await;
     }
     let signals = (cli.mode == Some(OutputMode::Rpc))
         .then(rpc_signals::RpcSignals::new)
@@ -473,6 +504,7 @@ fn split_extension_flags(
     arguments: Vec<String>,
 ) -> (Vec<String>, BTreeMap<String, serde_json::Value>) {
     const SUBCOMMANDS: &[&str] = &[
+        "mcp",
         "curator",
         "auth",
         "plugin",
@@ -535,7 +567,7 @@ fn split_extension_flags(
         .take_while(|argument| argument.as_str() != "--")
         .any(|argument| matches!(argument.as_str(), "-p" | "--print" | "--json"));
     let mut consumes_next = false;
-    let subcommand = arguments.iter().find_map(|argument| {
+    let subcommand = arguments.iter().enumerate().find_map(|(index, argument)| {
         if consumes_next {
             consumes_next = false;
             return None;
@@ -557,7 +589,12 @@ fn split_extension_flags(
         if argument.starts_with('-') {
             return None;
         }
-        Some(!forces_prompt && SUBCOMMANDS.contains(&argument.as_str()))
+        // MCP's own list --json belongs to its command parser, not prompt mode.
+        let mcp_command = argument == "mcp"
+            && !arguments[..index]
+                .iter()
+                .any(|arg| matches!(arg.as_str(), "-p" | "--print" | "--json"));
+        Some(mcp_command || (!forces_prompt && SUBCOMMANDS.contains(&argument.as_str())))
     });
     if subcommand == Some(true) {
         return (arguments, BTreeMap::new());
@@ -848,6 +885,41 @@ mod tests {
                 .collect(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn mcp_arguments_reach_the_management_parser_through_the_node_entrypoint() {
+        for arguments in [
+            vec![
+                "mcp",
+                "add",
+                "docs",
+                "--url",
+                "https://example.invalid/mcp",
+                "--exposure",
+                "hidden",
+            ],
+            vec!["--cwd", ".", "mcp", "list", "--json"],
+            vec![
+                "mcp",
+                "add",
+                "docs",
+                "--",
+                "node",
+                "server.js",
+                "--port",
+                "123",
+            ],
+        ] {
+            let input = arguments.into_iter().map(String::from).collect::<Vec<_>>();
+            let (arguments, flags) = split_extension_flags(input.clone());
+            assert_eq!(arguments, input);
+            assert!(flags.is_empty());
+            assert!(matches!(
+                Cli::try_parse_pi_from(arguments).unwrap().command,
+                Some(crate::config::CliCommand::Mcp { .. })
+            ));
+        }
     }
 
     #[test]

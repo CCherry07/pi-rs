@@ -151,14 +151,53 @@ its transport and credentials. A project override cannot introduce credential fi
 - `read(scope)` returns the raw document, revision, merged server rows and diagnostics.
 - `save(scope, revision, content)` validates and atomically saves with external-change checks,
   preserving unknown JSON fields supplied by the caller.
+- `add`, `remove`, `set_enabled`, and `set_exposure` are the typed management seam used by
+  frontends. They retain unrelated JSON and wildcard declaration order, lock per scope, detect
+  external changes, and atomically replace the file. Add validates the new definition; add/remove
+  preserve unrelated invalid entries so the file can be repaired. Policy edits validate inherited
+  configuration before writing. `contains_definition` checks a scope without confusing inherited rows.
+- `inspect().await` probes configured servers independently and returns serializable state, tools,
+  resource availability, and sanitized failures. A failed server does not hide disabled or healthy
+  rows, including when another entry is malformed; configuration diagnostics make the inspection
+  unsuccessful. Reports include hidden tools, effective per-tool exposure differences and project
+  override provenance. Inspection does not list resource contents or publish tools into a registry.
 - `test(name)` explicitly connects one saved, enabled server, reports its tools and shuts down.
-- `prepare().await` connects the enabled servers and returns an `Arc<dyn Plugin>` with
-  their tools and `/mcp status|paths|test|reload` commands.
+- `prepare().await` connects the enabled servers and returns an `Arc<dyn Plugin>` with their tools
+  and `/mcp` management. Interactive `/mcp` uses semantic selectors for inspect, reconnect,
+  enable/disable, and exposure changes. Argument forms remain available in noninteractive frontends.
 
-Reads and saves neither connect nor construct sessions. Preparation completes before a host
-publishes its runtime generation; a failure must leave the previous generation active.
-Commands use ordinary Pi plugin capabilities. Saving configuration does not mutate a live
-registry; `/mcp reload` requests the existing whole-session replacement transaction.
+Reads and saves neither connect nor construct sessions. Shell-level inspection is explicit and does
+not construct a session. Preparation completes before a host publishes its runtime generation; a
+failure must leave the previous generation active. Commands use ordinary Pi plugin capabilities.
+Saving configuration does not mutate a live registry: enable/disable, exposure, reconnect, and
+`/mcp reload` all request the existing whole-session replacement transaction after their candidate
+configuration or connection check succeeds. Reload failure preserves the active generation, not
+its prior disk configuration: saved edits remain on disk, and the error explains retry/revert steps.
+
+## Shell management
+
+The native CLI exposes the session-free control plane through `pi mcp`:
+
+```text
+pi mcp add <server> [--env KEY=VALUE] -- <command> [args...]
+pi mcp add <server> --url <url> [--header KEY=VALUE]
+pi mcp remove <server> [--local]
+pi mcp list [--json]
+```
+
+`--local` targets `<cwd>/.pi/mcp.json`; otherwise commands target
+`<agent-dir>/mcp.json`. Explicit local authoring is allowed before trust, but list/session loading
+continues to ignore that file until the normal project-trust service says the project is trusted.
+`list` exits `1` when configuration or any enabled connection fails and `0` when every enabled
+server connects; disabled servers are successful rows. JSON includes `servers`, `errors`, and an
+optional untrusted-project `note`. Add/remove never create a session or require model credentials.
+
+OAuth `login`/`logout` spellings delegate through the optional `McpAuthorization` interface; the
+CLI installs no Adapter yet, so these commands fail explicitly without modifying credentials.
+The config parser likewise rejects `oauth`/`auth`. Browser authorization, credential persistence,
+provider auth, login timeout flags, OAuth add flags, live connection logs and per-tool exposure
+editing in the semantic manager are not implemented by this tranche. Edit `toolExposure` in the
+file and reload to change individual tools. This is a shell/manager subset, not full legacy UI parity.
 
 ## Configuration and boundaries
 

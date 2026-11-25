@@ -159,6 +159,12 @@ impl From<ThinkingLevelArg> for pi_core::ThinkingLevel {
 
 #[derive(Debug, Clone, Subcommand)]
 pub(crate) enum CliCommand {
+    /// Configure and inspect MCP servers without starting a session.
+    #[command(disable_help_flag = true)]
+    Mcp {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        arguments: Vec<String>,
+    },
     /// Maintain the Hermes-managed skill library.
     Curator {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -543,6 +549,29 @@ mod tests {
                 .unwrap()
                 .fullscreen_enabled()
         );
+    }
+
+    #[test]
+    fn mcp_preserves_management_arguments_without_becoming_a_prompt() {
+        let help = Cli::try_parse_from(["pi", "mcp", "--help"]).unwrap();
+        assert!(
+            matches!(help.command, Some(CliCommand::Mcp { arguments }) if arguments == ["--help"])
+        );
+        let add = Cli::try_parse_from([
+            "pi", "mcp", "add", "files", "--env", "A=1", "--", "npx", "-y", "server",
+        ])
+        .unwrap();
+        assert!(matches!(
+            add.command,
+            Some(CliCommand::Mcp { arguments })
+                if arguments == ["add", "files", "--env", "A=1", "--", "npx", "-y", "server"]
+        ));
+        assert!(add.prompt.is_empty());
+        let list = Cli::try_parse_from(["pi", "mcp", "list", "--json"]).unwrap();
+        assert!(matches!(
+            list.command,
+            Some(CliCommand::Mcp { arguments }) if arguments == ["list", "--json"]
+        ));
     }
 
     #[test]
