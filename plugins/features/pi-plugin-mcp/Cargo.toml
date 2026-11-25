@@ -16,7 +16,9 @@ pi-core.workspace = true
 sha2 = "0.10"
 tempfile = "3.21.0"
 # 3.3's concurrent HTTP worker can cancel a POST before response headers arrive.
-rmcp = { version = "=3.3.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider"] }
+rmcp = { version = "=3.3.0", default-features = false, features = ["auth", "client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider"] }
+reqwest = { version = "0.13.2", default-features = false, features = ["json", "stream", "rustls-no-provider"] }
+sse-stream = "0.2.4"
 # Match the existing provider transports; do not enable two competing rustls defaults.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 http = "1"

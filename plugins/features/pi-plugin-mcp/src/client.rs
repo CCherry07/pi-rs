@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
+use crate::auth::{McpClientAuth, ProviderAuthClient, oauth_http_client};
 use crate::client_handler::McpClientHandler;
 use crate::directory::render_servers_section;
 use crate::naming::{identifier_component, qualified_tool_name};
@@ -46,6 +47,69 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct McpServerConfig {
     pub name: String,
     pub transport: McpTransport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<McpOAuthConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<McpProviderAuth>,
+}
+
+/// OAuth client settings for a Streamable HTTP server.
+///
+/// Secret values are resolved by the configuration owner immediately before a
+/// connection or sign-in attempt. Debug output deliberately omits their values.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpOAuthConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_registration: Option<McpOAuthClientRegistration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_server_metadata_url: Option<String>,
+}
+
+impl std::fmt::Debug for McpOAuthConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("McpOAuthConfig")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("callback_port", &self.callback_port)
+            .field("callback_url", &self.callback_url)
+            .field("scope", &self.scope)
+            .field("client_name", &self.client_name)
+            .field("client_registration", &self.client_registration)
+            .field("auth_server_metadata_url", &self.auth_server_metadata_url)
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpOAuthClientRegistration {
+    #[default]
+    Auto,
+    Dcr,
+    Cimd,
+}
+
+/// Use the current token of a registered Pi provider for every HTTP request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpProviderAuth {
+    pub provider: String,
 }
 
 impl McpServerConfig {
@@ -56,6 +120,8 @@ impl McpServerConfig {
                 url: url.into(),
                 headers: BTreeMap::new(),
             },
+            oauth: None,
+            auth: None,
         }
     }
 
@@ -70,6 +136,18 @@ impl McpServerConfig {
         self
     }
 
+    pub fn oauth(mut self, oauth: McpOAuthConfig) -> Self {
+        self.oauth = Some(oauth);
+        self
+    }
+
+    pub fn provider_auth(mut self, provider: impl Into<String>) -> Self {
+        self.auth = Some(McpProviderAuth {
+            provider: provider.into(),
+        });
+        self
+    }
+
     pub fn stdio(name: impl Into<String>, command: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -79,6 +157,8 @@ impl McpServerConfig {
                 env: BTreeMap::new(),
                 cwd: None,
             },
+            oauth: None,
+            auth: None,
         }
     }
 
@@ -221,17 +301,34 @@ impl McpToolSet {
     /// Starts every configured server and discovers its complete tool catalog.
     /// If any server fails, already-started services are dropped and cancelled.
     pub async fn connect(configs: Vec<McpServerConfig>) -> Result<Self, McpError> {
-        Self::connect_with_policies(
+        Self::connect_with_auth(configs, McpClientAuth::default()).await
+    }
+
+    /// Connects using host-supplied provider and OAuth credential dependencies.
+    pub async fn connect_with_auth(
+        configs: Vec<McpServerConfig>,
+        auth: McpClientAuth,
+    ) -> Result<Self, McpError> {
+        Self::connect_with_policies_and_auth(
             configs
                 .into_iter()
                 .map(|config| (config, McpServerPolicy::direct()))
                 .collect(),
+            auth,
         )
         .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn connect_with_policies(
         configs: Vec<(McpServerConfig, McpServerPolicy)>,
+    ) -> Result<Self, McpError> {
+        Self::connect_with_policies_and_auth(configs, McpClientAuth::default()).await
+    }
+
+    pub(crate) async fn connect_with_policies_and_auth(
+        configs: Vec<(McpServerConfig, McpServerPolicy)>,
+        auth: McpClientAuth,
     ) -> Result<Self, McpError> {
         validate_configs(
             &configs
@@ -245,9 +342,12 @@ impl McpToolSet {
 
         for (config, policy) in configs {
             let name = config.name.clone();
-            let server = tokio::time::timeout(CONNECT_TIMEOUT, connect_server(config, policy))
-                .await
-                .map_err(|_| McpError::Timeout(name.clone()))??;
+            let server = tokio::time::timeout(
+                CONNECT_TIMEOUT,
+                connect_server(config, policy, auth.clone()),
+            )
+            .await
+            .map_err(|_| McpError::Timeout(name.clone()))??;
             let remote_tools = if server
                 .peer
                 .peer_info()
@@ -491,14 +591,30 @@ impl McpToolSet {
 async fn connect_server(
     config: McpServerConfig,
     policy: McpServerPolicy,
+    client_auth: McpClientAuth,
 ) -> Result<Arc<ConnectedServer>, McpError> {
-    let McpServerConfig { name, transport } = config;
+    let McpServerConfig {
+        name,
+        transport,
+        oauth,
+        auth,
+    } = config;
     let handler = McpClientHandler::new(policy.root.as_deref());
     let auto = ClientLifecycleMode::Auto {
         preferred_versions: vec![rmcp::model::ProtocolVersion::V_2026_07_28],
         legacy_version: Some(rmcp::model::ProtocolVersion::LATEST),
     };
-    let service = match connect_once(&name, &transport, handler.clone(), auto).await {
+    let service = match connect_once(
+        &name,
+        &transport,
+        oauth.as_ref(),
+        auth.as_ref(),
+        &client_auth,
+        handler.clone(),
+        auto,
+    )
+    .await
+    {
         Ok(service) => service,
         // Some deployed legacy servers return an uncorrelated JSON-RPC error
         // to server/discover. A fresh transport can still complete the stable
@@ -507,6 +623,9 @@ async fn connect_server(
             connect_once(
                 &name,
                 &transport,
+                oauth.as_ref(),
+                auth.as_ref(),
+                &client_auth,
                 handler.clone(),
                 ClientLifecycleMode::Initialize,
             )
@@ -520,6 +639,9 @@ async fn connect_server(
 async fn connect_once(
     name: &str,
     config: &McpTransport,
+    oauth: Option<&McpOAuthConfig>,
+    provider_auth: Option<&McpProviderAuth>,
+    client_auth: &McpClientAuth,
     handler: McpClientHandler,
     lifecycle: ClientLifecycleMode,
 ) -> Result<RunningService<RoleClient, McpClientHandler>, McpError> {
@@ -531,10 +653,37 @@ async fn connect_once(
                 let _ = rustls::crypto::ring::default_provider().install_default();
             }
             let headers = http_headers(name, headers)?;
-            let transport = StreamableHttpClientTransport::from_config(
-                StreamableHttpClientTransportConfig::with_uri(url.clone()).custom_headers(headers),
-            );
-            handler.serve_with_lifecycle(transport, lifecycle).await
+            let has_static_authorization = headers.contains_key(&http::header::AUTHORIZATION);
+            let transport_config =
+                StreamableHttpClientTransportConfig::with_uri(url.clone()).custom_headers(headers);
+            if let Some(provider_auth) = provider_auth {
+                let resolver =
+                    client_auth
+                        .provider_tokens
+                        .clone()
+                        .ok_or_else(|| McpError::Initialize {
+                            server: name.to_string(),
+                            message: "provider authentication resolver is not installed".into(),
+                        })?;
+                let transport = StreamableHttpClientTransport::with_client(
+                    ProviderAuthClient::new(provider_auth.provider.clone(), resolver),
+                    transport_config,
+                );
+                handler.serve_with_lifecycle(transport, lifecycle).await
+            } else if !has_static_authorization {
+                let oauth_client = oauth_http_client(name, url, oauth, client_auth)
+                    .await
+                    .map_err(|_| McpError::Initialize {
+                        server: name.to_string(),
+                        message: "OAuth credential state could not be loaded".into(),
+                    })?;
+                let transport =
+                    StreamableHttpClientTransport::with_client(oauth_client, transport_config);
+                handler.serve_with_lifecycle(transport, lifecycle).await
+            } else {
+                let transport = StreamableHttpClientTransport::from_config(transport_config);
+                handler.serve_with_lifecycle(transport, lifecycle).await
+            }
         }
         McpTransport::Stdio {
             command,
@@ -612,6 +761,12 @@ pub fn validate_configs(configs: &[McpServerConfig]) -> Result<(), McpError> {
             McpTransport::Stdio { command, .. } if command.trim().is_empty() => {
                 return Err(McpError::EmptyCommand(name.to_string()));
             }
+            McpTransport::Stdio { .. } if config.oauth.is_some() || config.auth.is_some() => {
+                return Err(McpError::InvalidHttp {
+                    server: name.into(),
+                    message: "oauth and auth are only valid for HTTP servers",
+                });
+            }
             McpTransport::Http { url, headers } => {
                 let parsed = url::Url::parse(url).map_err(|_| McpError::InvalidHttp {
                     server: name.into(),
@@ -629,8 +784,85 @@ pub fn validate_configs(configs: &[McpServerConfig]) -> Result<(), McpError> {
                     });
                 }
                 http_headers(name, headers)?;
+                validate_http_auth(name, &parsed, config.oauth.as_ref(), config.auth.as_ref())?;
             }
             _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_http_auth(
+    name: &str,
+    server_url: &url::Url,
+    oauth: Option<&McpOAuthConfig>,
+    auth: Option<&McpProviderAuth>,
+) -> Result<(), McpError> {
+    let invalid = |message| McpError::InvalidHttp {
+        server: name.into(),
+        message,
+    };
+    let loopback = matches!(
+        server_url.host_str(),
+        Some("localhost" | "127.0.0.1" | "::1")
+    );
+    if let Some(auth) = auth {
+        if auth.provider.trim().is_empty() {
+            return Err(invalid("auth.provider must not be empty"));
+        }
+        if server_url.scheme() != "https" && !loopback {
+            return Err(invalid("provider auth requires https or a loopback URL"));
+        }
+    }
+    let Some(oauth) = oauth else {
+        return Ok(());
+    };
+    if server_url.scheme() != "https" && !loopback {
+        return Err(invalid("OAuth requires https or a loopback URL"));
+    }
+    if oauth.client_id.as_ref().is_some_and(String::is_empty) {
+        return Err(invalid("oauth.clientId must not be empty"));
+    }
+    if oauth.callback_port == Some(0) {
+        return Err(invalid("oauth.callbackPort must not be zero"));
+    }
+    if oauth.client_registration == Some(McpOAuthClientRegistration::Cimd)
+        && (oauth.client_id.is_some() || oauth.client_name.is_some())
+    {
+        return Err(invalid(
+            "CIMD cannot be combined with oauth.clientId or oauth.clientName",
+        ));
+    }
+    if let Some(callback) = &oauth.callback_url {
+        let callback = url::Url::parse(callback)
+            .map_err(|_| invalid("oauth.callbackUrl must be a loopback http URL"))?;
+        if callback.scheme() != "http"
+            || !callback.username().is_empty()
+            || callback.password().is_some()
+            || !matches!(callback.host_str(), Some("localhost" | "127.0.0.1" | "::1"))
+            || callback.query().is_some()
+            || callback.fragment().is_some()
+        {
+            return Err(invalid("oauth.callbackUrl must be a loopback http URL"));
+        }
+        if oauth
+            .callback_port
+            .is_some_and(|port| callback.port().is_some_and(|value| value != port))
+        {
+            return Err(invalid("oauth callback port settings disagree"));
+        }
+    }
+    if let Some(metadata) = &oauth.auth_server_metadata_url {
+        let metadata = url::Url::parse(metadata)
+            .map_err(|_| invalid("oauth auth-server metadata URL is invalid"))?;
+        if !metadata.username().is_empty()
+            || metadata.password().is_some()
+            || metadata.fragment().is_some()
+            || (metadata.scheme() != "https"
+                && !(metadata.scheme() == "http"
+                    && matches!(metadata.host_str(), Some("localhost" | "127.0.0.1" | "::1"))))
+        {
+            return Err(invalid("oauth auth-server metadata URL must be secure"));
         }
     }
     Ok(())
@@ -1305,7 +1537,7 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let server = connect_server(config, McpServerPolicy::default())
+        let server = connect_server(config, McpServerPolicy::default(), McpClientAuth::default())
             .await
             .unwrap();
         let tool = McpTool::new(

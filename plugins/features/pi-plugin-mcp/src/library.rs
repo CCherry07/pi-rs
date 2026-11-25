@@ -8,7 +8,11 @@ use std::sync::Arc;
 
 use crate::config::{MAX_CONFIG_BYTES, McpConfigContext, McpConfigEntry, parse_document};
 use crate::policy::McpServerPolicy;
-use crate::{McpServerConfig, McpToolSet, McpTransport};
+use crate::{
+    McpClientAuth, McpOAuthCredentialStore, McpOAuthError, McpOAuthRedirect, McpOAuthSignIn,
+    McpProviderTokenResolver, McpServerConfig, McpToolSet, McpTransport,
+};
+use pi_core::AbortSignal;
 use pi_plugin::Plugin;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -30,6 +34,7 @@ pub struct McpLibrary {
     cwd: Option<PathBuf>,
     trusted: bool,
     pub(crate) register_tool_search: bool,
+    client_auth: McpClientAuth,
 }
 
 #[derive(Serialize)]
@@ -67,7 +72,26 @@ impl McpLibrary {
             cwd: cwd.map(Path::to_path_buf),
             trusted,
             register_tool_search: true,
+            client_auth: McpClientAuth::default().with_oauth_store(McpOAuthCredentialStore::new(
+                agent_dir.join("mcp-auth.json"),
+            )),
         }
+    }
+
+    /// Installs host-owned auth dependencies without coupling MCP to a product domain.
+    pub fn with_client_auth(mut self, client_auth: McpClientAuth) -> Self {
+        self.client_auth = client_auth;
+        self
+    }
+
+    /// Adds request-time provider token lookup while retaining this library's
+    /// durable OAuth store.
+    pub fn with_provider_token_resolver(
+        mut self,
+        resolver: Arc<dyn McpProviderTokenResolver>,
+    ) -> Self {
+        self.client_auth = self.client_auth.with_provider_tokens(resolver);
+        self
     }
 
     /// Controls the standalone deferred-discovery helper. Defaults to enabled.
@@ -120,6 +144,11 @@ impl McpLibrary {
             }
             for config in document.servers {
                 let name = config.name().to_string();
+                if scope == McpScope::Project && config.has_provider_auth() {
+                    return Err(format!(
+                        "MCP server {name}: auth is only allowed in global MCP configuration"
+                    ));
+                }
                 if scope == McpScope::Project && config.is_override() {
                     let base = merged.get(&name).ok_or_else(|| {
                         format!(
@@ -231,6 +260,100 @@ impl McpLibrary {
         self.read(scope)
     }
 
+    /// Starts an explicit OAuth flow for a configured HTTP server. Connecting
+    /// never invokes this method; the host decides how to open the browser and
+    /// whether to receive a loopback or pasted redirect.
+    pub async fn start_oauth_sign_in(
+        &self,
+        name: &str,
+        redirect_url: &str,
+        challenge: Option<&str>,
+        signal: AbortSignal,
+    ) -> Result<(McpOAuthSignIn, McpOAuthRedirect), McpOAuthError> {
+        let entry = self
+            .entries()
+            .map_err(McpOAuthError::Failed)?
+            .into_iter()
+            .find(|entry| entry.config.name() == name)
+            .ok_or_else(|| McpOAuthError::Failed("MCP server not found".into()))?;
+        let config = self.resolve(entry).map_err(McpOAuthError::Failed)?;
+        if config.auth.is_some() {
+            return Err(McpOAuthError::Failed(
+                "provider-authenticated MCP servers do not use OAuth sign-in".into(),
+            ));
+        }
+        let McpTransport::Http { url, .. } = &config.transport else {
+            return Err(McpOAuthError::Failed(
+                "OAuth sign-in requires an HTTP MCP server".into(),
+            ));
+        };
+        let settings = config.oauth.clone().unwrap_or_default();
+        let redirect_url = settings.callback_url.clone().unwrap_or_else(|| {
+            settings.callback_port.map_or_else(
+                || redirect_url.to_string(),
+                |port| format!("http://127.0.0.1:{port}/callback"),
+            )
+        });
+        McpOAuthSignIn::start(
+            &config.name,
+            url,
+            &settings,
+            self.client_auth.oauth_store.clone(),
+            &redirect_url,
+            challenge,
+            signal,
+        )
+        .await
+    }
+
+    pub async fn refresh_oauth(
+        &self,
+        name: &str,
+        signal: AbortSignal,
+    ) -> Result<(), McpOAuthError> {
+        let config = self.resolve_named(name).map_err(McpOAuthError::Failed)?;
+        let McpTransport::Http { url, .. } = &config.transport else {
+            return Err(McpOAuthError::Failed(
+                "OAuth refresh requires an HTTP MCP server".into(),
+            ));
+        };
+        McpOAuthSignIn::refresh(
+            &config.name,
+            url,
+            &config.oauth.unwrap_or_default(),
+            self.client_auth.oauth_store.clone(),
+            signal,
+        )
+        .await
+    }
+
+    pub fn has_oauth_credentials(&self, name: &str) -> Result<bool, String> {
+        let config = self.resolve_named(name)?;
+        let McpTransport::Http { url, .. } = config.transport else {
+            return Ok(false);
+        };
+        self.client_auth
+            .oauth_store
+            .has_credentials(&config.name, &url)
+    }
+
+    pub fn sign_out_oauth(&self, name: &str) -> Result<bool, String> {
+        let config = self.resolve_named(name)?;
+        let McpTransport::Http { url, .. } = config.transport else {
+            return Ok(false);
+        };
+        self.client_auth.oauth_store.sign_out(&config.name, &url)
+    }
+
+    fn resolve_named(&self, name: &str) -> Result<McpServerConfig, String> {
+        let entry = self
+            .entries()?
+            .into_iter()
+            .find(|entry| entry.config.name() == name)
+            .ok_or("MCP server not found")?;
+        self.resolve(entry)
+    }
+
     pub async fn test(&self, name: &str) -> Result<Vec<String>, String> {
         let entry = self
             .entries()?
@@ -241,9 +364,10 @@ impl McpLibrary {
             return Err("Enable and save the server before testing".into());
         }
         let config = self.resolve_with_policy(entry)?;
-        let pool = McpToolSet::connect_with_policies(vec![config])
-            .await
-            .map_err(|e| e.to_string())?;
+        let pool =
+            McpToolSet::connect_with_policies_and_auth(vec![config], self.client_auth.clone())
+                .await
+                .map_err(|e| e.to_string())?;
         let names = pool.tool_names();
         pool.shutdown().await.map_err(|e| e.to_string())?;
         Ok(names)
@@ -265,7 +389,7 @@ impl McpLibrary {
             .filter(|entry| entry.config.enabled())
             .map(|entry| self.resolve_with_policy(entry))
             .collect::<Result<Vec<_>, _>>()?;
-        let pool = McpToolSet::connect_with_policies(configs)
+        let pool = McpToolSet::connect_with_policies_and_auth(configs, self.client_auth.clone())
             .await
             .map_err(|e| e.to_string())?;
         Ok(Arc::new(McpProductPlugin {
