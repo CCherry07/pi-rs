@@ -61,6 +61,55 @@ fn mcp_list_json_preserves_diagnostics_trust_and_exit_status_without_a_session()
 }
 
 #[test]
+fn mcp_logout_uses_the_durable_store_without_touching_other_servers() {
+    let root = tempfile::tempdir().unwrap();
+    assert!(
+        run(
+            root.path(),
+            &["add", "account", "--url", "https://example.invalid/mcp"]
+        )
+        .status
+        .success()
+    );
+    let store =
+        pi_plugin_mcp::McpOAuthCredentialStore::new(root.path().join("agent/mcp-auth.json"));
+    for name in ["account", "other"] {
+        store
+            .save_tokens(
+                name,
+                "https://example.invalid/mcp",
+                "fixture",
+                pi_plugin_mcp::McpOAuthTokens {
+                    access_token: "fixture-token".into(),
+                    token_type: "Bearer".into(),
+                    refresh_token: None,
+                    expires_in: None,
+                    scope: None,
+                },
+            )
+            .unwrap();
+    }
+    let output = run(root.path(), &["logout", "account"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Signed out"));
+    assert!(
+        !store
+            .has_credentials("account", "https://example.invalid/mcp")
+            .unwrap()
+    );
+    assert!(
+        store
+            .has_credentials("other", "https://example.invalid/mcp")
+            .unwrap()
+    );
+    assert!(!root.path().join("agent/sessions").exists());
+}
+
+#[test]
 fn mcp_authoring_preserves_child_arguments_and_never_grants_trust() {
     let root = tempfile::tempdir().unwrap();
     let help = run(root.path(), &["--help"]);

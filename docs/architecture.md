@@ -2001,7 +2001,7 @@ server instructions attached to tool namespaces and codemode/deferred/direct exp
 Rust uses Pi's codemode default while retaining generation-based connection ownership. Its shell
 add/remove/list subset and interactive inspect, reconnect, enable/disable and server-exposure
 operations use typed management and semantic UI seams. These adapt current Pi behaviors, not the
-full legacy UI: per-tool editing, logs and OAuth remain separate work. Asynchronous connection
+full legacy UI: per-tool editing, logs and automatic browser/loopback login remain separate work. Asynchronous connection
 publication remains a deliberate generation-based difference.
 The complete Rust implementation lives in
 `plugins/features/pi-plugin-mcp`, with client, config, library and product-plugin modules rather
@@ -2065,7 +2065,8 @@ Provider authentication is a separate request-time `McpProviderTokenResolver` in
 the resolver to the candidate library/tool set. The token is resolved anew for every POST, GET/SSE and
 session deletion so refreshes do not require rebuilding a generation. Resolver failures and all logs are
 secret-free. Project MCP files cannot name a provider and therefore cannot borrow a user-level provider
-credential merely by gaining project trust.
+credential merely by gaining project trust. Coding and the CLI do not yet inject this resolver;
+provider-auth support here is an embedding seam, not end-to-end Coding credential integration.
 
 `ProductSessionFactory` reloads files after trust resolution and prepares a fresh connected pool
 for every candidate product generation. The immutable local-library MCP plugin owns discovered tools plus the
@@ -2115,8 +2116,14 @@ plugin does not branch on execution origin. Connections still prepare before pub
 asynchronous discovery is separate.
 Invalid flag types reject the candidate rather than accumulating per-entry Pi diagnostics. OAuth and
 provider-auth values remain connection dependencies rather than registry mutations. Description
-contributes a server summary. Browser launching, loopback listener ownership, pasted-URL prompting and
-interactive account management remain host UI work and are deliberately not `/mcp` or TUI commands.
+contributes a server summary. Shell `pi mcp login` and semantic `/mcp login` now use the real library
+OAuth state machine with a manually opened authorization URL and pasted callback; the CLI uses hidden
+terminal input, and the semantic dialog observes command cancellation. `begin_login` validates the
+transport's defining scope and rejects provider/header authentication before starting authorization.
+The configured callback URL/port is honored; otherwise the manual flow uses 127.0.0.1:53682/callback.
+`logout` deletes the exact name/URL OAuth identity, never provider or configured header credentials.
+Browser launching, loopback listener ownership and whole-login timeout flags remain unimplemented;
+no token is fabricated or persisted as authenticated merely because the login flow started.
 Transport-only public config resolution accepts only plain direct policy instead of silently dropping
 codemode (including omitted exposure) or other policy; explicit `McpToolSet::connect` callers such as
 ACP request direct tools without local discovery or script-entry activation.

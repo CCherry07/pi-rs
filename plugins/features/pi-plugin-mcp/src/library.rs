@@ -12,8 +12,8 @@ use crate::{
     McpClientAuth, McpOAuthCredentialStore, McpOAuthError, McpOAuthRedirect, McpOAuthSignIn,
     McpProviderTokenResolver, McpServerConfig, McpToolSet, McpTransport,
 };
-use pi_core::AbortSignal;
 use futures::future::join_all;
+use pi_core::AbortSignal;
 use pi_plugin::Plugin;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -22,14 +22,6 @@ use sha2::{Digest, Sha256};
 use crate::plugin::McpProductPlugin;
 
 const EMPTY: &str = "{\n  \"version\": 1,\n  \"mcpServers\": {}\n}\n";
-
-/// Optional OAuth control-plane Adapter. Transport/auth implementations attach here; the library
-/// never fabricates authorization behavior when no Adapter is installed.
-#[async_trait::async_trait]
-pub trait McpAuthorization: Send + Sync {
-    async fn login(&self, server: &str, scope: McpScope) -> Result<String, String>;
-    async fn logout(&self, server: &str, scope: McpScope) -> Result<String, String>;
-}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -43,7 +35,6 @@ pub struct McpLibrary {
     agent_dir: PathBuf,
     cwd: Option<PathBuf>,
     trusted: bool,
-    authorization: Option<Arc<dyn McpAuthorization>>,
     pub(crate) register_tool_search: bool,
     client_auth: McpClientAuth,
 }
@@ -199,7 +190,6 @@ impl McpLibrary {
             agent_dir: agent_dir.into(),
             cwd: cwd.map(Path::to_path_buf),
             trusted,
-            authorization: None,
             register_tool_search: true,
             client_auth: McpClientAuth::default().with_oauth_store(McpOAuthCredentialStore::new(
                 agent_dir.join("mcp-auth.json"),
@@ -231,27 +221,87 @@ impl McpLibrary {
         self
     }
 
-    /// Installs the product's real OAuth Adapter for shell and `/mcp` login/logout operations.
-    pub fn with_authorization(mut self, authorization: Arc<dyn McpAuthorization>) -> Self {
-        self.authorization = Some(authorization);
-        self
+    /// Starts real OAuth authorization for a manual-redirect frontend. No browser or listener
+    /// is created here. A scope restricts the defining transport, not a project policy override.
+    pub async fn begin_login(
+        &self,
+        name: &str,
+        scope: Option<McpScope>,
+        signal: AbortSignal,
+    ) -> Result<(McpOAuthSignIn, McpOAuthRedirect), McpOAuthError> {
+        let config = self
+            .management_oauth_config(name, scope)
+            .map_err(McpOAuthError::Failed)?;
+        let McpTransport::Http { url, .. } = &config.transport else {
+            unreachable!("validated HTTP")
+        };
+        let settings = config.oauth.unwrap_or_default();
+        let redirect_url = settings.callback_url.clone().unwrap_or_else(|| {
+            format!(
+                "http://127.0.0.1:{}/callback",
+                settings.callback_port.unwrap_or(53682)
+            )
+        });
+        McpOAuthSignIn::start(
+            name,
+            url,
+            &settings,
+            self.client_auth.oauth_store.clone(),
+            &redirect_url,
+            None,
+            signal,
+        )
+        .await
     }
 
-    pub async fn login(&self, name: &str, scope: McpScope) -> Result<String, String> {
-        self.path(scope)?;
-        let authorization = self
-            .authorization
-            .as_ref()
-            .ok_or("MCP OAuth login is not available in this build; no credentials were changed")?;
-        authorization.login(name, scope).await
+    /// Deletes only this configured server's real OAuth credentials; provider/header auth is
+    /// rejected instead of claiming to sign it out. No network request is sent.
+    pub fn logout(&self, name: &str, scope: Option<McpScope>) -> Result<String, String> {
+        let config = self.management_oauth_config(name, scope)?;
+        let McpTransport::Http { url, .. } = &config.transport else {
+            unreachable!("validated HTTP")
+        };
+        let removed = self.client_auth.oauth_store.sign_out(name, url)?;
+        Ok(if removed {
+            format!("Signed out of MCP server {name:?}.")
+        } else {
+            format!("No stored credentials for MCP server {name:?}.")
+        })
     }
 
-    pub async fn logout(&self, name: &str, scope: McpScope) -> Result<String, String> {
-        self.path(scope)?;
-        let authorization = self.authorization.as_ref().ok_or(
-            "MCP OAuth logout is not available in this build; no credentials were changed",
-        )?;
-        authorization.logout(name, scope).await
+    fn management_oauth_config(
+        &self,
+        name: &str,
+        scope: Option<McpScope>,
+    ) -> Result<McpServerConfig, String> {
+        if let Some(scope) = scope {
+            self.path(scope)?;
+        }
+        let entry = self
+            .entries()?
+            .into_iter()
+            .find(|entry| entry.config.name() == name)
+            .ok_or("MCP server not found")?;
+        if scope.is_some_and(|scope| scope != entry.scope) {
+            return Err("MCP server is defined in another scope; omit --local for an inherited global server".into());
+        }
+        let config = self.resolve(entry)?;
+        if let Some(auth) = &config.auth {
+            return Err(format!(
+                "This MCP server uses provider credentials; use pi auth login/logout {}",
+                auth.provider
+            ));
+        }
+        match &config.transport {
+            McpTransport::Http { headers, .. }
+                if !headers
+                    .keys()
+                    .any(|name| name.eq_ignore_ascii_case("authorization")) =>
+            {
+                Ok(config)
+            }
+            _ => Err("MCP OAuth requires an HTTP server without an Authorization header".into()),
+        }
     }
 
     pub(crate) fn path(&self, scope: McpScope) -> Result<PathBuf, String> {
@@ -522,7 +572,12 @@ impl McpLibrary {
         // publish a registry or change the generation's actual exposure policy.
         inspection_policy.exposure = McpExposure::Direct;
         inspection_policy.tool_exposure.clear();
-        match McpToolSet::connect_with_policies(vec![(config, inspection_policy)]).await {
+        match McpToolSet::connect_with_policies_and_auth(
+            vec![(config, inspection_policy)],
+            self.client_auth.clone(),
+        )
+        .await
+        {
             Ok(pool) => {
                 report.tools = pool
                     .tools()
@@ -806,7 +861,9 @@ fn merge_entry(
 ) -> Result<(), String> {
     let name = config.name().to_string();
     if scope == McpScope::Project && config.has_provider_auth() {
-        return Err(format!("MCP server {name}: auth is only allowed in global MCP configuration"));
+        return Err(format!(
+            "MCP server {name}: auth is only allowed in global MCP configuration"
+        ));
     }
     let entry = if scope == McpScope::Project && config.is_override() {
         let base = merged.get(&name).ok_or_else(|| {
@@ -1291,57 +1348,6 @@ mod tests {
         assert!(project_value["mcpServers"]["docs"].get("url").is_none());
         assert!(library.remove(McpScope::Global, "old").unwrap());
         assert!(!library.remove(McpScope::Global, "missing").unwrap());
-    }
-
-    #[tokio::test]
-    async fn authorization_delegates_only_when_installed_and_never_bypasses_project_trust() {
-        struct Authorization(std::sync::Mutex<Vec<String>>);
-        #[async_trait::async_trait]
-        impl McpAuthorization for Authorization {
-            async fn login(&self, name: &str, scope: McpScope) -> Result<String, String> {
-                self.0
-                    .lock()
-                    .unwrap()
-                    .push(format!("login {name} {scope:?}"));
-                Ok("fixture login".into())
-            }
-            async fn logout(&self, name: &str, scope: McpScope) -> Result<String, String> {
-                self.0
-                    .lock()
-                    .unwrap()
-                    .push(format!("logout {name} {scope:?}"));
-                Ok("fixture logout".into())
-            }
-        }
-        let directory = tempfile::tempdir().unwrap();
-        let library = McpLibrary::new(directory.path(), Some(directory.path()), false);
-        assert!(
-            library
-                .login("docs", McpScope::Global)
-                .await
-                .unwrap_err()
-                .contains("no credentials were changed")
-        );
-        assert!(library.logout("docs", McpScope::Global).await.is_err());
-        let authorization = Arc::new(Authorization(std::sync::Mutex::new(vec![])));
-        let library = library.with_authorization(authorization.clone());
-        assert_eq!(
-            library.login("docs", McpScope::Global).await.unwrap(),
-            "fixture login"
-        );
-        assert_eq!(
-            library.logout("docs", McpScope::Global).await.unwrap(),
-            "fixture logout"
-        );
-        assert!(
-            library
-                .login("docs", McpScope::Project)
-                .await
-                .unwrap_err()
-                .contains("trust")
-        );
-        assert_eq!(authorization.0.lock().unwrap().len(), 2);
-        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]
