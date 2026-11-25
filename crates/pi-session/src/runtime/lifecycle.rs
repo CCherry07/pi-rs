@@ -296,6 +296,9 @@ impl AgentSession {
             runtime_inventory: options.runtime_inventory,
             model_switch: options.model_switch,
             settings_writer: options.settings_writer,
+            generation_freshness: options.generation_freshness,
+            generation_owner: std::sync::OnceLock::new(),
+            submission_abort_epoch: std::sync::OnceLock::new(),
             plugin_driver,
             diagnostic_subscriptions,
             executor: tokio::runtime::Handle::current(),
@@ -411,6 +414,31 @@ impl AgentSession {
 
     pub fn is_closed(&self) -> bool {
         self.lifecycle_state.load(Ordering::Acquire) == SESSION_CLOSED
+    }
+
+    /// Automatic freshness replacement must never interrupt another admitted
+    /// activity. Reserve lifecycle and admission together, without aborting runs.
+    pub(crate) fn begin_idle_replacement(
+        &self,
+    ) -> Result<AgentSessionTransitionGuard, SessionError> {
+        let _operation = self.activity.try_begin()?;
+        self.lifecycle_state
+            .compare_exchange(
+                SESSION_OPEN,
+                SESSION_TRANSITIONING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map_err(|state| {
+                if state == SESSION_CLOSED {
+                    SessionError::Closed
+                } else {
+                    SessionError::Busy
+                }
+            })?;
+        Ok(AgentSessionTransitionGuard {
+            lifecycle_state: Arc::clone(&self.lifecycle_state),
+        })
     }
 
     pub(crate) async fn begin_replacement(

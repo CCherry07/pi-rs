@@ -58,6 +58,7 @@ tokio = { workspace = true, features = ["io-std", "io-util", "signal", "net"] }
 tui-realm-stdlib = "4.1.0"
 tuirealm = { version = "4.1.0", default-features = false }
 pulldown-cmark = "0.13"
+url = "2"
 unicode-width = "0.2"
 uuid = { version = "1.18.1", features = ["v7"] }
 
@@ -65,4 +66,6 @@ uuid = { version = "1.18.1", features = ["v7"] }
 rustix = { version = "1", features = ["fs", "termios", "process"] }
 
 [dev-dependencies]
+axum = "0.8"
+reqwest = { version = "0.13.2", default-features = false, features = ["json"] }
 pi-test-support.workspace = true

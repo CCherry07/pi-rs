@@ -50,12 +50,19 @@ async fn management_sign_in_validates_redirect_and_logout_removes_real_credentia
     )
     .unwrap();
     let library = McpLibrary::new(directory.path(), None, false);
+    let watch = library.credential_watch().unwrap();
+    let revision = watch.oauth_revision().unwrap();
     assert!(!library.has_oauth_credentials("account").unwrap());
     let (mut flow, redirect) = library
         .begin_login("account", None, AbortHandle::new().1)
         .await
         .unwrap();
     assert_eq!(redirect.redirect_url, "http://127.0.0.1:8910/callback");
+    assert_eq!(
+        watch.oauth_revision().unwrap(),
+        revision,
+        "pending login is not a credential change"
+    );
     assert!(
         !library.has_oauth_credentials("account").unwrap(),
         "starting sign-in is not authentication"
@@ -78,6 +85,7 @@ async fn management_sign_in_validates_redirect_and_logout_removes_real_credentia
     .await
     .unwrap();
     assert!(library.has_oauth_credentials("account").unwrap());
+    assert_ne!(watch.oauth_revision().unwrap(), revision);
     let inspection = library.inspect().await;
     assert!(inspection.is_ok(), "{inspection:?}");
     assert_eq!(
@@ -97,6 +105,55 @@ async fn management_sign_in_validates_redirect_and_logout_removes_real_credentia
             .unwrap()
             .contains("No stored credentials")
     );
+    server.abort();
+}
+
+#[tokio::test]
+async fn authorization_challenges_are_visible_and_do_not_prevent_the_management_generation() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let app = axum::Router::new().route(
+        "/mcp",
+        axum::routing::post(|| async {
+            (
+                axum::http::StatusCode::UNAUTHORIZED,
+                [("www-authenticate", "Bearer realm=must-not-log-challenge")],
+            )
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("mcp.json"),
+        json!({"mcpServers":{"account":{"url":url}}}).to_string(),
+    )
+    .unwrap();
+    let library = McpLibrary::new(directory.path(), None, false);
+    let inspection = library.inspect().await;
+    assert!(!inspection.is_ok());
+    assert_eq!(
+        serde_json::to_value(&inspection.servers[0]).unwrap()["state"],
+        "needs-auth"
+    );
+    assert!(
+        inspection.servers[0]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("pi mcp login account")
+    );
+    assert!(!format!("{inspection:?}").contains("must-not-log-challenge"));
+    assert!(
+        library.prepare().await.is_ok(),
+        "The /mcp control plane must remain reachable before sign-in"
+    );
+    let error = pi_plugin_mcp::McpToolSet::connect(vec![pi_plugin_mcp::McpServerConfig::http(
+        "account", url,
+    )])
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("requires authorization"));
+    assert!(!format!("{error:?}").contains("must-not-log-challenge"));
     server.abort();
 }
 

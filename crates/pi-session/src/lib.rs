@@ -68,10 +68,10 @@ pub use plugin::{
 pub use runtime::SessionShellExecutor;
 pub use runtime::{
     AgentSessionInitialModelSource, AgentSessionInitialState, AgentSessionOptions,
-    AutoRetrySettings, CompactionSettingsResolver, InitialModelRequest, InitialModelResolveError,
-    InitialModelSelection, ModelCycleResult, ModelSwitchPolicy, RestoredSessionConfiguration,
-    RestoredToolSelection, SessionRuntimeInventory, SessionSetting, SessionSettingsWriter,
-    resolve_model_scope, validate_initial_model_scope,
+    AutoRetrySettings, CompactionSettingsResolver, GenerationFreshness, InitialModelRequest,
+    InitialModelResolveError, InitialModelSelection, ModelCycleResult, ModelSwitchPolicy,
+    RestoredSessionConfiguration, RestoredToolSelection, SessionRuntimeInventory, SessionSetting,
+    SessionSettingsWriter, resolve_model_scope, validate_initial_model_scope,
 };
 
 pub(crate) use pi_utils::time::unix_timestamp_ms as now_ms;

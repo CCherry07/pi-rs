@@ -3,6 +3,7 @@
 mod codemode;
 mod codemode_models;
 mod features;
+mod mcp_auth;
 mod mcp_configuration;
 mod mcp_deferred;
 mod mcp_reload;

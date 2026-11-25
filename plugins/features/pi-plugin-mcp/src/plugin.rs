@@ -37,6 +37,11 @@ impl Plugin for McpProductPlugin {
         context: &pi_plugin::SessionPluginContext,
         _event: &pi_plugin::SessionStartEvent,
     ) -> Result<(), PluginError> {
+        for pending in self.pool.authorization_required() {
+            context
+                .ui
+                .notify(NoticeLevel::Warning, pending.to_string())?;
+        }
         if !self.needs_codemode && !self.needs_tool_search {
             return Ok(());
         }
@@ -87,7 +92,46 @@ struct McpCommand {
     pool: McpToolSet,
 }
 
+struct SemanticOAuthPrompt(pi_plugin::UiContext);
+#[async_trait]
+impl crate::McpOAuthPrompt for SemanticOAuthPrompt {
+    fn show_authorization_url(&self, url: &str) -> Result<(), String> {
+        self.0
+            .notify(
+                NoticeLevel::Info,
+                format!("Authorize MCP access in your browser:\n{url}"),
+            )
+            .map_err(|error| error.to_string())
+    }
+    fn notify(&self, message: &str) -> Result<(), String> {
+        self.0
+            .notify(NoticeLevel::Info, message)
+            .map_err(|error| error.to_string())
+    }
+    async fn redirect_url(&self, signal: pi_core::AbortSignal) -> Result<Option<String>, String> {
+        tokio::select! {
+            biased;
+            () = signal.wait() => Ok(None),
+            result = self.0.input("Waiting for OAuth callback — or paste the complete redirect URL", "http://127.0.0.1/...?...&state=...") => result.map_err(|error| error.to_string()),
+        }
+    }
+}
+
 impl McpCommand {
+    fn server_state(&self, row: &McpServerRow) -> &'static str {
+        if !row.enabled {
+            "disabled"
+        } else if self
+            .pool
+            .authorization_required()
+            .iter()
+            .any(|required| required.server == row.name)
+        {
+            "needs sign-in"
+        } else {
+            "connected"
+        }
+    }
     async fn test_connection(
         &self,
         context: &CommandContext,
@@ -124,7 +168,7 @@ impl McpCommand {
         // candidate leaves this command's current generation active.
         let replacement = context.session.reload().await.map_err(|error| {
             CommandError::Execution(format!(
-                "{error}; the previous generation remains active. Configuration edits remain on disk; retry /mcp reload or revert them."
+                "{error}; the previous generation remains active. Configuration or credential changes remain on disk; retry /mcp reload or revert them."
             ))
         })?;
         replacement.ui.notify(NoticeLevel::Info, message)?;
@@ -143,40 +187,26 @@ impl McpCommand {
                     .into(),
             ));
         }
-        let signal = context.signal().clone();
-        let flow = async {
-            let (mut login, redirect) = self
-                .library
-                .begin_login(name, scope, signal.clone())
-                .await
-                .map_err(|error| CommandError::Execution(error.to_string()))?;
-            context.ui.notify(NoticeLevel::Info, format!(
-                "Open this URL in your browser:\n{}\nNo callback listener is running. After authorization, copy the complete callback URL from the address bar, even if the browser cannot connect.", redirect.authorization_url))?;
-            let Some(response) = context
-                .ui
-                .input(
-                    "Paste the complete MCP OAuth callback URL",
-                    "http://127.0.0.1/...?...&state=...",
-                )
-                .await?
-            else {
-                return Err(CommandError::Aborted);
-            };
-            login
-                .complete_redirect_url(response.trim(), signal.clone())
-                .await
-                .map_err(|error| CommandError::Execution(error.to_string()))?;
-            context.ui.notify(
-                NoticeLevel::Info,
-                format!("Signed in to MCP server {name:?}."),
-            )?;
-            Ok(())
-        };
-        tokio::select! {
-            biased;
-            () = signal.wait() => Err(CommandError::Aborted),
-            result = flow => result,
-        }
+        let count = tokio::time::timeout(
+            std::time::Duration::from_secs(300),
+            self.library.login(
+                name,
+                scope,
+                Arc::new(SemanticOAuthPrompt(context.ui.clone())),
+                context.signal().clone(),
+            ),
+        )
+        .await
+        .map_err(|_| CommandError::Execution("MCP login timed out; retry /mcp login".into()))?
+        .map_err(|error| match error {
+            crate::McpOAuthError::Cancelled => CommandError::Aborted,
+            error => CommandError::Execution(error.to_string()),
+        })?;
+        self.reload_after_change(
+            context,
+            format!("Signed in to MCP server {name:?} ({count} tools)."),
+        )
+        .await
     }
 
     async fn manage(&self, context: CommandContext) -> Result<CommandOutcome, CommandError> {
@@ -194,7 +224,7 @@ impl McpCommand {
                 format!(
                     "{} · {} · {} · {}",
                     row.name,
-                    if row.enabled { "enabled" } else { "disabled" },
+                    self.server_state(row),
                     row.exposure.as_str(),
                     scope_label(row.scope)
                 )
@@ -219,6 +249,8 @@ impl McpCommand {
                 "Keep disabled".into()
             },
             "Change exposure".into(),
+            "Sign in".into(),
+            "Sign out".into(),
         ];
         let Some(action) = context
             .ui
@@ -237,7 +269,7 @@ impl McpCommand {
                         row.name,
                         row.transport,
                         scope_label(row.scope),
-                        if row.enabled { "connected" } else { "disabled" },
+                        self.server_state(&row),
                         row.exposure.as_str(),
                         if self.pool.has_resources(&row.name) {
                             "\nresources: available"
@@ -298,6 +330,14 @@ impl McpCommand {
                     ),
                 )
                 .await?;
+            }
+            4 => self.login(&context, &row.name, None).await?,
+            5 => {
+                let message = self
+                    .library
+                    .logout(&row.name, None)
+                    .map_err(CommandError::Execution)?;
+                self.reload_after_change(&context, message).await?;
             }
             _ => {}
         }
@@ -490,13 +530,13 @@ impl Command for McpCommand {
                         .library
                         .logout(name, scope)
                         .map_err(CommandError::Execution)?;
-                    context.ui.notify(NoticeLevel::Info, message)?;
+                    self.reload_after_change(&context, message).await?;
                 }
                 return Ok(CommandOutcome::Handled);
             }
             "login" | "logout" | "reconnect" => {
                 return Err(CommandError::InvalidArguments(
-                    "Name an MCP server. Login uses a manually pasted OAuth callback URL.".into(),
+                    "Name an MCP server. Login opens a browser when supported, with a pasted redirect fallback.".into(),
                 ));
             }
             _ => return Err(CommandError::InvalidArguments(mcp_usage())),
@@ -508,6 +548,7 @@ impl Command for McpCommand {
 
 #[cfg(test)]
 mod tests {
+    mod auth;
     use super::*;
     use pi_plugin::{
         ModelsContextAccess, PluginContextEpoch, PluginContextResult, SessionContextAccess,

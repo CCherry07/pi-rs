@@ -165,8 +165,38 @@ impl McpOAuthCredentialStore {
                 .servers
                 .get(&key)
                 .and_then(|state| state.credentials.as_ref())
-                .is_some()
+                .is_some_and(|credentials| credentials.token_response.is_some())
         })
+    }
+
+    /// Opaque revision of completed credentials only. Pending authorization
+    /// state and client registration alone must not trigger a ready generation.
+    pub(crate) fn credentials_revision(
+        &self,
+        identities: &[(String, String)],
+    ) -> Result<[u8; 32], String> {
+        use sha2::{Digest, Sha256};
+        let keys = identities
+            .iter()
+            .map(|(name, url)| credential_key(name, url))
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+        self.read(|document| {
+            let credentials = document
+                .servers
+                .iter()
+                .filter(|(key, _)| keys.contains(*key))
+                .filter_map(|(key, state)| {
+                    state
+                        .credentials
+                        .as_ref()
+                        .filter(|credentials| credentials.token_response.is_some())
+                        .map(|credentials| (key, credentials))
+                })
+                .collect::<BTreeMap<_, _>>();
+            serde_json::to_vec(&credentials)
+                .map(|bytes| Sha256::digest(bytes).into())
+                .map_err(|_| "MCP OAuth credential revision failed".to_string())
+        })?
     }
 
     pub fn save_tokens(

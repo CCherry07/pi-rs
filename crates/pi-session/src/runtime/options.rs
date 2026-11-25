@@ -29,6 +29,10 @@ pub struct AgentSessionOptions {
     pub initial_model: InitialModelRequest,
     pub model_switch: ModelSwitchPolicy,
     pub settings_writer: Option<Arc<dyn SessionSettingsWriter>>,
+    /// Product-owned external-input freshness for this immutable generation.
+    /// Managed sessions rebuild transactionally before admitting the next idle
+    /// submission; active runs and their queues keep their published generation.
+    pub generation_freshness: Option<Arc<dyn GenerationFreshness>>,
     /// Generation-local tools the product enables when restoring a session.
     /// The product owns this policy; session replay only reconciles names
     /// against the new registry and persists the resulting selection.
@@ -54,6 +58,22 @@ pub struct AgentSessionOptions {
     /// Session-owned retry policy for transient assistant/provider failures.
     pub retry: AutoRetrySettings,
     pub(crate) initial_model_fallback_message: Option<String>,
+}
+
+/// Checks external inputs without mutating a published generation or session log.
+/// A new generation captures a new baseline; failed preparation leaves the old
+/// predicate intact so a later submission can retry.
+pub trait GenerationFreshness: Send + Sync {
+    fn is_stale(&self) -> Result<bool, SessionError>;
+}
+
+impl<F> GenerationFreshness for F
+where
+    F: Fn() -> Result<bool, SessionError> + Send + Sync,
+{
+    fn is_stale(&self) -> Result<bool, SessionError> {
+        self()
+    }
 }
 
 /// Product-owned per-model token settings. Resolution can fail lazily for an
@@ -89,6 +109,10 @@ impl Default for AutoRetrySettings {
 }
 
 impl AgentSessionOptions {
+    pub fn generation_freshness(mut self, freshness: Arc<dyn GenerationFreshness>) -> Self {
+        self.generation_freshness = Some(freshness);
+        self
+    }
     pub fn settings_writer(mut self, writer: Arc<dyn SessionSettingsWriter>) -> Self {
         self.settings_writer = Some(writer);
         self

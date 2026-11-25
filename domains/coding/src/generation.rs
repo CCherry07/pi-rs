@@ -43,6 +43,7 @@ pub struct ProductSessionFactory {
     js_plugin_host: Option<Arc<dyn JsPluginHost>>,
     plugin_context_binding: PluginContextBinding,
     plugin_ui_bridge: Option<Arc<dyn PluginUiBridge>>,
+    mcp_oauth_host: Option<Arc<dyn pi_plugin_mcp::McpOAuthHost>>,
     session_bindings: Vec<SessionBinding>,
     presentation_mode: PresentationMode,
     dynamic_providers: DynamicProviderOverlay,
@@ -116,11 +117,17 @@ impl ProductSessionFactory {
             js_plugin_host: None,
             plugin_context_binding: PluginContextBinding::new(),
             plugin_ui_bridge: None,
+            mcp_oauth_host: None,
             session_bindings: Vec::new(),
             presentation_mode: PresentationMode::Print,
             dynamic_providers: DynamicProviderOverlay::default(),
             subagents: SubagentRuntime::default(),
         }
+    }
+
+    pub fn with_mcp_oauth_host(mut self, host: Arc<dyn pi_plugin_mcp::McpOAuthHost>) -> Self {
+        self.mcp_oauth_host = Some(host);
+        self
     }
 
     pub fn with_js_plugin_host(mut self, host: Arc<dyn JsPluginHost>) -> Self {
@@ -221,20 +228,28 @@ impl SessionGenerationFactory for ProductSessionFactory {
                     .to_string(),
             ));
         }
-        let local_mcp = if config.load_mcp_config {
-            Some(
-                pi_plugin_mcp::McpLibrary::new(
-                    &config.agent_dir,
-                    Some(&config.cwd),
-                    project_trusted,
-                )
-                .with_tool_search_registration(false)
-                .prepare()
-                .await
-                .map_err(SessionError::Runtime)?,
+        let (local_mcp, mcp_freshness) = if config.load_mcp_config {
+            let mut library = pi_plugin_mcp::McpLibrary::new(
+                &config.agent_dir,
+                Some(&config.cwd),
+                project_trusted,
             )
+            .with_tool_search_registration(false)
+            .with_client_auth(crate::mcp_client_auth(&config.agent_dir));
+            if let Some(host) = &self.mcp_oauth_host {
+                library = library.with_oauth_host(host.clone());
+            }
+            let freshness = crate::mcp::generation_freshness(
+                &config.agent_dir,
+                library.credential_watch().map_err(SessionError::Runtime)?,
+            )?;
+            let prepared = library
+                .prepare_generation()
+                .await
+                .map_err(SessionError::Runtime)?;
+            (Some(prepared.plugin), freshness)
         } else {
-            None
+            (None, None)
         };
         let memory = prepare_memory(&config, project_trusted).map_err(SessionError::Runtime)?;
         let package_reconciliations =
@@ -372,7 +387,7 @@ impl SessionGenerationFactory for ProductSessionFactory {
             runtime,
             initial_model_fallback_message,
         } = built_runtime;
-        let session_options = session_options(
+        let mut session_options = session_options(
             &config.runtime_settings,
             initial_model_request(
                 config.requested_provider.as_deref(),
@@ -392,6 +407,7 @@ impl SessionGenerationFactory for ProductSessionFactory {
             js_extensions,
             configured_native_plugins,
         ));
+        session_options.generation_freshness = mcp_freshness;
         let activation = PreparedProductActivation {
             dynamic_providers: self.dynamic_providers.clone(),
             dynamic_provider_candidate,

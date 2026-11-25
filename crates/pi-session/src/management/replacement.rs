@@ -314,6 +314,7 @@ pub(crate) enum ResolvedSessionTransition {
         position: ForkPosition,
     },
     Reload,
+    Refresh,
 }
 
 /// Owns the replaceable current `AgentSession`.
@@ -335,6 +336,7 @@ pub(crate) struct SessionSlot {
 #[derive(Default)]
 pub(super) struct SessionSlotState {
     pub(super) epoch: AtomicU64,
+    submission_abort_epoch: Arc<AtomicU64>,
     pub(super) closed: AtomicBool,
 }
 
@@ -506,7 +508,15 @@ impl SessionSlot {
         super::SessionObservation::new(self.subscribe(), Arc::clone(&self.state))
     }
 
+    pub(crate) fn submission_abort_epoch(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.state.submission_abort_epoch)
+    }
+
     fn publish(&self, next: Arc<AgentSession>) {
+        // Bind before publication: observers may submit immediately.
+        if let Some(owner) = self.session().generation_owner() {
+            next.bind_generation_owner(owner);
+        }
         self.current.send_modify(|current| {
             *current = next;
             self.state.epoch.fetch_add(1, Ordering::Release);
@@ -532,7 +542,8 @@ impl SessionSlot {
             ResolvedSessionTransition::Fork { entry_id, position } => {
                 self.replace_with_fork(current, entry_id, position).await
             }
-            ResolvedSessionTransition::Reload => self.replace_with_reload(current).await,
+            ResolvedSessionTransition::Reload => self.replace_with_reload(current, false).await,
+            ResolvedSessionTransition::Refresh => self.replace_with_reload(current, true).await,
         }
     }
 
@@ -551,7 +562,9 @@ impl SessionSlot {
                 reason: SessionSwitchReason::Resume,
                 target_session_file: Some(path.clone()),
             },
-            ResolvedSessionTransition::Fork { .. } | ResolvedSessionTransition::Reload => {
+            ResolvedSessionTransition::Fork { .. }
+            | ResolvedSessionTransition::Reload
+            | ResolvedSessionTransition::Refresh => {
                 unreachable!("fork and reload have dedicated replacement transactions")
             }
         };
@@ -615,7 +628,9 @@ impl SessionSlot {
                     Some(path),
                 )
             }
-            ResolvedSessionTransition::Fork { .. } | ResolvedSessionTransition::Reload => {
+            ResolvedSessionTransition::Fork { .. }
+            | ResolvedSessionTransition::Reload
+            | ResolvedSessionTransition::Refresh => {
                 unreachable!("fork and reload have dedicated replacement transactions")
             }
         };
@@ -631,6 +646,7 @@ impl SessionSlot {
                 reason: shutdown_reason,
                 target_session_file,
             },
+            false,
         )
         .await?;
         Ok(AgentSessionReplacement::Replaced)
@@ -727,6 +743,7 @@ impl SessionSlot {
     async fn replace_with_reload(
         &self,
         current: Arc<AgentSession>,
+        idle_only: bool,
     ) -> Result<AgentSessionReplacement, SessionError> {
         // Both generations refer to the same conversation. Sharing its journal
         // includes final shutdown-hook writes and preserves one mutation sequence,
@@ -744,6 +761,7 @@ impl SessionSlot {
                 reason: SessionShutdownReason::Reload,
                 target_session_file: None,
             },
+            idle_only,
         )
         .await?;
         Ok(AgentSessionReplacement::Replaced)
@@ -776,8 +794,13 @@ impl SessionSlot {
         start_event: SessionStartEvent,
         initial_state: Option<AgentSessionInitialState>,
         shutdown_event: SessionShutdownEvent,
+        idle_only: bool,
     ) -> Result<(), SessionError> {
-        let _session_transition = current.begin_replacement().await?;
+        let _session_transition = if idle_only {
+            current.begin_idle_replacement()?
+        } else {
+            current.begin_replacement().await?
+        };
         let reload_registered_tools =
             (start_event.reason == SessionStartReason::Reload).then(|| {
                 current

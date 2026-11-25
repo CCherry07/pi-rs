@@ -462,6 +462,38 @@ impl PiSession {
         .await
     }
 
+    /// Refresh only the generation observed by this idle submission. The manager's
+    /// existing operation gate serializes checks with replacement and publication;
+    /// concurrent submitters hand their already-prepared input to the winner.
+    pub(crate) async fn refresh_generation_if_stale(
+        &self,
+        expected: &AgentSession,
+    ) -> Result<Option<Arc<AgentSession>>, MultiSessionManagerError> {
+        let current = self.current();
+        if !std::ptr::eq(current.as_ref(), expected) {
+            return Ok(Some(current));
+        }
+        if !current.is_idle() || !current.generation_is_stale()? {
+            return Ok(None);
+        }
+        let replacement = ManagedSessionReplacement::begin(self.clone()).await?;
+        let current = self.current();
+        if !std::ptr::eq(current.as_ref(), expected) {
+            return Ok(Some(current));
+        }
+        if !current.is_idle() || !current.generation_is_stale()? {
+            return Ok(None);
+        }
+        match replacement.run(SessionReplacementRequest::Refresh).await {
+            Ok(AgentSessionReplacement::Replaced) => Ok(Some(self.current())),
+            Ok(AgentSessionReplacement::Cancelled) => {
+                Err(SessionError::Cancelled("generation refresh").into())
+            }
+            Err(MultiSessionManagerError::Session(SessionError::Busy)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     pub async fn reload(&self) -> Result<(), MultiSessionManagerError> {
         self.replace(SessionReplacementRequest::Reload).await?;
         Ok(())
@@ -469,6 +501,10 @@ impl PiSession {
 
     pub fn abort(&self) {
         self.slot.abort();
+    }
+
+    pub(crate) fn submission_abort_epoch(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        self.slot.submission_abort_epoch()
     }
 
     pub(super) fn manager(

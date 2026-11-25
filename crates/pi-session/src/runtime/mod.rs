@@ -10,6 +10,7 @@ pub(crate) use delivery::SessionDelivery;
 pub(crate) mod compaction;
 mod control;
 pub(crate) mod events;
+mod freshness;
 mod lifecycle;
 mod navigation;
 mod observers;
@@ -152,6 +153,9 @@ pub struct AgentSession {
     model_switch: ModelSwitchPolicy,
     scoped_models: Vec<pi_plugin::ScopedModel>,
     settings_writer: Option<Arc<dyn SessionSettingsWriter>>,
+    generation_freshness: Option<Arc<dyn GenerationFreshness>>,
+    generation_owner: std::sync::OnceLock<crate::WeakPiSession>,
+    submission_abort_epoch: std::sync::OnceLock<Arc<std::sync::atomic::AtomicU64>>,
     context_updates: ContextUpdates,
     plugin_driver: Arc<PluginDriver>,
     diagnostic_subscriptions: Vec<pi_plugin::PluginDiagnosticSubscription>,

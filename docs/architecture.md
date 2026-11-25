@@ -2001,8 +2001,9 @@ server instructions attached to tool namespaces and codemode/deferred/direct exp
 Rust uses Pi's codemode default while retaining generation-based connection ownership. Its shell
 add/remove/list subset and interactive inspect, reconnect, enable/disable and server-exposure
 operations use typed management and semantic UI seams. These adapt current Pi behaviors, not the
-full legacy UI: per-tool editing, logs and automatic browser/loopback login remain separate work. Asynchronous connection
-publication remains a deliberate generation-based difference.
+full legacy UI: per-tool editing, live logs and additional authoring flags remain separate work.
+Browser/loopback login is a host adapter, while asynchronous connection publication remains a deliberate
+generation-based difference.
 The complete Rust implementation lives in
 `plugins/features/pi-plugin-mcp`, with client, config, library and product-plugin modules rather
 than a separate `pi-mcp` crate or an SDK implementation. `pi-plugin-mcp::config` owns document
@@ -2037,8 +2038,10 @@ file. Typed add/remove and policy edits retain unrelated JSON and wildcard decla
 reuse that same atomic transaction. Add validates the new definition; add/remove preserve unrelated
 invalid entries to permit repair. Policy edits still validate inherited configuration. `inspect`
 probes servers independently and returns status/tools/resources/errors without constructing a
-session. Malformed entries yield diagnostics without suppressing valid rows; generation preparation
-remains strict. Reports inventory hidden tools and retain defining-scope/project-override provenance
+session. Malformed entries yield diagnostics without suppressing valid rows. Product generation
+preparation tolerates only typed authorization-required failures, retaining those servers as pending
+with actionable startup/manager warnings. Unrelated failures remain strict; explicit tool-only pools
+still reject authorization-required connections. Reports inventory hidden tools and retain defining-scope/project-override provenance
 without fetching resource contents. Invalid JSON remains readable/editable. Authentication values should use `${VAR}`,
 `${env:VAR}` or whole-value `$VAR`; no shell evaluation occurs. Expansion happens only when a
 server connects (including explicit inspection), not when raw configuration is read or saved. Relative explicit stdio cwd now resolves
@@ -2116,14 +2119,38 @@ plugin does not branch on execution origin. Connections still prepare before pub
 asynchronous discovery is separate.
 Invalid flag types reject the candidate rather than accumulating per-entry Pi diagnostics. OAuth and
 provider-auth values remain connection dependencies rather than registry mutations. Description
-contributes a server summary. Shell `pi mcp login` and semantic `/mcp login` now use the real library
-OAuth state machine with a manually opened authorization URL and pasted callback; the CLI uses hidden
-terminal input, and the semantic dialog observes command cancellation. `begin_login` validates the
-transport's defining scope and rejects provider/header authentication before starting authorization.
-The configured callback URL/port is honored; otherwise the manual flow uses 127.0.0.1:53682/callback.
-`logout` deletes the exact name/URL OAuth identity, never provider or configured header credentials.
-Browser launching, loopback listener ownership and whole-login timeout flags remain unimplemented;
-no token is fabricated or persisted as authenticated merely because the login flow started.
+contributes a server summary. `McpLibrary::login` validates defining scope, probes first, sends the
+challenge through `McpOAuthHost` and verifies the resulting connection. Already-authorized servers
+skip interaction. `McpOAuthPrompt` carries only semantic URL/notice/pasted-response interaction.
+`apps/pi-cli` owns the native browser opener and loopback callback listener: ephemeral port by default,
+configured callback URL/port when present, exact state/path checks using the actual CIMD redirect,
+bounded request parsing, and pasted fallback when launching or binding fails. Only HTTP(S) URLs can
+reach the OS opener. Its cancellable hidden terminal reader restores terminal state when callback,
+paste, cancellation or timeout wins. Semantic `/mcp login` uses the same host with an input surface;
+semantic login/logout then request complete replacement rather than mutating the pool. Both default
+to a 300-second whole-login timeout; shell `--timeout` accepts 1–86400 seconds. Browser/listener-free
+embedding hosts retain manual redirect input. `begin_login` remains the lower-level manual Interface.
+`logout` removes only the exact name/URL identity, not provider/header credentials; no token is
+fabricated or persisted as authenticated merely because authorization starts.
+
+Coding supplies `McpClientAuth` with the durable OAuth store and a named-provider adapter backed by
+its shared stored-first credential resolution/refresh policy. The selected model's explicit CLI key
+is not borrowed by MCP, and static Authorization headers bypass provider resolution and managed OAuth.
+`McpCredentialWatch` exposes only opaque revisions of enabled HTTP identities and named-provider
+requirements. Pending authorization/client registration and unrelated credentials are excluded.
+Coding captures revisions before connection preparation so external login racing a probe is not lost;
+external login, replacement and logout trigger whole-generation replacement before the next idle
+submission, including for already-ready transports that may cache OAuth tokens.
+
+`pi-session::GenerationFreshness` is domain-neutral: it names no MCP service or credential policy.
+Admission rechecks freshness after waiting for a prior activity. Automatic replacement reserves idle
+activity and lifecycle atomically and cannot abort another admitted run; explicit reload retains its
+existing interrupting semantics. Concurrent waiters hand already-command-processed input to the
+published generation, without replaying commands or consuming queues out of order. A live, shared
+abort epoch survives replacement so cancelling a refresh-waiting input cannot submit it afterward.
+Owner binding precedes publication. Candidate preparation failure retains the old generation; an
+already-started transaction retains the existing complete-on-drop rule, but a cancelled input never
+reaches the provider. No freshness-only Pi v4 record is added and drafts retain lazy persistence.
 Transport-only public config resolution accepts only plain direct policy instead of silently dropping
 codemode (including omitted exposure) or other policy; explicit `McpToolSet::connect` callers such as
 ACP request direct tools without local discovery or script-entry activation.
@@ -2146,8 +2173,11 @@ reactive token refresh. Standalone 2024 HTTP+SSE is explicitly rejected. Static/
 headers remain supported and an explicit static Authorization header bypasses managed OAuth.
 `pi-acp` advertises HTTP but not legacy SSE and converts client-supplied
 headers without local environment expansion. The CLI ACP host sets `load_mcp_config = false`,
-including for empty client server lists; embedded ACP hosts must do the same. ACP overlays remain
-transient and never enter Pi v4 storage. This consolidation does not add an MCP feature switch:
+including for empty client server lists; embedded ACP hosts must do the same. ACP never initiates
+browser authorization. It returns typed authorization-required errors with external `pi mcp login`
+and retry guidance. `AcpOptions::mcp_oauth_store` is explicit opt-in reuse of exact name/URL credentials;
+the CLI injects its durable store, while the default remains isolated. ACP overlays remain transient
+and never enter Pi v4 storage. This consolidation does not add an MCP feature switch:
 `load_mcp_config` still controls only local discovery, and ACP capability negotiation and
 client-provided server handling remain unchanged. A shared enable/disable capability policy is a
 separate change, not implied by depending on a plugin crate.

@@ -171,13 +171,20 @@ Inside a session, bare `/mcp` opens semantic server/action selectors in interact
 `enable`, `disable`, `exposure`, and `reload` also publish only a fully prepared replacement, so a
 failed reload keeps the current registry alive, while saved configuration remains on disk for retry
 or correction. This manager supports server-wide exposure; edit `toolExposure` in the file for
-per-tool changes. OAuth `pi mcp login <server>` displays an authorization URL and uses hidden terminal
-input for the complete callback URL; `/mcp login <server>` uses a semantic input dialog. Open the URL
-manually, approve access, then copy the callback address even if the browser shows a connection error:
-no browser launcher or loopback listener is installed. `logout` deletes only that server's stored
-OAuth credentials. `--local` requires a trusted project-defined transport, not an inherited global one.
-Provider/header authentication is not managed by these commands. Automatic browser login, whole-login
-timeout flags, OAuth add flags and Coding provider-token resolver integration remain unsupported.
+per-tool changes. OAuth `pi mcp login <server> [--timeout <seconds>]` and TUI `/mcp login <server>`
+open a browser and listen on an ephemeral loopback port (or the configured callback URL/port).
+If launching or listening fails, open the displayed URL and paste the complete redirected address;
+shell input is hidden. Cancellation/timeout closes the listener and restores shell input. The whole
+login defaults to 300 seconds; the shell flag accepts 1–86400 seconds. A successful login performs
+a real code exchange and reconnect; semantic login/logout then replace the complete generation.
+Embeddings without a native OAuth host retain a manual semantic redirect flow. `logout` deletes only
+that server's name/URL credentials. `--local` requires a trusted project-defined transport.
+Provider/header authentication is not managed by MCP login/logout: global `auth.provider` uses Coding's
+shared stored-first provider credential resolver (`pi auth login`), and explicit Authorization headers
+take precedence. Typed `needs-auth` servers remain visible without blocking the management generation;
+unrelated errors still reject preparation. External credential changes are picked up before the next
+idle provider submission, transactionally, without freshness-only session records.
+OAuth add flags, live logs and per-tool manager editing remain separate non-auth gaps.
 
 ## Tool selection
 
@@ -833,7 +840,10 @@ relative to the configuration directory; omitted `cwd` uses the session's workin
 
 `http` means Streamable HTTP, including both JSON and SSE responses. The old standalone HTTP+SSE
 transport is not supported. Static/environment-backed authentication headers are supported;
-interactive OAuth is not yet implemented. HTTP redirects are disabled to protect credentials.
+interactive OAuth is available through the management commands above. HTTP redirects are disabled
+to protect credentials. ACP never launches a browser: authentication-required errors direct the client
+to external `pi mcp login <server>` and a retry. The CLI ACP host explicitly supplies its durable store;
+embedded ACP hosts must opt into credential reuse.
 
 ```text
 /mcp                  # generation-local servers and discovered tool counts

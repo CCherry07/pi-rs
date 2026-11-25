@@ -10,8 +10,10 @@ mod auth;
 mod client;
 mod client_handler;
 pub mod config;
+mod credential_watch;
 mod directory;
 mod library;
+mod login;
 mod naming;
 mod output_schema;
 mod plugin;
@@ -24,11 +26,14 @@ pub use auth::{
     McpOAuthTokens, McpProviderTokenResolver,
 };
 pub use client::{
-    McpError, McpOAuthClientRegistration, McpOAuthConfig, McpProviderAuth, McpServerConfig,
-    McpToolDescriptor, McpToolSet, McpTransport, validate_configs,
+    McpAuthorizationRequired, McpError, McpOAuthClientRegistration, McpOAuthConfig,
+    McpProviderAuth, McpServerConfig, McpToolDescriptor, McpToolSet, McpTransport,
+    validate_configs,
 };
+pub use credential_watch::McpCredentialWatch;
 pub use library::{
     McpDocument, McpInspection, McpLibrary, McpScope, McpServerDefinition, McpServerReport,
-    McpServerRow, McpServerState,
+    McpServerRow, McpServerState, PreparedMcpGeneration,
 };
+pub use login::{McpOAuthHost, McpOAuthLoginRequest, McpOAuthPrompt};
 pub use policy::McpExposure;
