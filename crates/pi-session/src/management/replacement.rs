@@ -838,6 +838,7 @@ impl SessionSlot {
             reason,
             generation_overlay,
             initial_state.clone(),
+            runtime_scope,
         )?;
         request.reload_registered_tools = reload_registered_tools;
         let expected_workspace = request.workspace.clone();

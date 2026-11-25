@@ -290,6 +290,7 @@ impl AgentSession {
                 store.clone(),
                 options.context,
                 Arc::clone(&events),
+                tool_selection,
             ),
             runtime,
             store,

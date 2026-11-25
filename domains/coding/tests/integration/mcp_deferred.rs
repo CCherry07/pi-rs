@@ -449,6 +449,35 @@ async fn deferred_mcp_search_loads_tools_and_preserves_selection_across_tree_rel
         .open_session(&session_path, Default::default())
         .await
         .unwrap();
+    let resumed_selection = fixture.session.current().snapshot().agent.active_tools;
+    super::mcp_test_support::wait_for_tools(&fixture.session, &[SEARCH, UNUSED]).await;
+    if !fixture
+        .session
+        .current()
+        .snapshot()
+        .agent
+        .active_tools
+        .iter()
+        .any(|name| name == SEARCH)
+    {
+        let journal_selections: Vec<_> = fixture
+            .session
+            .current()
+            .history()
+            .branch_entries()
+            .unwrap()
+            .into_iter()
+            .filter_map(|record| match record.entry {
+                SessionEntry::ActiveToolsChange(selection) => {
+                    Some((record.id, selection.active_tool_names))
+                }
+                _ => None,
+            })
+            .collect();
+        eprintln!(
+            "Resume selected {resumed_selection:?}; after ready admission, journal ActiveToolsChange records: {journal_selections:?}"
+        );
+    }
     fixture.assert_active(SEARCH, true);
     fixture.assert_active(UNUSED, false);
     fixture.set_script([(SEARCH, json!({"query":"again"}))]);
@@ -885,6 +914,8 @@ async fn mcp_child_discovery_respects_grants_across_reload_and_restore() {
         (json!({"exposure":"deferred"}), "tool_search"),
     ] {
         let fixture = Fixture::configured(false, policy, None, Some(&["read"])).await;
+        // Child grants are derived from the parent's published callable inventory.
+        super::mcp_test_support::wait_for_tools(&fixture.session, &[SEARCH, UNUSED]).await;
         for tools in [vec![], vec!["read"], vec!["read", entry]] {
             let permitted = tools.contains(&entry);
             let id = fixture

@@ -141,7 +141,9 @@ async fn local_value_helpers_run_only_at_connect_and_reload_not_metadata_or_acp(
             .iter()
             .any(|command| command.name == "mcp")
     );
-    assert_eq!(fs::read(project.join("count")).unwrap(), b"xx");
+    assert_eq!(fs::read(project.join("count")).unwrap(), b"xxx");
+    assert!(!project.join("forbidden").exists());
+    assert!(!agent.join("acp.jsonl").exists());
     pi.sessions().shutdown().await.unwrap();
     isolated.sessions().shutdown().await.unwrap();
     server.abort();

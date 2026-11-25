@@ -144,6 +144,19 @@ impl AgentSessionOptions {
         self
     }
 
+    pub fn temporarily_unavailable_tools(mut self, tools: Vec<String>) -> Self {
+        self.temporarily_unavailable_tools = tools;
+        self
+    }
+
+    pub fn tool_selection_availability(
+        mut self,
+        availability: BTreeMap<String, ToolSelectionAvailability>,
+    ) -> Self {
+        self.tool_selection_availability = availability;
+        self
+    }
+
     pub fn context_window(mut self, context_window: u64) -> Self {
         self.context_window = Some(context_window);
         self

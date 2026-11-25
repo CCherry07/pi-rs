@@ -192,11 +192,11 @@ async fn external_login(provider_auth: bool) {
 }
 
 #[tokio::test]
-async fn mcp_external_oauth_login_refreshes_the_generation_before_the_next_prompt() {
+async fn mcp_external_oauth_login_is_atomic_on_global_failure_and_isolates_auth_faults() {
     external_login(false).await;
 }
 
 #[tokio::test]
-async fn mcp_external_provider_login_refreshes_the_generation_before_the_next_prompt() {
+async fn mcp_external_provider_login_is_atomic_on_global_failure_and_isolates_auth_faults() {
     external_login(true).await;
 }

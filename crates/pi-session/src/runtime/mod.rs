@@ -17,6 +17,7 @@ mod observers;
 mod options;
 mod recovery;
 mod run;
+mod selection_intent;
 mod shell;
 mod shell_executor;
 mod views;
