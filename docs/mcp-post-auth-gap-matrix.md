@@ -29,12 +29,12 @@ An interactive live log viewer would be an additional product feature.
 
 | ID | Oracle contract and source | Rust baseline / owning seam | Required evidence and delivery |
 | --- | --- | --- | --- |
-| M1 | `L/src/extensions/mcp/cli.ts:add`: `--oauth-client-id`, `--oauth-client-secret`, `--oauth-callback-port`, `--oauth-client-name`, `--oauth-client-registration`; HTTP-only, validated before save | `apps/pi-cli/src/mcp_commands.rs` omits these flags; `McpServerDefinition` cannot author OAuth even though config supports it | **VALIDATED; local delivery pending**. Typed library authoring + CLI parser tests, round-trip unresolved secrets, invalid/misplaced flags leave disk unchanged |
-| M2 | `index.ts:showTools`: full offered-tool inventory, description and differing effective exposure, including tools hidden by policy | `plugin.rs:manage` shows only aggregate counts; inspection can already inventory hidden tools | **VALIDATED; local delivery pending**. Read-only semantic view; cancellation and no disk/generation mutation; preserve remote names separately from normalized tool names |
-| M3 | `index.ts:serverMenu/saveConfig`: Enable/Disable in this project for a global server, with explicit trusted-project override ownership | Existing overrides merge correctly; manager cannot create this project-only override | **VALIDATED; local delivery pending**. Trusted project-only write, global bytes unchanged, inherited credentials untouched; reload failure retains old generation |
-| M4 | `index.ts:pickServer` and command handler: omitted login/logout/reconnect name auto-selects the only eligible/preferred server, otherwise selector; contextual actions, completion, returning/back/cancel | Rust commands require names and offer a fixed action list, including ineligible sign-in actions | **VALIDATED; local delivery pending**. Eligibility/state-dependent choices, non-UI behavior, no duplicate side effects on cancellation, retired-context handoff |
-| M5 | `cli.ts:list`: optional `authProvider`, always-present `errors` array, raw remote tool names with differing `toolExposure`, actionable names/provider guidance | `McpServerReport` has no `authProvider`; CLI already emits `errors: []` and differing tool exposures, which must be preserved | **VALIDATED; local delivery pending**. Exact stable JSON-shape and needs-auth output regressions; preserve useful Rust-only inspection APIs |
-| M6 | `cli.ts:runMcpCommand/editDistance`: unknown login/logout name suggests a nearby configured name, lists configured names and ignored-project guidance | Rust error lacks the same discovery assistance | **VALIDATED; local delivery pending**. Deterministic suggestion/unknown/untrusted-scope cases; never echo credentials |
+| M1 | `L/src/extensions/mcp/cli.ts:add`: `--oauth-client-id`, `--oauth-client-secret`, `--oauth-callback-port`, `--oauth-client-name`, `--oauth-client-registration`; HTTP-only, validated before save | `apps/pi-cli/src/mcp_commands.rs` omits these flags; `McpServerDefinition` cannot author OAuth even though config supports it | **DELIVERED `edddce1e8`**. Typed library authoring + CLI parser tests, round-trip unresolved secrets, invalid/misplaced flags leave disk unchanged |
+| M2 | `index.ts:showTools`: full offered-tool inventory, description and differing effective exposure, including tools hidden by policy | `plugin.rs:manage` shows only aggregate counts; inspection can already inventory hidden tools | **DELIVERED `edddce1e8`**. Read-only semantic view; cancellation and no disk/generation mutation; preserve remote names separately from normalized tool names |
+| M3 | `index.ts:serverMenu/saveConfig`: Enable/Disable in this project for a global server, with explicit trusted-project override ownership | Existing overrides merge correctly; manager cannot create this project-only override | **DELIVERED `edddce1e8`**. Trusted project-only write, global bytes unchanged, inherited credentials untouched; reload failure retains old generation |
+| M4 | `index.ts:pickServer` and command handler: omitted login/logout/reconnect name auto-selects the only eligible/preferred server, otherwise selector; contextual actions, completion, returning/back/cancel | Rust commands require names and offer a fixed action list, including ineligible sign-in actions | **DELIVERED `edddce1e8`**. Eligibility/state-dependent choices, non-UI behavior, no duplicate side effects on cancellation, retired-context handoff |
+| M5 | `cli.ts:list`: optional `authProvider`, always-present `errors` array, raw remote tool names with differing `toolExposure`, actionable names/provider guidance | `McpServerReport` has no `authProvider`; CLI already emits `errors: []` and differing tool exposures, which must be preserved | **DELIVERED `edddce1e8`**. Exact stable JSON-shape and needs-auth output regressions; preserve useful Rust-only inspection APIs |
+| M6 | `cli.ts:runMcpCommand/editDistance`: unknown login/logout name suggests a nearby configured name, lists configured names and ignored-project guidance | Rust error lacks the same discovery assistance | **DELIVERED `edddce1e8`**. Deterministic suggestion/unknown/untrusted-scope cases; never echo credentials |
 | D1 | `L/src/extensions/mcp/log.ts`: timestamp/server/level/logger, multiline indentation, append per message, rotate above 5 MiB to `mcp.log.1`, best-effort failures | `client_handler.rs` handles roots/progress only; no server log sink | **OPEN**. Notification-to-private-file fixture, rotation and unavailable sink, concurrent writers; logging cannot break requests or write outside renderer to terminal |
 | D2 | `runtime.ts:connectOnce/handleClientClose`: drain stdio stderr; last 2,000 characters explain initialization failure or disconnect | `client.rs` sends stderr to null | **OPEN**. Bounded drain that cannot deadlock the child, redacted diagnostic tail, failure/exit cleanup and no terminal pollution |
 | C1 | `runtime.ts:createDefaultTransport/oauthSettings` + `L/src/core/resolve-config-value.ts`: uncached `!command` for env/header/client-secret values, 10-second bound, trim/nonempty success; parse/save do not execute | `config.rs:expand_with` treats command-backed strings as literal values instead of executing them; transport-only APIs are explicit input and must not gain implicit shell execution | **OPEN**. Explicit local-config resolution capability after trust; no execution for untrusted/disabled entries, static parse/authoring/inspection metadata; cancellation, output limits, redacted failure, refresh/reconnect rereads |
@@ -49,7 +49,7 @@ An interactive live log viewer would be an additional product feature.
 | E2 | `index.ts:mcp_servers_change`: late extension registration/replacement/removal, old work invalidation/cleanup, session-only manager edits, report registrations without a connector | No registration-change adapter or transient extension management scope | **OPEN**. Generation-safe adapter, stale-attempt rejection, restart/close ordering, no mcp.json or Pi v4 config persistence |
 | E3 | `L/src/cli/args.ts` and built-in extension loading: `--no-mcp`; `--no-extensions` disables built-ins as well as discovered extensions while explicit extension paths remain valid | No `--no-mcp`; Rust `--no-extensions` currently only gates extension discovery, not MCP | **OPEN**. CLI/product option, no accidental connect/tool/schema/prompt entries; no impact on explicit ACP client server isolation; Node argument-splitting coverage if touched |
 | Q1 | `L/test/mcp-conformance/{README.md,run.ts,client.ts,baseline.json}`: official pinned suite `0.2.0-alpha.11`, modes 2025-03-26/06-18/11-25; checks and client completion baseline; missing scenarios fail | Local rmcp fixtures exist, no equivalent official runner/baseline coverage is established | **OPEN**. Product-path client adapter, pinned reproducible runner, local fixture servers only, per-check reviewed baseline; never regenerate to hide failures |
-| Q2 | Published SDK/harness docs describe shipped behavior | `packages/pi/docs/mcp.md` still says OAuth/provider auth unsupported and documents pre-management APIs; release copies it as shipped documentation | **VALIDATED; local delivery pending**. Sync authored docs deliberately, verify links and release input; docs alone do not require rerunning unchanged Rust gates |
+| Q2 | Published SDK/harness docs describe shipped behavior | `packages/pi/docs/mcp.md` still says OAuth/provider auth unsupported and documents pre-management APIs; release copies it as shipped documentation | **DELIVERED `edddce1e8`**. Sync authored docs deliberately, verify links and release input; docs alone do not require rerunning unchanged Rust gates |
 
 ## Newly identified auth-boundary carryovers (not silently waived)
 
@@ -59,13 +59,14 @@ before claiming full parity.
 
 | ID | Oracle | Rust baseline | Required evidence / disposition |
 | --- | --- | --- | --- |
-| A1 | `cli.ts:login/waitForRedirectUrl` allows non-TTY browser callback login; only terminal paste is disabled; already-authorized probe also works without TTY | CLI rejects nonterminal input before probing | **VALIDATED; local delivery pending**. Piped-stdin local fake-browser callback and already-authorized no-browser tests, bounded cleanup |
-| A2 | `cli.ts` accepts positive finite fractional `--timeout` seconds | Rust restricts integers to 1–86400 | **VALIDATED; local delivery pending**. Fractional timer/invalid numeric parser tests or approved documented limit |
+| A1 | `cli.ts:login/waitForRedirectUrl` allows non-TTY browser callback login; only terminal paste is disabled; already-authorized probe also works without TTY | CLI rejects nonterminal input before probing | **DELIVERED `edddce1e8`**. Piped-stdin local fake-browser callback and already-authorized no-browser tests, bounded cleanup |
+| A2 | `cli.ts` accepts positive finite fractional `--timeout` seconds | Rust restricts integers to 1–86400 | **DELIVERED `edddce1e8`**. Fractional timer/invalid numeric parser tests or approved documented limit |
 | A3 | Official auth cases include step-up, retry-limit and CIMD behavior under several negotiated protocols | Existing deterministic tests are narrower than the official baseline | **OPEN via Q1**, not presumed equivalent or failing until measured |
 
-## Management tranche implementation/evidence (not yet landed)
+## Management tranche delivery and evidence
 
-M1–M6 and A1–A2 are implemented in the current candidate. Q2 deliberately synchronizes only the
+M1–M6 and A1–A2 are delivered by `edddce1e8082b961ade289e3189d4883d94fc6d6`, verified on
+local `main` with a clean checkout; nothing was pushed. Q2 deliberately synchronizes only the
 MCP introduction and local-library/management/auth sections of `packages/pi/docs/mcp.md`; unrelated
 resource, configuration and Cua sections remain authored as before. No full parity claim follows.
 
@@ -87,13 +88,15 @@ resource, configuration and Cua sections remain authored as before. No full pari
   tests, then found a missing id in the CLI fixture. Repaired run `ced373fb` passed both CLI completion
   regressions and all six native management tests, plus fmt/diff. Shipped-doc run `b849d0e3` passed
   package typecheck, all 14 release unit tests, synchronized-section/local-link/release-input checks.
-- Final public-contract gate `af36e33b-3f16-488f-98de-002f878415ee` passed `cargo fmt --all --
-  --check`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and
+- Final public-contract gate `af36e33b-3f16-488f-98de-002f878415ee` passed
+  `cargo fmt --all -- --check`, `cargo test --workspace`,
+  `cargo clippy --workspace --all-targets -- -D warnings`, and
   nonpaged `git diff --check`. Real-provider opt-in tests remain ignored; no official conformance
   run is implied by these workspace results. Subsequent ledger-only edits do not invalidate them.
 - CLI/MCP/SDK READMEs and architecture document the registered metadata boundary and management
-  behavior. A local-only landing remains required. All other rows stay open; #132 must not close
-  on this tranche.
+  behavior. All other rows stay open; #132 must not close on this tranche. C1/C2 and D1/D2 are next,
+  followed by the approved L2 boundary with L1–L6, E1–E3, and Q1/A3 official conformance. Q2 must be
+  kept current as those remaining behaviors ship.
 
 ## Existing coverage to preserve
 
