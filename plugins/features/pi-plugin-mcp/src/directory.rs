@@ -76,6 +76,30 @@ pub(crate) fn render_servers_section<'a>(
     Some(section)
 }
 
+pub(crate) fn prompt_patch(
+    event: pi_plugin::BeforeAgentStartEvent,
+    section: Option<&str>,
+) -> pi_plugin::BeforeAgentStartPatch {
+    let mut prompt = event.system_prompt;
+    let base_length = prompt.len();
+    if let Some(section) = section {
+        prompt.push_str(&format!("\n\n<mcp_servers>\n{section}\n</mcp_servers>"));
+    }
+    pi_plugin::BeforeAgentStartPatch {
+        prompt_contributions: if section.is_some() {
+            vec![pi_core::PromptContribution {
+                category: pi_core::ContextCategory::McpTools,
+                name: "MCP server directory".into(),
+                text: prompt[base_length..].to_string(),
+            }]
+        } else {
+            Vec::new()
+        },
+        system_prompt: section.is_some().then_some(prompt),
+        ..pi_plugin::BeforeAgentStartPatch::default()
+    }
+}
+
 fn utf16_len(text: &str) -> usize {
     text.encode_utf16().count()
 }

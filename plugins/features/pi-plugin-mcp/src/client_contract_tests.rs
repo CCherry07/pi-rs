@@ -104,15 +104,7 @@ fn tool(server: Arc<ConnectedServer>, name: &str) -> McpTool {
 }
 
 async fn close_memory_server(server: Arc<ConnectedServer>, task: tokio::task::JoinHandle<()>) {
-    server
-        .service
-        .lock()
-        .await
-        .take()
-        .unwrap()
-        .cancel()
-        .await
-        .unwrap();
+    server.connection.close().await.unwrap();
     task.await.unwrap();
 }
 

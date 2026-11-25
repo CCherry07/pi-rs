@@ -509,6 +509,40 @@ impl McpToolSet {
             .collect()
     }
 
+    /// Quarantine exact, already-qualified ordinary tool IDs in this generation view.
+    /// Naming has already considered the complete inventory; neither survivors nor the raw
+    /// transport inventory are rebuilt. Management inventory marks quarantined entries hidden.
+    pub(crate) fn without_tools(&self, names: &[String]) -> Self {
+        if names.is_empty() {
+            return self.clone();
+        }
+        let names = names.iter().map(String::as_str).collect::<HashSet<_>>();
+        let mut inventory = self.inner.inventory.clone();
+        let mut tools = Vec::with_capacity(self.inner.tools.len());
+        for tool in &self.inner.tools {
+            if names.contains(tool.descriptor.name.as_str()) {
+                if let Some(offered) = inventory.get_mut(&tool.server.name).and_then(|offered| {
+                    offered
+                        .iter_mut()
+                        .find(|offered| offered.name == tool.remote_name)
+                }) {
+                    offered.exposure = McpExposure::Hidden;
+                }
+            } else {
+                tools.push(tool.clone());
+            }
+        }
+        Self {
+            inner: Arc::new(McpPool {
+                inventory,
+                authorization_required: self.inner.authorization_required.clone(),
+                servers: self.inner.servers.clone(),
+                tools,
+                resource_tools: self.inner.resource_tools.clone(),
+            }),
+        }
+    }
+
     pub(crate) fn tool_names(&self) -> Vec<String> {
         self.inner
             .tools
@@ -849,8 +883,9 @@ fn connected_server(
         .filter(|value| !value.is_empty());
     Arc::new(ConnectedServer {
         name,
-        instructions,
-        policy,
+        metadata: service.peer().peer_info(),
+        discovery_revision,
+        discovery: discovery::DiscoveryControl::default(),
         handler,
         peer: service.peer().clone(),
         service: Mutex::new(Some(service)),

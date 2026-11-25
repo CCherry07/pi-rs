@@ -106,13 +106,12 @@ pub(super) async fn connect_discovered(
 
 async fn discover_once(
     config: McpServerConfig,
-    policy: McpServerPolicy,
+    options: McpConnectionOptions,
     auth: McpClientAuth,
-) -> Result<(Arc<ConnectedServer>, Vec<McpToolSpec>), ConnectionFailure> {
-    let server = connect_server(config, policy, auth).await?;
+) -> Result<(Arc<McpConnection>, Vec<McpToolSpec>), ConnectionFailure> {
+    let server = connect_server(config, options, auth).await?;
     let tools = if server
-        .peer
-        .peer_info()
+        .metadata()
         .is_some_and(|info| info.capabilities.tools.is_some())
     {
         match server.peer.list_all_tools().await {
