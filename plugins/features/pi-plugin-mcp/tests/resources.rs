@@ -174,6 +174,65 @@ impl Drop for Server {
     }
 }
 
+#[tokio::test]
+async fn inspection_reports_hidden_tools_and_inherited_policy_without_listing_resources() {
+    let server = Server::new(Options {
+        tools: true,
+        ..Options::default()
+    })
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let agent = directory.path().join("agent");
+    let project = directory.path().join("project");
+    fs::create_dir_all(&agent).unwrap();
+    fs::create_dir_all(project.join(".pi")).unwrap();
+    fs::write(
+        agent.join("mcp.json"),
+        json!({"mcpServers": {
+            "fixture": {"url": server.url},
+            "parked": {"command": "unused", "enabled": false},
+            "invalid": {"args": ["missing command"]}
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        project.join(".pi/mcp.json"),
+        json!({"mcpServers": {
+            "fixture": {"exposure": "direct", "toolExposure": {"echo": "hidden"}}
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let library = McpLibrary::new(&agent, Some(&project), true);
+    let report = library.inspect().await;
+    assert!(!report.is_ok());
+    assert_eq!(report.errors.len(), 1);
+    assert_eq!(report.servers.len(), 2);
+    let connected = &report.servers[0];
+    assert_eq!(connected.state, pi_plugin_mcp::McpServerState::Connected);
+    assert_eq!(connected.tools, ["echo"]);
+    assert_eq!(connected.scope, pi_plugin_mcp::McpScope::Global);
+    assert_eq!(connected.source, agent.join("mcp.json"));
+    assert_eq!(
+        connected.project_override,
+        Some(project.join(".pi/mcp.json"))
+    );
+    assert_eq!(
+        connected.tool_exposure.get("echo"),
+        Some(&pi_plugin_mcp::McpExposure::Hidden)
+    );
+    assert!(connected.resources);
+    assert_eq!(
+        report.servers[1].state,
+        pi_plugin_mcp::McpServerState::Disabled
+    );
+    assert_eq!(server.calls("initialize").len(), 1);
+    assert_eq!(server.calls("tools/list").len(), 1);
+    assert!(server.calls("resources/list").is_empty());
+    assert!(server.calls("resources/templates/list").is_empty());
+}
+
 async fn execute(
     registry: &FrozenRegistries,
     name: &str,

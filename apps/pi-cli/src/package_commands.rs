@@ -101,9 +101,10 @@ fn operation(command: &CliCommand) -> Result<ManageOperation, String> {
             }
             Ok(ManageOperation::Update { source: requested })
         }
-        CliCommand::Auth { .. } | CliCommand::Plugin { .. } | CliCommand::Curator { .. } => {
-            Err("not a JavaScript package command".to_string())
-        }
+        CliCommand::Auth { .. }
+        | CliCommand::Plugin { .. }
+        | CliCommand::Curator { .. }
+        | CliCommand::Mcp { .. } => Err("not a JavaScript package command".to_string()),
     }
 }
 

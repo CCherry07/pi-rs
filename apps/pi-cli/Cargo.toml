@@ -31,6 +31,7 @@ pi-core.workspace = true
 pi-media.workspace = true
 pi-tool-support.workspace = true
 pi-plugin-manager = { workspace = true, features = ["authoring"] }
+pi-plugin-mcp.workspace = true
 pi-js-package-manager.workspace = true
 pi-js-plugin.workspace = true
 pi-runtime.workspace = true
