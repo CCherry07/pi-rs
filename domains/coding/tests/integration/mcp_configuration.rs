@@ -66,3 +66,83 @@ async fn invalid_reload_keeps_previous_generation_and_acp_mode_skips_files() {
     pi.sessions().shutdown().await.unwrap();
     isolated.sessions().shutdown().await.unwrap();
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn local_value_helpers_run_only_at_connect_and_reload_not_metadata_or_acp() {
+    use serde_json::json;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let app = axum::Router::new().route(
+        "/mcp",
+        axum::routing::post(|| async {
+            (
+                axum::http::StatusCode::UNAUTHORIZED,
+                [("www-authenticate", "Bearer realm=fixture")],
+            )
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let dir = tempfile::tempdir().unwrap();
+    let agent = dir.path().join("agent");
+    let project = dir.path().join("project");
+    fs::create_dir(&agent).unwrap();
+    fs::create_dir_all(project.join(".pi")).unwrap();
+    fs::write(
+        agent.join("mcp.json"),
+        json!({"mcpServers":{"account":{
+            "url":url, "headers":{"Authorization":"!printf x >> count; printf 'Bearer fixture'"}
+        }}})
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        project.join(".pi/mcp.json"),
+        json!({"mcpServers":{"ignored":{
+            "command":"never-start", "env":{"PRIVATE":"!touch forbidden; printf secret"}
+        }}})
+        .to_string(),
+    )
+    .unwrap();
+    let mut config = pi_coding::Config::new(project.clone(), agent.clone());
+    config.discover_extensions = false;
+    config.trust_override = Some(false);
+    config.features = pi_coding::Features::none();
+    let pi = pi_coding::Pi::builder(config.clone()).build().unwrap();
+    assert!(!project.join("count").exists());
+    let path = agent.join("draft.jsonl");
+    let session = pi
+        .sessions()
+        .create_session(pi_session::CreateSessionOptions::new(&project, &path))
+        .await
+        .unwrap();
+    assert_eq!(fs::read(project.join("count")).unwrap(), b"x");
+    session.current().catalog().command_completions();
+    session.current().prompt("/mcp paths").await.unwrap();
+    assert_eq!(fs::read(project.join("count")).unwrap(), b"x");
+    session.reload().await.unwrap();
+    assert_eq!(fs::read(project.join("count")).unwrap(), b"xx");
+    assert!(!project.join("forbidden").exists());
+    assert!(!path.exists());
+    config.load_mcp_config = false;
+    let isolated = pi_coding::Pi::builder(config).build().unwrap();
+    let acp = isolated
+        .sessions()
+        .create_session(pi_session::CreateSessionOptions::new(
+            &project,
+            agent.join("acp.jsonl"),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        !acp.current()
+            .catalog()
+            .command_specs()
+            .iter()
+            .any(|command| command.name == "mcp")
+    );
+    assert_eq!(fs::read(project.join("count")).unwrap(), b"xx");
+    pi.sessions().shutdown().await.unwrap();
+    isolated.sessions().shutdown().await.unwrap();
+    server.abort();
+}

@@ -230,8 +230,8 @@ and unrelated credentials. Coding captures revisions before connecting and asks 
 owner to replace the entire generation before the next idle submission if credentials changed.
 ACP has no browser or local discovery and reuses credentials only when its host explicitly injects a store.
 
-This is not a full parity claim. Server log-file capture, command-backed configuration resolution,
-connection lifecycle and extension-registration contracts, and official conformance evidence remain
+This is not a full parity claim. Server log-file capture, connection lifecycle and
+extension-registration contracts, and official conformance evidence remain
 separate work. Per-tool editing and an interactive live log viewer are not provided by the pinned
 legacy manager either; edit `toolExposure` in the file. Tests use deterministic local fixtures,
 never real-account sign-ins.
@@ -245,11 +245,31 @@ command. `parse_document` returns unresolved entries plus the optional `auto_ena
 without reading environment variables, opening files or connecting. The entry-only `parse_config`
 rejects explicit `autoEnableCodemode` to avoid silently discarding document policy; use `parse_document`
 or `McpLibrary` for full configurations. `McpConfigContext.default_cwd` is the session directory and the base for explicit
-relative stdio cwd; `config_dir` remains as provenance for source compatibility. Resolution preserves
-the Rust extensions `${VAR}`, `${env:VAR}` and whole-value `$VAR`, with `~` in command/args/cwd,
-without shell evaluation. Transport-only `McpConfigEntry::resolve` refuses entries without plain
+relative stdio cwd; `config_dir` remains as provenance for source compatibility. Env/header/OAuth
+client-secret values support embedded `$VAR` and `${VAR}`, `$$` / `$!` escapes and the Rust
+`${env:VAR}` spelling. Missing, empty or non-UTF-8 environment references fail without echoing values;
+invalid reference spellings remain literal. Substituted values are never rescanned as commands.
+Rust also retains its existing environment references in URL/command/args/cwd and `~` expansion in
+command/args/cwd; these transport fields never run value commands. Transport-only
+`McpConfigEntry::resolve` refuses entries without plain
 direct policy (including omitted exposure, which now means codemode); use `McpLibrary::prepare`
 to preserve exposure and request settings.
+
+`McpLibrary::with_command_values(true)` explicitly enables leading `!command` for env/header/OAuth
+client-secret values. Coding and native CLI enable it only on their trust-filtered local library.
+Trusted configuration can therefore execute env/header helpers when connecting or explicitly
+probing: treat it as executable configuration. OAuth client-secret helpers run only for an explicit
+sign-in or a needed token refresh, not for connection setup with a usable stored token. Concurrent
+requests share a refresh; cancelling one waiter does not abort its shared exchange or token save.
+Each request has at most one 401-triggered retry, and refresh cannot overwrite a newer login/logout.
+Each resolution runs afresh in
+the session cwd with a 10-second bound and separate 1 MiB stdout/stderr limits. Timeout, cancellation
+or overflow kills the process tree. Successful stdout must be UTF-8 and nonempty after trimming;
+stderr never becomes the value, and errors include neither command text nor captured bytes. Capture
+is in memory only, without a transcript or output file. Static Authorization bypasses OAuth helpers.
+Parsing, authoring, saving and metadata/credential-identity queries do not execute helpers or resolve
+secret fields. Disabled entries and untrusted project entries never execute them. Explicit transport
+and ACP configurations never gain command execution from these APIs.
 
 `exposure` supports `direct`, `codemode`, `deferred` and `hidden`; `toolExposure` keys are original remote tool names or `*`
 patterns. Exact names win, then the first declared matching pattern. Hidden tools are excluded from

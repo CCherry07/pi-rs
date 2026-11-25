@@ -3,6 +3,8 @@
 //! This module deliberately contains no terminal or Coding-product policy. Hosts
 //! inject provider credential lookup and drive OAuth redirects with their own UI.
 
+mod refresh;
+
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, OpenOptions};
 use std::future::Future;
@@ -48,6 +50,7 @@ pub trait McpProviderTokenResolver: Send + Sync {
 pub struct McpClientAuth {
     pub(crate) oauth_store: McpOAuthCredentialStore,
     pub(crate) provider_tokens: Option<Arc<dyn McpProviderTokenResolver>>,
+    pub(crate) local_values: Option<crate::config::LocalValues>,
 }
 
 impl Default for McpClientAuth {
@@ -55,6 +58,7 @@ impl Default for McpClientAuth {
         Self {
             oauth_store: McpOAuthCredentialStore::memory(),
             provider_tokens: None,
+            local_values: None,
         }
     }
 }
@@ -715,7 +719,7 @@ pub(crate) async fn oauth_http_client(
     server_url: &str,
     settings: Option<&McpOAuthConfig>,
     auth: &McpClientAuth,
-) -> Result<AuthClient<reqwest::Client>, String> {
+) -> Result<refresh::OAuthHttpClient, String> {
     let server = auth.oauth_store.for_server(name, server_url)?;
     let (mut manager, explicit_metadata) = new_authorization_manager(
         server_url,
@@ -723,15 +727,31 @@ pub(crate) async fn oauth_http_client(
     )
     .await?;
     manager.set_credential_store(server.clone());
-    manager.set_state_store(server);
+    manager.set_state_store(server.clone());
     manager
         .initialize_from_store()
         .await
         .map_err(|_| "OAuth credential state could not be loaded".to_string())?;
+    if let (Some(values), Some(settings)) = (&auth.local_values, settings)
+        && settings.client_secret.is_some()
+    {
+        return Ok(refresh::OAuthHttpClient::Local(
+            refresh::LocalOAuthClient::new(
+                manager,
+                server,
+                settings.clone(),
+                values.clone(),
+                explicit_metadata,
+            ),
+        ));
+    }
     if let Some(settings) = settings {
         configure_preregistered_refresh(&mut manager, settings, explicit_metadata).await?;
     }
-    Ok(AuthClient::new(reqwest::Client::new(), manager))
+    Ok(refresh::OAuthHttpClient::Fixed(AuthClient::new(
+        reqwest::Client::new(),
+        manager,
+    )))
 }
 
 async fn configure_preregistered_refresh(

@@ -13,6 +13,7 @@ base64 = "0.22.1"
 fs2 = "0.4.3"
 futures.workspace = true
 pi-core.workspace = true
+pi-shell.workspace = true
 sha2 = "0.10"
 tempfile = "3.21.0"
 # 3.3's concurrent HTTP worker can cancel a POST before response headers arrive.
@@ -22,6 +23,7 @@ sse-stream = "0.2.4"
 # Match the existing provider transports; do not enable two competing rustls defaults.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 http = "1"
+oauth2 = { version = "5", default-features = false }
 url = "2"
 serde.workspace = true
 serde_json.workspace = true

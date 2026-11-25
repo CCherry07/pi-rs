@@ -109,6 +109,44 @@ async fn mcp_list_needs_auth_includes_provider_and_redacted_guidance() {
     server.abort();
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_list_opts_in_to_local_command_values_without_a_session() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let app = axum::Router::new().route(
+        "/mcp",
+        axum::routing::post(|| async {
+            (
+                axum::http::StatusCode::UNAUTHORIZED,
+                [("www-authenticate", "Bearer realm=fixture")],
+            )
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let root = tempfile::tempdir().unwrap();
+    let agent = root.path().join("agent");
+    fs::create_dir(&agent).unwrap();
+    let mut config = json!({"mcpServers":{"account":{"url":url,"headers":{
+        "Authorization":"!printf x >> count; printf 'Bearer fixture-command-token'; printf fixture-command-error >&2"
+    }}}});
+    fs::write(agent.join("mcp.json"), config.to_string()).unwrap();
+    let output = run(root.path(), &["list", "--json"]);
+    assert_eq!(output.status.code(), Some(1));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["servers"][0]["state"], "needs-auth");
+    assert_eq!(fs::read(root.path().join("count")).unwrap(), b"x");
+    for bytes in [&output.stdout, &output.stderr] {
+        assert!(!String::from_utf8_lossy(bytes).contains("fixture-command"));
+    }
+    config["mcpServers"]["account"]["enabled"] = json!(false);
+    fs::write(agent.join("mcp.json"), config.to_string()).unwrap();
+    assert!(run(root.path(), &["list", "--json"]).status.success());
+    assert_eq!(fs::read(root.path().join("count")).unwrap(), b"x");
+    assert!(!agent.join("sessions").exists());
+    server.abort();
+}
+
 #[test]
 fn mcp_logout_uses_the_durable_store_without_touching_other_servers() {
     let root = tempfile::tempdir().unwrap();

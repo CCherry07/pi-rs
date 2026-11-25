@@ -4,6 +4,9 @@
 //! opening files or connecting. Callers own file discovery, scope precedence, trust
 //! and persistence; only selected entries are resolved immediately before connecting.
 
+mod values;
+pub(crate) use values::LocalValues;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -135,21 +138,85 @@ impl McpConfigEntry {
         })
     }
 
+    /// Only identities are needed for credential watches/logout. Never resolve secret fields.
+    pub(crate) fn resolve_identity(self) -> Result<McpServerConfig, String> {
+        let mut transport = self
+            .transport
+            .ok_or("Enabled MCP server needs a transport")?;
+        if let McpTransport::Http { url, .. } = &mut transport {
+            *url = expand_with(url, |key| {
+                std::env::var(key)
+                    .map_err(|_| "MCP URL environment reference is unavailable".into())
+            })?;
+        }
+        Ok(McpServerConfig {
+            name: self.name,
+            transport,
+            oauth: self.oauth,
+            auth: self.auth,
+        })
+    }
+
+    pub(crate) async fn resolve_for_connect(
+        self,
+        context: McpConfigContext<'_>,
+        allow_commands: bool,
+        signal: pi_core::AbortSignal,
+    ) -> Result<McpServerConfig, String> {
+        if !self.enabled {
+            return Err("Enable the MCP server before connecting or signing in".into());
+        }
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let lookup = |key: &str| {
+            std::env::var(key)
+                .map_err(|_| "MCP transport environment reference is unavailable".into())
+        };
+        // Resolve only transport fields here; values must be resolved exactly once below.
+        let mut config =
+            self.resolve_fields_with(context, home.as_deref(), &lookup, |value| Ok(value.into()))?;
+        let fields = match &mut config.transport {
+            McpTransport::Stdio { env, .. } => env,
+            McpTransport::Http { headers, .. } => headers,
+        };
+        for value in fields.values_mut() {
+            *value =
+                values::resolve(value, context.default_cwd, allow_commands, signal.clone()).await?;
+        }
+        // OAuth settings remain unresolved: a usable token must not need its client secret.
+        // Local auth resolves it only for an actual sign-in or refresh operation.
+        Ok(config)
+    }
+
     fn resolve_with(
         self,
         context: McpConfigContext<'_>,
         home: Option<&Path>,
         lookup: impl Fn(&str) -> Result<String, String>,
     ) -> Result<McpServerConfig, String> {
+        self.resolve_fields_with(context, home, &lookup, |value| {
+            values::expand(value, &lookup)
+        })
+    }
+
+    fn resolve_fields_with(
+        self,
+        context: McpConfigContext<'_>,
+        home: Option<&Path>,
+        lookup: &impl Fn(&str) -> Result<String, String>,
+        value: impl Fn(&str) -> Result<String, String>,
+    ) -> Result<McpServerConfig, String> {
         let mut transport = self
             .transport
             .ok_or("Enabled MCP server needs a transport")?;
         let mut oauth = self.oauth;
-        if let Some(secret) = oauth
-            .as_mut()
-            .and_then(|oauth| oauth.client_secret.as_mut())
+        let use_oauth = self.auth.is_none()
+            && matches!(&transport, McpTransport::Http { headers, .. } if !headers.keys().any(|name| name.eq_ignore_ascii_case("authorization")));
+        if use_oauth
+            && let Some(secret) = oauth
+                .as_mut()
+                .and_then(|oauth| oauth.client_secret.as_mut())
         {
-            *secret = expand_with(secret, &lookup)?;
+            *secret = value(secret)?;
         }
         match &mut transport {
             McpTransport::Stdio {
@@ -158,23 +225,21 @@ impl McpConfigEntry {
                 env,
                 cwd,
             } => {
-                *command = expand_tilde_path(&expand_with(command, &lookup)?, home)
+                *command = expand_tilde_path(&expand_with(command, lookup)?, home)
                     .to_string_lossy()
                     .into_owned();
                 for arg in args {
-                    *arg = expand_tilde_path(&expand_with(arg, &lookup)?, home)
+                    *arg = expand_tilde_path(&expand_with(arg, lookup)?, home)
                         .to_string_lossy()
                         .into_owned();
                 }
-                for value in env.values_mut() {
-                    *value = expand_with(value, &lookup)?;
+                for field in env.values_mut() {
+                    *field = value(field)?;
                 }
                 *cwd = Some(match cwd.take() {
                     Some(path) => {
-                        let path = expand_tilde_path(
-                            &expand_with(&path.to_string_lossy(), &lookup)?,
-                            home,
-                        );
+                        let path =
+                            expand_tilde_path(&expand_with(&path.to_string_lossy(), lookup)?, home);
                         if path.is_absolute() {
                             path
                         } else {
@@ -185,9 +250,9 @@ impl McpConfigEntry {
                 });
             }
             McpTransport::Http { url, headers } => {
-                *url = expand_with(url, &lookup)?;
-                for value in headers.values_mut() {
-                    *value = expand_with(value, &lookup)?;
+                *url = expand_with(url, lookup)?;
+                for field in headers.values_mut() {
+                    *field = value(field)?;
                 }
             }
         }
@@ -417,8 +482,14 @@ fn parse_entry(
                 auth = auth_value
                     .map(|value| parse_provider_auth(name, value))
                     .transpose()?;
-                let placeholder = |value: &str| expand_with(value, |_| Ok("placeholder".into()));
-                let checked_url = placeholder(url)?;
+                let placeholder = |value: &str| {
+                    if value.starts_with('!') {
+                        Ok("placeholder".into())
+                    } else {
+                        values::expand(value, |_| Ok("placeholder".into()))
+                    }
+                };
+                let checked_url = expand_with(url, |_| Ok("placeholder".into()))?;
                 let checked_url = if url.starts_with('$') {
                     "https://mcp.invalid".into()
                 } else {
@@ -654,6 +725,9 @@ fn expand_tilde_path(path: &str, home: Option<&Path>) -> PathBuf {
     }
     PathBuf::from(path)
 }
+
+#[cfg(test)]
+mod value_tests;
 
 #[cfg(test)]
 mod tests {

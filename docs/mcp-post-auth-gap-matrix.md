@@ -98,6 +98,36 @@ resource, configuration and Cua sections remain authored as before. No full pari
   followed by the approved L2 boundary with L1–L6, E1–E3, and Q1/A3 official conformance. Q2 must be
   kept current as those remaining behaviors ship.
 
+## C1/C2 validated candidate (local delivery pending)
+
+The current uncommitted candidate adds the approved in-memory `pi-shell::capture` seam, local-library
+execution opt-in, Pi value templates, and connect-time helper resolution. Run `d6ee3066` passed all
+`pi-shell` / MCP tests, Coding MCP-configuration integration tests and native CLI management tests;
+it then found four redundant-reference Clippy errors. After repair, `0cebbf82` passed formatting,
+affected-package Clippy and diff checks. This is owning-seam evidence, not final public-contract
+workspace evidence or a local landing. POSIX helper fixtures are Unix-gated; no Windows run is claimed.
+
+The oracle (`legacy/pi/packages/mcp/src/oauth/auth-provider.ts:67`) resolves OAuth settings inside
+each reactive refresh, and does not need the secret while a stored token remains usable. Approval
+`question-a993de2c251d4167b3a9694b3c8a7287` selects a private MCP-owned late-settings adapter, not an
+SDK fork or serialized-request rewriting. The candidate now supplies typed settings to rmcp only
+for needed refresh; connection setup keeps secrets unresolved. `auth/refresh.rs` shares refresh
+success/failure and owns its lifetime independently of any cancelled waiter. Conditional store
+writes preserve intervening login/logout. Run `8f1339a2` passed all six adapter regressions (rotating
+secret with valid/expired/rejected tokens; concurrent refresh plus cancelled waiter; shared failure
+and retry without corruption; helper failure/no token request; intervening login/logout; second
+401/no loop), config tests, local-library value tests, and MCP Clippy.
+
+Final-input run `3d935b82-246a-4430-b6b7-6b128a1b83ca` passed workspace tests, workspace/all-target
+Clippy with warnings denied, formatting and diff checks, a native CLI build, all six OAuth PTY/pipe
+fixtures, package typecheck and all 14 release tests. This includes the library-level valid-token /
+no-helper regression. Authored-doc run `07e8240c` checks synchronized local-library/value sections,
+README/shipped-doc relative links, added architecture links, and release documentation inputs.
+A broader scan found the pre-existing unrelated `docs/architecture.md` link to missing `plugin-ui.md`;
+this tranche neither adds nor changes that link. No Windows or official conformance run is claimed.
+C1 and C2 remain open until local delivery is verified; #132 remains open, with D1/D2, L1–L6, E1–E3
+and Q1/A3 still outstanding. Nothing in this section waives a frozen row.
+
 ## Existing coverage to preserve
 
 The previous tranche covers stdio/Streamable HTTP entry points; provider-safe names and output schema;
