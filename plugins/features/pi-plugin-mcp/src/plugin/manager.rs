@@ -239,7 +239,12 @@ impl McpCommand {
                                 format!("\nprovider: {provider} (use pi auth login {provider})")
                             })
                             .unwrap_or_default();
-                        context.ui.notify(NoticeLevel::Info, format!("{}\ntransport: {}\nsource: {}\nstate: {}\nexposure: {}\ntools: {}{override_note}{provider}{}", row.name, row.transport, source.display(), self.server_state(row).as_str(), row.exposure.as_str(), self.pool.offered_tools(&row.name).len(), if self.pool.has_resources(&row.name) { "\nresources: available" } else { "" }))?;
+                        let connection = self
+                            .pool
+                            .connection_error(&row.name)
+                            .map(|error| format!("\n{error}"))
+                            .unwrap_or_default();
+                        context.ui.notify(NoticeLevel::Info, format!("{}\ntransport: {}\nsource: {}\nstate: {}\nexposure: {}\ntools: {}{override_note}{provider}{}{connection}", row.name, row.transport, source.display(), self.server_state(row).as_str(), row.exposure.as_str(), self.pool.offered_tools(&row.name).len(), if self.pool.has_resources(&row.name) { "\nresources: available" } else { "" }))?;
                     }
                     Action::Tools => self.show_tools(&context, row).await?,
                     Action::Reconnect => {

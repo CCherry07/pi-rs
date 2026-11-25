@@ -881,7 +881,12 @@ Other enabled servers must connect and finish discovery for a candidate generati
 Connection and discovery each have a 30-second per-server timeout. Invalid configuration or an
 unavailable server leaves an existing session unchanged on reload. Fix the file (or disable that
 server) before creating a new session. MCP tools are named `mcp__<server>__<tool>`; names must remain
-unique after normalization. Configurations and credentials are not stored in session logs.
+unique after normalization. Configurations and credentials are not stored in session logs. Server `notifications/message`
+are appended best-effort to private `<agent-dir>/mcp.log`, rotated above 5 MiB to `mcp.log.1`.
+Stdio stderr is drained separately into a bounded, redacted in-memory tail used for initialization
+failures and disconnect diagnostics, never printed directly to the terminal. `/mcp status` and the
+manager show disconnected transports; their tool catalog stays frozen until reload. The log file
+is private server output, not a live viewer or protocol transcript.
 
 ## Plugins and extensions
 

@@ -28,6 +28,7 @@ url = "2"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+time = "0.3"
 tokio = { workspace = true, features = ["io-util", "process"] }
 
 [dev-dependencies]

@@ -2014,7 +2014,8 @@ server instructions attached to tool namespaces and codemode/deferred/direct exp
 Rust uses Pi's codemode default while retaining generation-based connection ownership. Its shell
 add/remove/list subset and interactive inspect, reconnect, enable/disable and server-exposure
 operations use typed management and semantic UI seams. These adapt current Pi behaviors, not the
-full legacy UI: per-tool editing, live logs and additional authoring flags remain separate work.
+full legacy UI: per-tool editing and a live log viewer are shared non-support in the pinned manager.
+The remaining observable gaps are tracked in [the frozen MCP ledger](mcp-post-auth-gap-matrix.md).
 Browser/loopback login is a host adapter, while asynchronous connection publication remains a deliberate
 generation-based difference.
 The complete Rust implementation lives in
@@ -2055,15 +2056,31 @@ session. Malformed entries yield diagnostics without suppressing valid rows. Pro
 preparation tolerates only typed authorization-required failures, retaining those servers as pending
 with actionable startup/manager warnings. Unrelated failures remain strict; explicit tool-only pools
 still reject authorization-required connections. Reports inventory hidden tools and retain defining-scope/project-override provenance
-without fetching resource contents. Invalid JSON remains readable/editable. Authentication values should use `${VAR}`,
-`${env:VAR}` or whole-value `$VAR`; no shell evaluation occurs. Expansion happens only when a
+without fetching resource contents. Invalid JSON remains readable/editable. Authentication values may use embedded `${VAR}`, `$VAR` or Rust `${env:VAR}` references,
+and the explicitly enabled command capability described below. Expansion happens only when a
 server connects (including explicit inspection), not when raw configuration is read or saved. Relative explicit stdio cwd now resolves
 from the active session cwd, matching Pi; omitted cwd uses that directory too. Existing configurations
 that intended a path relative to the configuration file should use an absolute path.
 Transport debug/error surfaces omit header, argument, URL and secret values. Static headers retain
 precedence. OAuth client secrets keep request-time environment expansion. HTTP OAuth metadata fetches
 and protocol requests reject redirects; configured metadata and advertised endpoints must use HTTPS
-except for loopback fixtures. Child stderr is discarded rather than written outside the frontend renderer.
+except for loopback fixtures. Child stderr is continuously drained into a private in-memory tail,
+never written outside the frontend renderer. The MCP-owned diagnostics adapter keeps at most 8 KiB
+of already-redacted tail bytes plus an incomplete configured-secret match. Display trims to 2,000
+UTF-16 units without splitting a Unicode scalar and removes terminal controls. Handshake/discovery
+errors and disconnected-tool failures include that tail; manager status observes transport closure
+without altering the immutable tool catalog. rmcp still owns the child and its cleanup; drain tasks
+are abort-on-drop, with a 100 ms final EOF grace after closure so inherited pipes cannot hang cleanup.
+
+Local-library policy explicitly supplies `<agent-dir>/mcp.log` to the client handler. Typed stable
+`notifications/message` payloads append timestamp/server/level/logger lines and indented continuations.
+The private file rotates above 5 MiB before the next append, retaining `mcp.log.1`. A local mutex plus
+a nonblocking advisory file lock protects append/rotation; failures (including cross-process lock
+contention) are best effort, never request failures. Known configured values and inherited credential-like
+environment values are redacted; arbitrary server-derived secrets cannot be inferred. The file is
+therefore private server output, not a public transcript. Transport-only/ACP callers never infer paths
+or create logs; read/save/disabled/untrusted-project paths do not initialize this sink. This adds no
+terminal, session-storage, plugin contract or live-registry mutation seam.
 
 `pi-plugin-mcp` owns OAuth independently of terminal and Coding adapters. The local library persists
 OAuth state in private `<agent-dir>/mcp-auth.json` records keyed by the normalized server name plus
@@ -2172,7 +2189,8 @@ bounded request parsing, and pasted fallback when launching or binding fails. On
 reach the OS opener. Its cancellable hidden terminal reader restores terminal state when callback,
 paste, cancellation or timeout wins. Semantic `/mcp login` uses the same host with an input surface;
 semantic login/logout then request complete replacement rather than mutating the pool. Both default
-to a 300-second whole-login timeout; shell `--timeout` accepts 1–86400 seconds. Browser/listener-free
+to a 300-second whole-login timeout; shell `--timeout` accepts positive finite fractional seconds
+within the representable duration range. Browser/listener-free
 embedding hosts retain manual redirect input. `begin_login` remains the lower-level manual Interface.
 `logout` removes only the exact name/URL identity, not provider/header credentials; no token is
 fabricated or persisted as authenticated merely because authorization starts.

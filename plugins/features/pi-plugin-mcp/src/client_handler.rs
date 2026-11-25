@@ -4,7 +4,10 @@
 
 use std::path::Path;
 
-use rmcp::model::{ClientInfo, ListRootsResult, ProgressNotificationParam, Root};
+use crate::diagnostics::{ServerLog, StderrCapture};
+use rmcp::model::{
+    ClientInfo, ListRootsResult, LoggingMessageNotificationParam, ProgressNotificationParam, Root,
+};
 use rmcp::service::{NotificationContext, RequestContext};
 use rmcp::{ClientHandler, ErrorData, RoleClient};
 use tokio::sync::broadcast;
@@ -12,6 +15,8 @@ use tokio::sync::broadcast;
 #[derive(Clone)]
 pub(crate) struct McpClientHandler {
     roots: Vec<Root>,
+    pub(crate) log: Option<ServerLog>,
+    pub(crate) stderr: StderrCapture,
     pub(crate) progress: broadcast::Sender<ProgressNotificationParam>,
 }
 
@@ -32,6 +37,8 @@ impl McpClientHandler {
             .collect();
         Self {
             roots,
+            log: None,
+            stderr: StderrCapture::default(),
             progress: broadcast::channel(64).0,
         }
     }
@@ -51,6 +58,16 @@ impl ClientHandler for McpClientHandler {
         _context: RequestContext<RoleClient>,
     ) -> Result<ListRootsResult, ErrorData> {
         Ok(ListRootsResult::new(self.roots.clone()))
+    }
+
+    async fn on_logging_message(
+        &self,
+        params: LoggingMessageNotificationParam,
+        _context: NotificationContext<RoleClient>,
+    ) {
+        if let Some(log) = &self.log {
+            log.write(params);
+        }
     }
 
     async fn on_progress(

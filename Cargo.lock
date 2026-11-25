@@ -3699,6 +3699,7 @@ dependencies = [
  "sse-stream",
  "tempfile",
  "thiserror 2.0.20",
+ "time",
  "tokio",
  "url",
 ]
