@@ -41,6 +41,14 @@ impl Plugin for McpProductPlugin {
         context: &pi_plugin::SessionPluginContext,
         _event: &pi_plugin::SessionStartEvent,
     ) -> Result<(), PluginError> {
+        // Publication is irrevocable before any fallible UI/activation callback.
+        self.library.publish_generation();
+        if let Some(diagnostic) = self.library.selection_diagnostic() {
+            context.ui.notify(NoticeLevel::Warning, diagnostic)?;
+        }
+        for name in self.library.pending_direct_servers() {
+            context.ui.notify(NoticeLevel::Info, format!("MCP server {name:?} is still connecting; its direct tools are unavailable in this generation and can appear after the next idle refresh."))?;
+        }
         for pending in self.pool.authorization_required() {
             context
                 .ui
@@ -88,12 +96,26 @@ impl Plugin for McpProductPlugin {
         Ok(())
     }
 
+    async fn session_shutdown(
+        &self,
+        _context: &pi_plugin::SessionPluginContext,
+        event: &pi_plugin::SessionShutdownEvent,
+    ) -> Result<(), PluginError> {
+        self.library
+            .shutdown_generation(event.reason == pi_plugin::SessionShutdownReason::Reload)
+            .await
+            .map_err(|error| PluginError::Failure(error.to_string()))
+    }
+
     async fn before_agent_start(
         &self,
         _context: AgentPluginContext,
         event: BeforeAgentStartEvent,
     ) -> Result<BeforeAgentStartPatch, PluginError> {
-        Ok(self.pool.prompt_patch(event))
+        Ok(match self.library.supervised_directory() {
+            Some(section) => crate::directory::prompt_patch(event, Some(section)),
+            None => self.pool.prompt_patch(event),
+        })
     }
 }
 struct McpCommand {
@@ -131,6 +153,14 @@ impl McpCommand {
     fn server_state(&self, row: &McpServerRow) -> McpServerState {
         if !row.enabled {
             McpServerState::Disabled
+        } else if let Some(readiness) = self.library.snapshot_readiness(&row.name) {
+            if matches!(readiness, crate::McpServerReadiness::Ready)
+                && self.pool.connection_error(&row.name).is_some()
+            {
+                McpServerState::Disconnected
+            } else {
+                readiness.state()
+            }
         } else if self
             .pool
             .authorization_required()
@@ -144,6 +174,14 @@ impl McpCommand {
             McpServerState::Connected
         }
     }
+    fn connection_diagnostic(&self, name: &str) -> Option<String> {
+        self.pool.connection_error(name).or_else(|| {
+            self.library
+                .snapshot_readiness(name)
+                .and_then(crate::McpServerReadiness::diagnostic)
+        })
+    }
+
     async fn test_connection(
         &self,
         context: &CommandContext,
@@ -163,6 +201,13 @@ impl McpCommand {
         context: &CommandContext,
         name: &str,
     ) -> Result<(), CommandError> {
+        if let Some(result) = self.library.reconnect_active(name) {
+            result.map_err(CommandError::Execution)?;
+            // The only probe is the supervised attempt; refresh the whole frozen generation.
+            return self
+                .reload_after_change(context, format!("Reconnecting MCP server {name:?}"))
+                .await;
+        }
         let names = self.test_connection(context, name).await?;
         self.reload_after_change(
             context,
@@ -345,7 +390,7 @@ impl Command for McpCommand {
                                     } else {
                                         ""
                                     },
-                                    self.pool.connection_error(&row.name)
+                                    self.connection_diagnostic(&row.name)
                                         .map(|error| format!("\n{error}"))
                                         .unwrap_or_default()
                                 )
@@ -694,6 +739,136 @@ mod tests {
         fn ui_notify(&self, level: NoticeLevel, message: String) -> PluginContextResult<()> {
             self.notices.lock().unwrap().push((level, message));
             Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_merges_only_live_desired_pending_intent_when_activating_an_entrypoint() {
+        let echo = "mcp__docs__echo";
+        let ambiguous = "mcp__docs__a_b";
+        let other_lane = "mcp__docs__otherLane";
+        for (entrypoint, initial, desired, expected, fails) in [
+            (
+                "codemode",
+                vec!["read"],
+                Some(Ok(vec![echo, ambiguous])),
+                vec!["read", "codemode", echo, ambiguous],
+                false,
+            ),
+            (
+                "tool_search",
+                vec!["read"],
+                Some(Ok(vec![echo])),
+                vec!["read", "tool_search", echo],
+                false,
+            ),
+            // An earlier hook's explicit clear or replacement wins over the prepared snapshot.
+            (
+                "codemode",
+                vec!["read"],
+                Some(Ok(vec![])),
+                vec!["read", "codemode"],
+                false,
+            ),
+            (
+                "codemode",
+                vec!["read"],
+                Some(Ok(vec![other_lane])),
+                vec!["read", "codemode", other_lane],
+                false,
+            ),
+            ("codemode", vec!["read"], None, vec!["read"], true),
+            (
+                "codemode",
+                vec!["read"],
+                Some(Err("credential-shaped-reader-error")),
+                vec!["read"],
+                true,
+            ),
+            // Ordinary no-op startup must not read or mutate the selection at all.
+            (
+                "codemode",
+                vec!["read", "codemode"],
+                None,
+                vec!["read", "codemode"],
+                false,
+            ),
+            (
+                "codemode",
+                vec!["read", "codemode"],
+                Some(Err("must not read")),
+                vec!["read", "codemode"],
+                false,
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::write(
+                directory.path().join("mcp.json"),
+                serde_json::json!({
+                    "mcpServers": {"docs": {
+                        "url": "http://127.0.0.1:9/mcp",
+                        "exposure": if entrypoint == "codemode" { "codemode" } else { "deferred" },
+                        "toolExposure": {"a-b": "hidden"}
+                    }}
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let mut library = McpLibrary::new(directory.path(), None, false)
+                .with_preserved_tool_selection(vec![echo.into(), ambiguous.into()])
+                .with_tool_selection_candidates(vec![other_lane.into()]);
+            if let Some(desired) = desired {
+                library = library.with_tool_selection_reader(Arc::new(move || {
+                    desired
+                        .clone()
+                        .map(|names| names.into_iter().map(String::from).collect())
+                        .map_err(String::from)
+                }));
+            }
+            let supervisor = crate::McpSupervisor::new();
+            let prepared = library
+                .prepare_supervised_generation(supervisor.clone(), Default::default())
+                .await
+                .unwrap();
+            assert_eq!(prepared.unresolved_tool_selection, [ambiguous]);
+            let access = Arc::new(Access {
+                active: Mutex::new(initial.into_iter().map(String::from).collect()),
+                reaching: vec![entrypoint],
+                origin: SessionExecutionOrigin::User,
+                notices: Mutex::new(vec![]),
+            });
+            let epoch = PluginContextEpoch::new(access.clone());
+            let parts = epoch.context();
+            let mut context = SessionPluginContext::unavailable_for_testing(
+                PluginId::new("mcp"),
+                1,
+                SessionIdentity {
+                    id: "selection".into(),
+                    path: directory.path().join("session.jsonl"),
+                    cwd: directory.path().into(),
+                    parent_session_id: None,
+                },
+            );
+            context.session = parts.session;
+            context.ui = parts.ui;
+            let result = prepared
+                .plugin
+                .session_start(
+                    &context,
+                    &SessionStartEvent {
+                        reason: SessionStartReason::Startup,
+                        previous_session_file: None,
+                    },
+                )
+                .await;
+            assert_eq!(result.is_err(), fails);
+            if let Err(error) = result {
+                assert!(error.to_string().contains("selection was left unchanged"));
+                assert!(!error.to_string().contains("credential-shaped"));
+            }
+            assert_eq!(*access.active.lock().unwrap(), expected);
+            assert!(!directory.path().join("session.jsonl").exists());
+            supervisor.close().await.unwrap();
         }
     }
 

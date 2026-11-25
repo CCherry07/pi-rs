@@ -177,10 +177,14 @@ trusted current project, leaving global configuration and credentials unchanged.
 parent selector. `/mcp login`, `/mcp logout` and `/mcp reconnect` can omit the name: they pick the sole
 eligible/preferred server or open a selector; ambiguous noninteractive requests require a name.
 The native composer completes these actions and eligible names from plugin-owned generation metadata.
-`/mcp reconnect <name>` proves a fresh connection before atomically rebuilding the generation;
-`enable`, `disable`, `exposure`, and `reload` also publish only a fully prepared replacement, so a
-failed reload keeps the current registry alive, while saved configuration remains on disk for retry
-or correction. This manager supports server-wide exposure; edit `toolExposure` in the file for
+`/mcp reconnect <name>` invalidates the current attempt and stages a fresh connection for a whole
+replacement generation. Ordinary Reload reuses unchanged connections and their last tool/instruction
+snapshot; reconnect or changed connection inputs obtain fresh initialize-only instructions. All
+eligible servers start concurrently, with one shared 10-second wait only for effective direct exposure.
+Indirect-only startup does not wait. Tools-list notifications refresh over the same transport, but
+changes publish only at next idle, never during an active turn. `enable`, `disable`, `exposure`, and
+`reload` also use the replacement transaction. A true global preparation/registry failure keeps the
+current generation, while saved configuration remains on disk for retry or correction. This manager supports server-wide exposure; edit `toolExposure` in the file for
 per-tool changes. OAuth `pi mcp login <server> [--timeout <seconds>]` and TUI `/mcp login <server>`
 open a browser and listen on an ephemeral loopback port (or the configured callback URL/port).
 If launching or listening fails, open the displayed URL and paste the complete redirected address;
@@ -193,11 +197,13 @@ Embeddings without a native OAuth host retain a manual semantic redirect flow. `
 that server's name/URL credentials. `--local` requires a trusted project-defined transport.
 Provider/header authentication is not managed by MCP login/logout: global `auth.provider` uses Coding's
 shared stored-first provider credential resolver (`pi auth login`), and explicit Authorization headers
-take precedence. Typed `needs-auth` servers remain visible without blocking the management generation;
-unrelated errors still reject preparation. External credential changes are picked up before the next
-idle provider submission, transactionally, without freshness-only session records.
-Server log-file capture, configuration-value resolution, connection lifecycle, extension registration
-and official conformance remain separate parity work. The pinned legacy manager likewise has no
+take precedence. Pending, `needs-auth` and per-server failures remain visible without discarding
+healthy siblings. Global document/registry invariants still reject preparation. External credential
+changes are picked up before the next idle provider submission, transactionally, without freshness-only
+session records. Saved loaded-tool choices survive pending discovery as non-executable intent; exact
+visible/granted inventory restores them at idle, and explicit deselection clears them. Ambiguous names
+are not guessed. A failed tools-list refresh retains the last valid tools with a bounded diagnostic.
+Request-lifetime recovery, extension registration and official conformance remain open parity work. The pinned legacy manager likewise has no
 per-tool editing UI or interactive live log viewer.
 
 ## Tool selection

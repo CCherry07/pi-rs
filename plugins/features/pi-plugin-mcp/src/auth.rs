@@ -64,6 +64,32 @@ impl Default for McpClientAuth {
 }
 
 impl McpClientAuth {
+    /// Source identity, not credential equality. Revisions are supplied independently;
+    /// unused auth sources must not prevent reuse of stdio or explicit-header transports.
+    pub(crate) fn same_source(&self, other: &Self, config: &crate::McpServerConfig) -> bool {
+        let crate::McpTransport::Http { headers, .. } = &config.transport else {
+            return true;
+        };
+        if headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("authorization"))
+        {
+            return true;
+        }
+        if config.auth.is_some() {
+            return match (&self.provider_tokens, &other.provider_tokens) {
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            };
+        }
+        match (&self.oauth_store.backend, &other.oauth_store.backend) {
+            (StoreBackend::File(left), StoreBackend::File(right)) => left == right,
+            (StoreBackend::Memory(left), StoreBackend::Memory(right)) => Arc::ptr_eq(left, right),
+            _ => false,
+        }
+    }
+
     pub fn with_oauth_store(mut self, store: McpOAuthCredentialStore) -> Self {
         self.oauth_store = store;
         self

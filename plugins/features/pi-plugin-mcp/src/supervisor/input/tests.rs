@@ -16,6 +16,26 @@ impl McpProviderTokenResolver for AuthTripwire {
     }
 }
 
+fn equivalence_tracks_effective_auth_source_without_reading_credentials() {
+    let make = |config: McpServerConfig, auth| {
+    };
+    let http = McpServerConfig::http("server", "http://127.0.0.1/mcp");
+    let auth = McpClientAuth::default();
+    assert!(make(http.clone(), auth.clone()).equivalent(&make(http.clone(), auth.clone())));
+
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = http.clone().provider_auth("fixture-provider");
+    let resolver: Arc<dyn McpProviderTokenResolver> = Arc::new(AuthTripwire(calls.clone()));
+    let provider_auth = |resolver| McpClientAuth::default().with_provider_tokens(resolver);
+
+    // Explicit headers and stdio do not use these distinct stores or providers.
+    assert!(make(header.clone(), auth.clone()).equivalent(&make(header, McpClientAuth::default())));
+    let stdio = McpServerConfig::stdio("server", "never-executed");
+    assert!(make(stdio.clone(), auth).equivalent(&make(stdio, McpClientAuth::default())));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
 #[test]
 fn expanded_local_provider_url_is_validated_before_auth_or_transport() {
     if std::env::var_os(ENDPOINT).is_none() {

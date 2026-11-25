@@ -57,6 +57,84 @@ async fn command_output_is_fresh_unrescanned_and_never_resolved_by_transport_api
 
 #[cfg(unix)]
 #[tokio::test]
+async fn connection_definition_defers_commands_and_preserves_cancellation_and_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = entry(json!({
+        "command":"~/bin/server", "args":["~/argument"], "cwd":"relative",
+        "env":{"VALUE":"!printf x >> invoked; printf '  !literal $MISSING  '"}
+    }));
+    let definition = source.clone().into_connection_definition().unwrap();
+    assert!(!dir.path().join("invoked").exists());
+    assert!(
+        definition
+            .clone()
+            .resolve_for_connect(context(dir.path()), false, AbortHandle::new().1)
+            .await
+            .unwrap_err()
+            .contains("explicit local-library opt-in")
+    );
+    let (abort, signal) = AbortHandle::new();
+    abort.abort();
+    assert!(
+        definition
+            .clone()
+            .resolve_for_connect(context(dir.path()), true, signal)
+            .await
+            .unwrap_err()
+            .contains("cancelled")
+    );
+    assert!(!dir.path().join("invoked").exists());
+    for _ in 0..2 {
+        let resolved = definition
+            .clone()
+            .resolve_for_connect(context(dir.path()), true, AbortHandle::new().1)
+            .await
+            .unwrap();
+        let McpTransport::Stdio {
+            command,
+            args,
+            cwd,
+            env,
+        } = resolved.transport
+        else {
+            panic!("stdio")
+        };
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        assert_eq!(
+            command,
+            expand_tilde_path("~/bin/server", home.as_deref()).to_string_lossy()
+        );
+        assert_eq!(
+            args,
+            [expand_tilde_path("~/argument", home.as_deref()).to_string_lossy()]
+        );
+        assert_eq!(cwd, Some(dir.path().join("relative")));
+        assert_eq!(env["VALUE"], "!literal $MISSING");
+    }
+    assert_eq!(std::fs::read(dir.path().join("invoked")).unwrap(), b"xx");
+    assert_eq!(definition, source.into_connection_definition().unwrap());
+}
+
+#[tokio::test]
+async fn disabled_connect_keeps_precedence_over_missing_transport_or_value_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    for config in [
+        json!({"enabled":false}),
+        json!({"enabled":false,"command":"${MCP_DISABLED_MISSING}","env":{"VALUE":"!touch forbidden"}}),
+    ] {
+        assert_eq!(
+            entry(config)
+                .resolve_for_connect(context(dir.path()), true, AbortHandle::new().1)
+                .await
+                .unwrap_err(),
+            "Enable the MCP server before connecting or signing in"
+        );
+    }
+    assert!(!dir.path().join("forbidden").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn headers_resolve_at_connection_and_oauth_secret_waits_for_explicit_auth() {
     let dir = tempfile::tempdir().unwrap();
     let config = entry(json!({

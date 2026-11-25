@@ -40,12 +40,12 @@ An interactive live log viewer would be an additional product feature.
 | D2 | `runtime.ts:connectOnce/handleClientClose`: drain stdio stderr; last 2,000 characters explain initialization failure or disconnect | `client.rs` sends stderr to null | **IMPLEMENTED/VALIDATED `7e12ad10`; local landing held**. Bounded draining/redacting tail on handshake/discovery failure and disconnect, manager status, drain ownership/cancellation and no terminal or log-file stderr writes. See diagnostics tranche below |
 | C1 | `runtime.ts:createDefaultTransport/oauthSettings` + `L/src/core/resolve-config-value.ts`: uncached `!command` for env/header/client-secret values, 10-second bound, trim/nonempty success; parse/save do not execute | `config.rs:expand_with` treats command-backed strings as literal values instead of executing them; transport-only APIs are explicit input and must not gain implicit shell execution | **DELIVERED `f176fc33c`**. Explicit local-config capability after trust, bounded `pi-shell` capture, redacted failures and private rmcp late-refresh coordination; valid tokens never resolve helpers. See tranche evidence below |
 | C2 | Same resolver: embedded `$VAR`/`${VAR}`, `$$` and `$!` escaping, missing/empty env rejection; command/args only home expansion in legacy | Rust supports `${env:VAR}` and whole `$VAR`, expands additional transport fields; exact template behavior differs | **DELIVERED `f176fc33c`**. Table-driven Pi syntax tests preserve documented Rust extensions; command/args/URL never execute value commands |
-| L1 | `index.ts:session_start/startConnection`: config and independent connection failures retain healthy servers plus one startup diagnostic | Product prepare tolerates typed needs-auth only; unrelated config/connection errors reject the whole generation | **OPEN**. Partial-fault candidate containing healthy tools and management state; still reject generation-wide invariant/collision failures and preserve transactional publication |
-| L2 | `index.ts:before_agent_start/tool_call`, `agent-session-mcp.test.ts:768–922`: background connection; first prompt waits only for direct servers, bounded at 10 seconds; scripts/search/resources wait only for relevant servers; pending directory summaries | Rust waits for all connections before publication. Registry immutability is intentional, but the resulting observable latency is not thereby approved as equivalent | **APPROVED TIMING DIVERGENCE; implementation/evidence OPEN**. Bounded startup and next-idle whole-generation publication; typed pending/retry diagnostics during active runs instead of same-turn selective waits. See decision below |
+| L1 | `index.ts:session_start/startConnection`: config and independent connection failures retain healthy servers plus one startup diagnostic | Product prepare tolerates typed needs-auth only; unrelated config/connection errors reject the whole generation | **IMPLEMENTED/VALIDATED for supervised Coding; lifecycle acceptance OPEN**. Healthy partial publication and management, with global invariant/collision rollback. See lifecycle/selection checkpoint evidence below |
+| L2 | `index.ts:before_agent_start/tool_call`, `agent-session-mcp.test.ts:768–922`: background connection; first prompt waits only for direct servers, bounded at 10 seconds; scripts/search/resources wait only for relevant servers; pending directory summaries | Rust waits for all connections before publication. Registry immutability is intentional, but the resulting observable latency is not thereby approved as equivalent | **APPROVED TIMING DIVERGENCE; IMPLEMENTED/VALIDATED locally, lifecycle acceptance OPEN**. Direct-only bounded startup and next-idle whole-generation publication, not same-turn selective waits. See decision and checkpoint evidence below |
 | L3 | `runtime.ts:open`: HTTP transient initialization retries after 250/1000 ms (408/429/5xx except 501/network), abort stops backoff; no stdio blanket retry | Rust has protocol-handshake fallback, not this retry policy | **IMPLEMENTED/VALIDATED locally; landing held**. Typed classification and complete-setup retries; seven product regressions prove attempts/backoff/cancellation and no auth/permanent/stdio retries. See the explicit workspace baseline exception below |
 | L4 | `runtime.ts:request`: one transient HTTP retry for resource reads/listings, never tool calls; expired-session 404 allows one request retry on a new session without cancelling other in-flight requests | No product-owned retry/session-expiry contract over rmcp has been established | **OPEN**. Local POST/GET counts; mutating tool not repeated on ambiguous failure; expired-session concurrent calls share reconnect safely |
 | L5 | `runtime.ts:getClient/handleClientClose/reconnect`: disconnected state, lazy reconnect on next call, coalesced connect, explicit reconnect and shutdown lifetime | Published `McpToolSet` holds fixed services; manual reconnect currently probes then reloads | **OPEN**. Transport replacement behind frozen descriptors; schema changes need a new generation, no silent live registry mutation; cleanup/parallel callers/failed retry |
-| L6 | `runtime.ts:refreshTools` + `index.ts:registerTools`: tools/list_changed adds/updates/retracts tools, retaining old inventory on failed refresh | Client handler does not observe list-changed notifications | **OPEN**. Coalesced notification revision; whole-generation schema publication, removed names become unreachable, active-run safety, failed candidate rollback |
+| L6 | `runtime.ts:refreshTools` + `index.ts:registerTools`: tools/list_changed adds/updates/retracts tools, retaining old inventory on failed refresh | Client handler does not observe list-changed notifications | **IMPLEMENTED/VALIDATED for supervised Coding; lifecycle acceptance OPEN**. Coalesced stable/modern refresh, whole-generation schema publication, frozen active views and retained inventory on error. See checkpoint evidence below |
 | E1 | `L/src/core/extensions/{types,loader}.ts`, `core/mcp-servers.ts`, `index.ts:registeredServers`: register/get/unregister, owner-only removal, same-owner replacement, namespace collision rejection, config precedence (including normalized names) | No corresponding JS registration API/registry integration found; explicit `McpToolSet` is not an equivalent registration API | **OPEN**. Domain-owned configuration snapshots projected through generation factories; no MCP-specific executable policy in generic `pi-plugin`; registration order/ownership/collision tests |
 | E2 | `index.ts:mcp_servers_change`: late extension registration/replacement/removal, old work invalidation/cleanup, session-only manager edits, report registrations without a connector | No registration-change adapter or transient extension management scope | **OPEN**. Generation-safe adapter, stale-attempt rejection, restart/close ordering, no mcp.json or Pi v4 config persistence |
 | E3 | `L/src/cli/args.ts` and built-in extension loading: `--no-mcp`; `--no-extensions` disables built-ins as well as discovered extensions while explicit extension paths remain valid | No `--no-mcp`; Rust `--no-extensions` currently only gates extension discovery, not MCP | **OPEN**. CLI/product option, no accidental connect/tool/schema/prompt entries; no impact on explicit ACP client server isolation; Node argument-splitting coverage if touched |
@@ -234,6 +234,176 @@ unified patch artifact's blank context lines; they do not disable checking for p
 Checkpointing is authorized only through the managed tool; final whole-series metadata cleanup
 and local landing remain held.
 
+## Lifecycle integration tranche
+
+L3's managed local checkpoint is `f54ddeb649c93b82bcefdfe445d60f5c1ce022d0`; its tree and both lockfiles
+were verified after commit. The subsequent supervisor/selection checkpoint is authorized below;
+it does not close lifecycle parity or the remaining L4/L5 contracts.
+The transport seam now separates generation-owned `ConnectedServer` policy from a shareable
+`McpConnection` plus raw inventory; synchronous cancellation remains available even while an old
+view is retained. MCP package checks passed in `764f2173`. Configuration resolution now delegates
+through a data-only `McpConnectionDefinition`, without moving exposure/timeout policy into background
+work; config tests/strict targeted Clippy passed in `b6b06a0c` and formatting in `b76186f2`.
+
+The initial `cfg(test)`-only supervisor has now been promoted into the supervised library/Coding
+publication path. It owns transport-only inputs, configuration/attempt epochs,
+immutable readiness snapshots, weak cache handles and abort-on-final-owner cleanup. Local `!command`
+resolution runs inside the bounded attempt, not while inputs are created or identical candidates
+are rebuilt. Nine owning-seam regressions passed in `942379e5`, along with strict MCP Clippy,
+workspace formatting and diff check. They cover independent failures, bounded selective waits,
+coalescing across cancelled waiters/rebuilds, changed trust/auth identity, removal/stale candidates,
+stale completion rejection, retained-view cancellation, manual reconnect and uncached actual opens.
+These component tests alone do not establish production publication, request-time lazy reconnect,
+resource retry, list-change refresh or runtime-drop/Pi-v4 integration parity.
+
+The approved local startup contract is concurrent starts with one total ten-second budget over
+effective enabled direct servers (including tool overrides). Indirect-only generations do not wait;
+partial pending/auth/error states preserve ready siblings. Publication remains whole-generation and
+next-idle, never a tool-call-time registry mutation. The sole strong readiness lease is captured in
+`GenerationFreshness`; executable views and a runtime-scoped factory cache retain weak handles.
+
+The generic non-wire/non-persisted `LiveRuntimeScopeId` seam preserves identity for Reload/Refresh
+and stages fresh identity for initial/New/Resume/Fork/Branch. Seven scope and thirteen replacement
+regressions passed in `027e7133-7b9c-414b-8f6b-8b72dfefab3b`. Package tests and Clippy completed
+successfully in `ac5044d6-9fde-40cc-bd66-9679fbd4be63`, whose enclosing process was then stopped at
+Git's pager; it is not recorded as exit-zero evidence. Non-paged format/diff checks passed in
+`51d9b5df-bbe3-4048-9d85-ecd1b2b1950e`.
+
+Supervised preparation/lifecycle/status/prompt wiring has focused evidence: 139 MCP library and
+14 selected integration tests passed before a now-repaired local Clippy finding in `7e8e148a`;
+14 final supervised regressions, strict all-target MCP Clippy, format and diff passed in
+`2cc37b34-733e-4380-9aa0-10d84282762e`. Sixteen supervisor/input/lease tests plus `cargo check -p
+pi-coding` and diff check passed in `cc88681d-4458-4988-aa88-07839d174df4`.
+
+Cross-layer validation is still in progress. Normal Coding test builds `859687bd` and `87160063`
+failed because the selected pi-session artifact lacked the new API despite unconditional exports
+in source and the successful check build. A scoped `cargo clean -p pi-session` repaired that artifact:
+initial six product lifecycle tests passed in `b5e79a9c-b336-4028-941f-8666a369a248`. Coding credential
+unit tests, strict library Clippy and diff checks passed in `9b1ca8ce-8bf4-4149-8a79-2a785d9d1c63`.
+No source/ABI checks, stack settings or test expectations were weakened for the rebuild.
+
+A distinct transaction gap was reproduced and repaired. The initial nine-test product run
+`01833278-12b6-4731-86ea-165a124ece26` passed eight tests but failed
+`mcp_lifecycle::changed_connection_candidate_failure_keeps_the_original_transport_usable`:
+changing the server URL before a later duplicate-plugin rejection closed the old current tool's
+connection. Unchanged-input lease survival is not sufficient rollback evidence. The regression also
+requires candidate-exclusive cleanup and reuse after reverting the config. Both new timing cases
+passed: real-product mid-turn freeze/eventual idle admission and a public-library revision-observed
+ready-before-first-idle handoff. The latter's additional second-admission no-extra-refresh assertion,
+integration-target Clippy, format and diff checks passed in
+`205ac1b7-b2df-49b6-afdd-3d4219e41d64`. Those two timing seams are deliberately distinguished; a
+server response being sent is not proof that private supervisor readiness has already committed.
+
+The fix pins exact raw-slot snapshots in the opaque freshness source, uses a weak published-slot map
+for guarded rollback, and cleans up candidate-exclusive slots on unpublished-source abandonment.
+Owning red `8683d0ae-6938-4f31-b734-afaeb01500ed` was followed by owning green `7316d56b`
+(17 tests). After the explicit source-file handoff, check-only formatting, all 23 supervisor tests
+(including six additional pinning/fencing cases) and scoped diff checks passed in
+`b47dd153-4c71-4a1a-9ddd-2e0f15633e59`. All nine unchanged product lifecycle tests passed in
+`e8ac5d53-f672-443e-95e1-f9388390cd61`; its later Clippy suffix failed on a separate repaired
+`let_and_return`. Final integration Clippy, formatting and diff checks passed independently in
+`4af8d37f-4670-41eb-8497-a3b1bcd4f0a7`. Those initial runs did not establish full-workspace
+acceptance; the final-input evidence and narrow disposition follow below.
+
+## Selection and live inventory integration
+
+The lifecycle tranche is still not a full-parity or workspace-green claim. Ordinary Reload now
+intentionally reuses an equivalent transport and its last immutable tools/initialize metadata;
+explicit reconnect or changed connection inputs obtain fresh initialize metadata. This divergence
+was approved in `question-3cf6df2854ff4ffc819395ae3ee07b26`. Oracle anchors are
+`core/agent-session.ts:3831` and MCP `index.ts:1250` (reload emits shutdown; MCP closes connections).
+The existing transaction, direct-only shared startup budget and first-next-idle boundaries remain.
+
+The initially migrated Coding suites produced 23 passes and one real pending-Resume selection loss,
+not an obsolete assertion. The generic fix separates durable desired selection from effective
+registered tools using existing Pi v4 records. Exact immutable classifications are `Denied`,
+`TemporarilyUnavailable`, and `UnresolvedUntilInventory`; explicit map entries override convenience
+allowances. Historical header/tree/lane/recovery selections are read-only candidates, not current
+intent. Explicit deselection wins, including an earlier startup hook's clear. Coding provides a weak
+live session reader and filters candidates through the current overlay ceiling; MCP resolves actual
+qualified inventory, never guessed reverse-normalized identities. Ambiguous ready aliases are
+quarantined after naming without changing their peers or raw inventory. Approvals are
+`question-4ea19c615a184d0fbf0d833781af4f1c` and
+`question-4905080d132e496095777b806930ea49`.
+
+Selection evidence:
+
+- Generic classification red `354d1110` (3 fail / 9 pass) became 12 focused passes in `762f4535`.
+  Full `pi-session` tests (224 unit tests plus integration/doctests), strict all-target Clippy and
+  scoped hygiene passed in `2d1df609-8fb3-4a86-8f15-afc18ed629b8`.
+- MCP classification/quarantine/startup: 15 selection regressions and four `startup_` matches,
+  including eight live-reader scenarios; check, strict all-target Clippy and scoped hygiene passed
+  in `e96fb0e6`. No fallback to a stale static desired snapshot is permitted.
+- Coding's expanded lifecycle/selection suite passed all 18 cases in
+  `08ec3b19-6956-4cd0-9a7d-01216b80154a`, including passive capture/quit/reopen, explicit deselection,
+  historical checkout, policy/grant revocation, failed-candidate rollback, mixed exposure, hashed
+  and truncated names, normalization collision, overlapping namespaces, completed no-match and
+  the real bounded setup timeout. Tool-call counts stay zero and withheld names never enter provider
+  declarations. The timeout case observes production setup termination, not a test-only deadline.
+
+L6 now refreshes through the existing transport with stable callbacks and native modern SDK
+subscriptions established before initial listing. Weak-slot workers coalesce bursts and fence by
+attempt plus raw connection identity. Full descriptor changes or meaningful error/recovery transitions
+advance readiness; reordered/equivalent tools and repeated equivalent failures do not. Refresh failure
+retains the last valid inventory and bounded connected-with-refresh-error status. Initialize-only
+instructions never change on notification.
+
+The initial `6cc1ddde` red was invalid: its fixture incorrectly answered modern discovery with stable
+negotiation. Corrected red `cfab0169-bbd2-428f-b3ea-fc50e78fc83c` reached initialize/list once and
+failed specifically to refresh when handler delivery was disabled. Deadline red `c4412356` established
+that timing out the SDK convenience pager does not cancel its pending request. The refresh-only pager
+therefore uses existing typed SDK cancellable requests, one 30-second data deadline across pages,
+repeated-cursor rejection, explicit cancellation and at most three seconds of control cleanup. It
+adds no protocol/auth/retry implementation or vendor change. Abort cleanup retains no source/slot.
+A genuine update of a still-published historical slot can conservatively cause one extra idle rebuild;
+its source drain stops that worker and does not itself stale the next baseline.
+
+L6 evidence:
+
+- Final MCP package tests passed in `af135b22`: 181 library and 36 integration tests, two live tests
+  ignored. `f068dc1d` passed three snapshot tests, 39 supervisor tests (including 18 refresh cases),
+  and strict all-target MCP Clippy. Its trailing Git pager was stopped; scoped formatting and
+  nonpaged diff checks then independently exited zero in `0cad4a07`.
+- Real-notification public-library/session integration passed in
+  `9920bc27-ab06-4607-98bc-bb79078e0424`; integration-target Clippy/scoped hygiene passed in
+  `b2334e7a-7bd3-4fbb-8ac6-ec2b9a279057`. It observes the real readiness commit and proves the first
+  next-idle submission publishes once while the second does not; active/retained generations stay
+  frozen across addition/removal/schema changes. Counts: initialize 1, helper 1, tools/list 2,
+  provider requests 3, tool executions 0. Initialize-only instructions remain unchanged. This is
+  explicitly public-library/session evidence, not private ProductSessionFactory revision observation.
+
+Integrated affected-package run `fc415dfd-5ca6-4149-87f8-3dea13d12b25` exited zero: 116 Coding
+library tests, all 44 Coding `mcp_` integration cases (including the original strict pending-Resume
+selection assertion), seven CLI management tests, affected-package all-target Clippy with warnings
+denied, workspace fmt, vendor verification, staged/unstaged whitespace checks, package typecheck and
+all 14 release tests. The unchanged MCP and generic-session owning-package results above remain valid.
+
+Final-input unfiltered workspace run `411b864b-3b5e-4ce6-a072-73b2d3c04e78` completed every target
+with `--no-fail-fast`, with `WORKSPACE_GATE_STATUS tests=101 clippy=0 fmt=0 patch=0 diff=0`.
+The sole failed target was Coding integration, aborting in the unchanged
+`codemode::depth_limit_store_values_survive_selected_branch_reload_and_disk_resume` with stack
+overflow/SIGABRT. No other target failed; strict workspace Clippy, formatting, exact vendor patch
+verification and staged/unstaged diff checks passed independently. This is the previously reproduced
+clean-main failure (`1e2aeabd-2ad8-42de-8309-70eb04359c1b`), not an unfiltered workspace pass.
+Supplemental `3b671dd2-6d14-4b98-a32e-c61adb321777` passed all 92 other Coding integration cases,
+filtering exactly that one test; `RUST_MIN_STACK` was unset. The codemode-file diff changes only the
+MCP readiness fixture, not the depth-512 test, its contract or the stack environment.
+
+`question-8a61f7c6761c4383877711549b140924` explicitly authorizes a managed local checkpoint of
+only released L1/L2/L6 and selection-intent work, retaining exactly the independently reproduced
+depth-512 exception above. The first managed commit refused atomically because source handoff does
+not transfer line-commit ownership. `question-2f774bbd23ee44458ba11e762edf7c83` therefore authorizes
+sequential commits by the original owners followed by the final owned contribution, without source
+edits, formatting or manual staging between them. These intermediate commits are ownership checkpoints,
+not independently validated builds. The final combined tree must match the frozen 69-path blob manifest
+exactly with clean index/worktree; every included helper file was released before final validation.
+No stack setting, depth contract, test assertion or unrelated test was weakened. This is not a fully
+green unfiltered workspace. No land, push, amend, rebase or metadata rewrite is authorized; any
+managed-tool trailers remain for the planned identical-tree whole-series cleanup.
+
+L4/L5 request lifetime, E1–E3 and Q1/A3 remain open; these local regressions are not official-conformance
+evidence. Neither this checkpoint nor its narrow exception marks #132 or lifecycle parity complete.
+
 ## Existing coverage to preserve
 
 The previous tranche covers stdio/Streamable HTTP entry points; provider-safe names and output schema;
@@ -261,6 +431,15 @@ This summary is not a blanket equivalence claim for every legacy test: Q1 and th
   treating either scenario as an unrestricted expected-failure exemption.
 
 ## Approved timing decision (L2)
+
+The startup budget was clarified in `question-38e75452c9c24c3fbd547b4214ee7021`: start every eligible
+server concurrently, but wait only for effective enabled **direct-exposure** servers, under one
+shared per-generation **10-second total** budget. No-direct generations do not wait; indirect/codemode
+servers never delay initial publication. Snapshot ready/pending/auth/error states without discarding
+healthy siblings. Re-evaluate eligibility on policy reclassification; keep equivalent background
+attempts alive, reject stale epochs, and publish later readiness only at next idle. Required integration
+regressions include zero-wait indirect startup, multiple direct starts sharing one budget, mixed
+ready/timeout/auth/error outcomes, policy reclassification and next-idle publication.
 
 @Suzuya approved `question-6f4517b334d248c280d80e441cf473a8`: bounded startup followed by
 publication of a **complete whole generation only at the next idle admission**. While an active

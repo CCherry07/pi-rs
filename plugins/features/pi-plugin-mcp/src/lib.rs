@@ -22,6 +22,12 @@ mod policy;
 mod resources;
 mod result;
 
+mod supervisor;
+
+pub use supervisor::{
+    McpGenerationReadiness, McpSupervisor, WeakMcpGenerationReadiness, WeakMcpSupervisor,
+};
+
 pub use auth::{
     McpClientAuth, McpOAuthCredentialStore, McpOAuthError, McpOAuthRedirect, McpOAuthSignIn,
     McpOAuthTokens, McpProviderTokenResolver,
@@ -33,8 +39,8 @@ pub use client::{
 };
 pub use credential_watch::McpCredentialWatch;
 pub use library::{
-    McpDocument, McpInspection, McpLibrary, McpScope, McpServerDefinition, McpServerReport,
-    McpServerRow, McpServerState, PreparedMcpGeneration,
+    McpDocument, McpInspection, McpLibrary, McpScope, McpServerDefinition, McpServerReadiness,
+    McpServerReport, McpServerRow, McpServerState, PreparedMcpGeneration,
 };
 pub use login::{McpOAuthHost, McpOAuthLoginRequest, McpOAuthPrompt};
 pub use policy::McpExposure;

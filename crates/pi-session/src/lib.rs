@@ -24,8 +24,9 @@ pub use runtime::{
 };
 
 pub use management::{
-    AgentSessionReplacement, PreparedSessionGeneration, SessionGenerationActivation,
-    SessionGenerationFactory, SessionGenerationOverlay, SessionGenerationRequest,
+    AgentSessionReplacement, LiveRuntimeScopeId, PreparedSessionGeneration,
+    SessionGenerationActivation, SessionGenerationFactory, SessionGenerationOverlay,
+    SessionGenerationRequest,
 };
 pub(crate) use runtime::PreparedAgentSession;
 pub use runtime::compaction::{
@@ -71,7 +72,8 @@ pub use runtime::{
     AutoRetrySettings, CompactionSettingsResolver, GenerationFreshness, InitialModelRequest,
     InitialModelResolveError, InitialModelSelection, ModelCycleResult, ModelSwitchPolicy,
     RestoredSessionConfiguration, RestoredToolSelection, SessionRuntimeInventory, SessionSetting,
-    SessionSettingsWriter, resolve_model_scope, validate_initial_model_scope,
+    SessionSettingsWriter, ToolSelectionAvailability, resolve_model_scope,
+    validate_initial_model_scope,
 };
 
 pub(crate) use pi_utils::time::unix_timestamp_ms as now_ms;

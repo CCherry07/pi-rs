@@ -63,13 +63,30 @@ impl SessionRecoveryPlan {
         store: &SessionStore,
     ) -> Result<crate::RestoredSessionConfiguration, SessionError> {
         let mut active_tools = store.selected_active_tools()?;
+        let mut historical_selected_tool_names =
+            store.header().initial_active_tools()?.unwrap_or_default();
+        // The existing typed query filters before cloning: no message payloads
+        // or complete document snapshots are needed for this policy preview.
+        for record in store.find_entries(&crate::EntryQuery {
+            entry_type: Some(crate::SessionEntryType::ActiveToolsChange),
+            order: EntryOrder::OldestFirst,
+            ..Default::default()
+        })? {
+            if let SessionEntry::ActiveToolsChange(change) = record.entry {
+                historical_selected_tool_names.extend(change.active_tool_names);
+            }
+        }
         // The repair below appends accepted writes in this exact reducer-provided order.
         for target in &self.pending_writes {
             if let SessionEntry::ActiveToolsChange(change) = &target.entry {
                 active_tools = Some(change.active_tool_names.clone());
+                historical_selected_tool_names.extend(change.active_tool_names.iter().cloned());
             }
         }
+        let mut seen = std::collections::HashSet::new();
+        historical_selected_tool_names.retain(|name| seen.insert(name.clone()));
         Ok(crate::RestoredSessionConfiguration {
+            historical_selected_tool_names,
             active_tools: active_tools.map_or(
                 crate::RestoredToolSelection::RuntimeDefault,
                 crate::RestoredToolSelection::Selected,

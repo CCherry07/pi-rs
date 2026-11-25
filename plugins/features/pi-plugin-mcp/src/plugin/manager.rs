@@ -240,8 +240,7 @@ impl McpCommand {
                             })
                             .unwrap_or_default();
                         let connection = self
-                            .pool
-                            .connection_error(&row.name)
+                            .connection_diagnostic(&row.name)
                             .map(|error| format!("\n{error}"))
                             .unwrap_or_default();
                         context.ui.notify(NoticeLevel::Info, format!("{}\ntransport: {}\nsource: {}\nstate: {}\nexposure: {}\ntools: {}{override_note}{provider}{}{connection}", row.name, row.transport, source.display(), self.server_state(row).as_str(), row.exposure.as_str(), self.pool.offered_tools(&row.name).len(), if self.pool.has_resources(&row.name) { "\nresources: available" } else { "" }))?;

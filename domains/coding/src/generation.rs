@@ -44,6 +44,8 @@ pub struct ProductSessionFactory {
     plugin_context_binding: PluginContextBinding,
     plugin_ui_bridge: Option<Arc<dyn PluginUiBridge>>,
     mcp_oauth_host: Option<Arc<dyn pi_plugin_mcp::McpOAuthHost>>,
+    mcp_auth: pi_plugin_mcp::McpClientAuth,
+    mcp_sessions: crate::mcp::McpSessionCache,
     session_bindings: Vec<SessionBinding>,
     presentation_mode: PresentationMode,
     dynamic_providers: DynamicProviderOverlay,
@@ -110,6 +112,7 @@ impl ProductSessionFactory {
         project_trust: ProjectTrustService,
         settings: SettingsManager,
     ) -> Self {
+        let mcp_auth = crate::mcp_client_auth(&config.agent_dir);
         Self {
             config,
             project_trust,
@@ -118,6 +121,8 @@ impl ProductSessionFactory {
             plugin_context_binding: PluginContextBinding::new(),
             plugin_ui_bridge: None,
             mcp_oauth_host: None,
+            mcp_auth,
+            mcp_sessions: crate::mcp::McpSessionCache::default(),
             session_bindings: Vec::new(),
             presentation_mode: PresentationMode::Print,
             dynamic_providers: DynamicProviderOverlay::default(),
@@ -181,12 +186,13 @@ impl SessionGenerationFactory for ProductSessionFactory {
             cwd,
             workspace,
             session_path: _,
+            runtime_scope,
             reason,
             generation_overlay,
             initial_state,
             reload_model,
             reload_registered_tools,
-            restored_configuration: _,
+            restored_configuration,
         } = request;
         if workspace.cwd() != cwd {
             return Err(SessionError::Runtime(
@@ -228,7 +234,25 @@ impl SessionGenerationFactory for ProductSessionFactory {
                     .to_string(),
             ));
         }
-        let (local_mcp, mcp_freshness) = if config.load_mcp_config {
+        let selection_binding = crate::mcp::McpToolSelectionBinding::default();
+        let (local_mcp, mcp_freshness, mcp_selection) = if config.load_mcp_config {
+            let selected = match restored_configuration
+                .as_ref()
+                .map(|state| &state.active_tools)
+            {
+                Some(pi_session::RestoredToolSelection::Selected(names)) => names.clone(),
+                _ => Vec::new(),
+            };
+            let candidates = restored_configuration
+                .as_ref()
+                .map(|state| state.historical_selected_tool_names.clone())
+                .unwrap_or_default();
+            let permitted = |names: Vec<String>| {
+                names
+                    .into_iter()
+                    .filter(|name| generation_overlay.allows_tool(name))
+                    .collect()
+            };
             let mut library = pi_plugin_mcp::McpLibrary::new(
                 &config.agent_dir,
                 Some(&config.cwd),
@@ -236,21 +260,51 @@ impl SessionGenerationFactory for ProductSessionFactory {
             )
             .with_tool_search_registration(false)
             .with_command_values(true)
-            .with_client_auth(crate::mcp_client_auth(&config.agent_dir));
+            .with_client_auth(self.mcp_auth.clone())
+            .with_preserved_tool_selection(permitted(selected))
+            .with_tool_selection_candidates(permitted(candidates))
+            .with_tool_selection_reader(selection_binding.reader());
             if let Some(host) = &self.mcp_oauth_host {
                 library = library.with_oauth_host(host.clone());
             }
-            let freshness = crate::mcp::generation_freshness(
+            let credentials = crate::mcp::McpCredentialSnapshot::capture(
                 &config.agent_dir,
-                library.credential_watch().map_err(SessionError::Runtime)?,
-            )?;
+                library
+                    .supervised_credential_watch()
+                    .map_err(SessionError::Runtime)?,
+            );
             let prepared = library
-                .prepare_generation()
+                .prepare_supervised_generation(
+                    self.mcp_sessions.owner(runtime_scope),
+                    credentials.provider_revisions(),
+                )
                 .await
                 .map_err(SessionError::Runtime)?;
-            (Some(prepared.plugin), freshness)
+            let mut selection: std::collections::BTreeMap<_, _> = prepared
+                .temporarily_unavailable_tools
+                .into_iter()
+                .map(|name| {
+                    (
+                        name,
+                        pi_session::ToolSelectionAvailability::TemporarilyUnavailable,
+                    )
+                })
+                .collect();
+            selection.extend(prepared.unresolved_tool_selection.into_iter().map(|name| {
+                (
+                    name,
+                    pi_session::ToolSelectionAvailability::UnresolvedUntilInventory,
+                )
+            }));
+            let readiness = prepared.readiness_watch.ok_or_else(|| {
+                SessionError::Runtime("MCP preparation omitted its readiness owner".into())
+            })?;
+            self.mcp_sessions
+                .stage(runtime_scope, readiness.downgrade());
+            let freshness = credentials.with_readiness(readiness);
+            (Some(prepared.plugin), Some(freshness), selection)
         } else {
-            (None, None)
+            (None, None, std::collections::BTreeMap::new())
         };
         let memory = prepare_memory(&config, project_trusted).map_err(SessionError::Runtime)?;
         let package_reconciliations =
@@ -404,6 +458,7 @@ impl SessionGenerationFactory for ProductSessionFactory {
             &runtime,
             reload_registered_tools.as_deref(),
         ))
+        .tool_selection_availability(mcp_selection)
         .runtime_inventory(SessionRuntimeInventory::new(
             js_extensions,
             configured_native_plugins,
@@ -418,6 +473,7 @@ impl SessionGenerationFactory for ProductSessionFactory {
         let bindings = self.session_bindings.clone();
         Ok(PreparedSessionGeneration::new(runtime, session_options)
             .bind_session(move |session| {
+                selection_binding.bind(&session);
                 plugin_context.bind_generation_session(session.clone());
                 for binding in bindings {
                     binding(&session);
@@ -869,6 +925,7 @@ command = "fixture-command"
                 workspace: pi_core::WorkspaceSpec::from_cwd(&project).snapshot(),
                 cwd: project.clone(),
                 session_path: session_path.clone(),
+                runtime_scope: pi_session::LiveRuntimeScopeId::new(),
                 reason: pi_session::SessionStartReason::Startup,
                 generation_overlay: SessionGenerationOverlay::default(),
                 initial_state: None,

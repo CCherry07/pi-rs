@@ -15,6 +15,7 @@ use super::activity::{RecoveredQueue, SessionActivity};
 use super::configuration::clamp_thinking_for_model;
 use super::context::{ContextUpdates, restore_runtime_context_with_request};
 use super::recovery::{SessionRecoveryPlan, recover_interrupted_state};
+use super::selection_intent::ToolSelection;
 use super::{AgentSession, SESSION_OPEN, bridge};
 use crate::runtime::events::AgentSessionEventHub;
 use crate::{
@@ -106,6 +107,12 @@ impl AgentSession {
     ) -> Result<PreparedAgentSession, SessionError> {
         default_configure_session_message_conversion(&runtime)?;
         let path = path.into();
+        let tool_selection = Arc::new(ToolSelection::new(&runtime, &options));
+        let desired_tools = tool_selection.reconcile(runtime.active_tools());
+        let effective_tools = tool_selection.effective(desired_tools.clone());
+        if effective_tools != runtime.active_tools() {
+            runtime.set_active_tools(effective_tools)?;
+        }
         let state = runtime.agent().state();
         let effective_thinking = clamp_thinking_for_model(
             &runtime,
@@ -131,7 +138,7 @@ impl AgentSession {
         );
         header.metadata = options.header_metadata.clone();
         header.set_workspace(runtime.workspace().spec())?;
-        header.set_initial_active_tools(state.active_tools);
+        header.set_initial_active_tools(desired_tools);
         header.parent_session_id = options.parent_session_id.clone();
         runtime.agent().set_session_id(Some(header.id.clone()));
         let store = if options.in_memory {
@@ -154,8 +161,19 @@ impl AgentSession {
         // A new session records the runtime's already-validated selection.
         // Preserve it even when the model is intentionally absent from the
         // catalog; catalog fallback applies only while restoring old state.
-        let _ = restore_runtime_context_with_request(&runtime, &context, initial_model)?;
-        let session = Self::assemble(runtime, store, options, RecoveredQueue::default())?;
+        let _ = restore_runtime_context_with_request(
+            &runtime,
+            &context,
+            initial_model,
+            &tool_selection,
+        )?;
+        let session = Self::assemble(
+            runtime,
+            store,
+            options,
+            RecoveredQueue::default(),
+            tool_selection,
+        )?;
         Ok(PreparedAgentSession {
             session,
             activation_commit: None,
@@ -205,6 +223,7 @@ impl AgentSession {
         }
         default_configure_session_message_conversion(&runtime)?;
         let recovered_queue = recover_interrupted_state(&store, recovery)?;
+        let tool_selection = Arc::new(ToolSelection::new(&runtime, &options));
         let header = store.header();
         runtime.agent().set_session_id(Some(header.id.clone()));
         let mut context = store.context_with_options(&options.context)?;
@@ -219,8 +238,9 @@ impl AgentSession {
             &runtime,
             &context,
             options.initial_model.clone().session(context.model.clone()),
+            &tool_selection,
         )?;
-        let session = Self::assemble(runtime, store, options, recovered_queue)?;
+        let session = Self::assemble(runtime, store, options, recovered_queue, tool_selection)?;
         // Commit resolved configuration together after all initialization checks.
         // Replay must retain explicit resume overrides and new generation tools.
         let state = session.runtime.agent().state();
@@ -240,9 +260,13 @@ impl AgentSession {
                 thinking_level: state.thinking_level.as_str().to_string(),
             }));
         }
-        if stored_active_tools.as_ref() != Some(&state.active_tools) {
+        let desired_tools = session
+            .activity
+            .tool_selection
+            .reconcile(context.active_tool_names.unwrap_or(state.active_tools));
+        if stored_active_tools.as_ref() != Some(&desired_tools) {
             configuration.push(SessionEntry::ActiveToolsChange(ActiveToolsEntry {
-                active_tool_names: state.active_tools,
+                active_tool_names: desired_tools,
             }));
         }
         session.store.append_batch(configuration)?;
@@ -257,6 +281,7 @@ impl AgentSession {
         store: SessionStore,
         options: AgentSessionOptions,
         recovered_queue: RecoveredQueue,
+        tool_selection: Arc<ToolSelection>,
     ) -> Result<Arc<Self>, SessionError> {
         let events = AgentSessionEventHub::new(
             runtime.agent().state(),
@@ -274,6 +299,7 @@ impl AgentSession {
             store.clone(),
             Arc::clone(&events),
             recovered_queue,
+            Arc::clone(&tool_selection),
         ));
         let plugin_driver = runtime.plugin_driver();
         let session_dispatch_context = SessionDispatchContext {

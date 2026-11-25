@@ -540,8 +540,12 @@ async fn nested_calls_obey_argument_result_and_permission_hooks() {
 }
 
 #[tokio::test]
-async fn mcp_objects_remain_inside_script_and_hidden_tools_remain_unavailable() {
+async fn ready_mcp_objects_remain_inside_script_and_hidden_tools_remain_unavailable() {
     let fixture = Fixture::new().await;
+    super::mcp_test_support::wait_for_tools(&fixture.session, &["mcp__docs__lookup"]).await;
+    assert!(fixture.remote_calls.lock().unwrap().is_empty());
+    assert!(fixture.script.lock().unwrap().requests.is_empty());
+    assert!(!fixture.session.path().exists());
     let result = fixture
         .run(
             r#"

@@ -9,6 +9,7 @@ use pi_plugin::Plugin;
 use pi_runtime::{PiRuntime, PiRuntimeBuilder};
 use tokio::sync::watch;
 
+use super::LiveRuntimeScopeId;
 use super::paths::comparable_path;
 use crate::runtime::{RestoredSessionConfiguration, SessionRecoveryPlan};
 use crate::{
@@ -148,6 +149,14 @@ impl SessionGenerationOverlay {
         self
     }
 
+    /// Queries only this overlay's capability ceiling, not registry availability
+    /// or whether the tool is currently selected. No ceiling allows every name.
+    pub fn allows_tool(&self, name: &str) -> bool {
+        self.allowed_tools
+            .as_ref()
+            .is_none_or(|tools| tools.iter().any(|tool| tool == name))
+    }
+
     /// Adds one session-local plugin that is rebuilt for every runtime generation.
     pub fn with_plugin<F>(mut self, plugin: F) -> Self
     where
@@ -175,6 +184,9 @@ impl SessionGenerationOverlay {
 
 #[derive(Debug, Clone)]
 pub struct SessionGenerationRequest {
+    /// Live ownership scope, independent of journal path and session ID. Only
+    /// reload/automatic refresh reuse it; other replacements prepare a fresh scope.
+    pub runtime_scope: LiveRuntimeScopeId,
     pub workspace: pi_core::WorkspaceSnapshot,
     /// Compatibility projection of workspace.cwd(); factories should use the full workspace.
     pub cwd: PathBuf,
@@ -328,6 +340,7 @@ pub(crate) enum ResolvedSessionTransition {
 #[derive(Clone)]
 pub(crate) struct SessionSlot {
     current: watch::Sender<Arc<AgentSession>>,
+    runtime_scope: Arc<std::sync::Mutex<LiveRuntimeScopeId>>,
     state: Arc<SessionSlotState>,
     factory: Arc<dyn SessionGenerationFactory>,
     generation_overlay: SessionGenerationOverlay,
@@ -371,6 +384,7 @@ impl ResolvedSessionTarget {
         reason: SessionStartReason,
         generation_overlay: SessionGenerationOverlay,
         initial_state: Option<AgentSessionInitialState>,
+        runtime_scope: LiveRuntimeScopeId,
     ) -> Result<(Self, SessionGenerationRequest), SessionError> {
         if initial_state.is_some() && !matches!(&target, SessionTarget::Create { .. }) {
             return Err(SessionError::Runtime(
@@ -387,6 +401,7 @@ impl ResolvedSessionTarget {
                 session_id,
             } => {
                 let request = SessionGenerationRequest {
+                    runtime_scope,
                     cwd: workspace.cwd().to_path_buf(),
                     workspace,
                     session_path: path.clone(),
@@ -410,10 +425,10 @@ impl ResolvedSessionTarget {
             }
             SessionTarget::Open { path } => {
                 let store = SessionStore::open_handle(&path)?;
-                Self::resolve_existing(store, reason, generation_overlay)
+                Self::resolve_existing(store, reason, generation_overlay, runtime_scope)
             }
             SessionTarget::Reuse { store } => {
-                Self::resolve_existing(store, reason, generation_overlay)
+                Self::resolve_existing(store, reason, generation_overlay, runtime_scope)
             }
         }
     }
@@ -422,11 +437,13 @@ impl ResolvedSessionTarget {
         store: SessionStore,
         reason: SessionStartReason,
         generation_overlay: SessionGenerationOverlay,
+        runtime_scope: LiveRuntimeScopeId,
     ) -> Result<(Self, SessionGenerationRequest), SessionError> {
         let reload_model = reload_model(&store, reason)?;
         let recovery = SessionRecoveryPlan::prepare(&store)?;
         let restored_configuration = Some(recovery.configuration(&store)?);
         let request = SessionGenerationRequest {
+            runtime_scope,
             workspace: store.header().workspace()?.snapshot(),
             cwd: store.header().cwd.clone(),
             session_path: store.path().to_path_buf(),
@@ -466,6 +483,7 @@ impl SessionSlot {
             reason: SessionStartReason::Startup,
             previous_session_file: None,
         };
+        let runtime_scope = LiveRuntimeScopeId::new();
         let prepared = Self::prepare_session(
             factory.as_ref(),
             initial_target,
@@ -473,23 +491,31 @@ impl SessionSlot {
             generation_overlay.clone(),
             initial_state,
             None,
+            runtime_scope,
         )
         .await?;
         if let Some(seed) = initial_context {
             prepared.session().initialize_isolated_context(seed)?;
         }
         let session = prepared.activate(start_event).await;
-        Ok(Self::from_parts(session, factory, generation_overlay))
+        Ok(Self::from_parts(
+            session,
+            factory,
+            generation_overlay,
+            runtime_scope,
+        ))
     }
 
     fn from_parts(
         session: Arc<AgentSession>,
         factory: Arc<dyn SessionGenerationFactory>,
         generation_overlay: SessionGenerationOverlay,
+        runtime_scope: LiveRuntimeScopeId,
     ) -> Self {
         let (current, _) = watch::channel(session);
         Self {
             current,
+            runtime_scope: Arc::new(std::sync::Mutex::new(runtime_scope)),
             state: Arc::default(),
             factory,
             generation_overlay,
@@ -512,12 +538,25 @@ impl SessionSlot {
         Arc::clone(&self.state.submission_abort_epoch)
     }
 
-    fn publish(&self, next: Arc<AgentSession>) {
+    fn runtime_scope(&self) -> LiveRuntimeScopeId {
+        *self
+            .runtime_scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn publish(&self, next: Arc<AgentSession>, runtime_scope: LiveRuntimeScopeId) {
         // Bind before publication: observers may submit immediately.
         if let Some(owner) = self.session().generation_owner() {
             next.bind_generation_owner(owner);
         }
         self.current.send_modify(|current| {
+            // Replacement owns the manager's lifecycle gate. Publish the scope
+            // only with the validated session, never while preparing its candidate.
+            *self
+                .runtime_scope
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = runtime_scope;
             *current = next;
             self.state.epoch.fetch_add(1, Ordering::Release);
         });
@@ -708,6 +747,7 @@ impl SessionSlot {
             reason: SessionStartReason::Fork,
             previous_session_file: Some(previous_session_file),
         };
+        let runtime_scope = LiveRuntimeScopeId::new();
         let prepared = match Self::prepare_session(
             self.factory.as_ref(),
             SessionTarget::reuse_store(fork),
@@ -715,6 +755,7 @@ impl SessionSlot {
             self.generation_overlay.clone(),
             None,
             None,
+            runtime_scope,
         )
         .await
         {
@@ -733,7 +774,7 @@ impl SessionSlot {
             })
             .await;
         let next = prepared.activate(start_event).await;
-        self.publish(next);
+        self.publish(next, runtime_scope);
         Ok(AgentSessionReplacement::Replaced)
     }
 
@@ -810,6 +851,11 @@ impl SessionSlot {
                     .map(|tool| tool.name)
                     .collect()
             });
+        let runtime_scope = if start_event.reason == SessionStartReason::Reload {
+            self.runtime_scope()
+        } else {
+            LiveRuntimeScopeId::new()
+        };
         let prepared = Self::prepare_session(
             self.factory.as_ref(),
             target,
@@ -817,11 +863,12 @@ impl SessionSlot {
             self.generation_overlay.clone(),
             initial_state,
             reload_registered_tools,
+            runtime_scope,
         )
         .await?;
         current.shutdown_with(shutdown_event).await;
         let next = prepared.activate(start_event).await;
-        self.publish(next);
+        self.publish(next, runtime_scope);
         Ok(())
     }
 
@@ -832,6 +879,7 @@ impl SessionSlot {
         generation_overlay: SessionGenerationOverlay,
         initial_state: Option<AgentSessionInitialState>,
         reload_registered_tools: Option<Vec<String>>,
+        runtime_scope: LiveRuntimeScopeId,
     ) -> Result<PreparedAgentSession, SessionError> {
         let (target, mut request) = ResolvedSessionTarget::resolve(
             target,

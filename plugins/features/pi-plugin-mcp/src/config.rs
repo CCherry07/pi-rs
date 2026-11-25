@@ -36,6 +36,13 @@ pub struct McpConfigEntry {
     policy_override: Option<McpPolicyOverride>,
 }
 
+/// Unresolved transport/auth data selected after the caller's policy and trust checks.
+/// Safe to retain across generation preparation: no generation-owned policy or code.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct McpConnectionDefinition {
+    pub(crate) config: McpServerConfig,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct McpPolicyOverride {
     unexpected_fields: bool,
@@ -127,6 +134,21 @@ impl McpConfigEntry {
         self.resolve_transport(context)
     }
 
+    /// Extracts transport/auth data without expanding values or executing helpers.
+    /// The caller remains responsible for checking enabled state and preserving policy.
+    pub(crate) fn into_connection_definition(self) -> Result<McpConnectionDefinition, String> {
+        Ok(McpConnectionDefinition {
+            config: McpServerConfig {
+                name: self.name,
+                transport: self
+                    .transport
+                    .ok_or("Enabled MCP server needs a transport")?,
+                oauth: self.oauth,
+                auth: self.auth,
+            },
+        })
+    }
+
     pub(crate) fn resolve_transport(
         self,
         context: McpConfigContext<'_>,
@@ -140,21 +162,14 @@ impl McpConfigEntry {
 
     /// Only identities are needed for credential watches/logout. Never resolve secret fields.
     pub(crate) fn resolve_identity(self) -> Result<McpServerConfig, String> {
-        let mut transport = self
-            .transport
-            .ok_or("Enabled MCP server needs a transport")?;
-        if let McpTransport::Http { url, .. } = &mut transport {
+        let mut config = self.into_connection_definition()?.config;
+        if let McpTransport::Http { url, .. } = &mut config.transport {
             *url = expand_with(url, |key| {
                 std::env::var(key)
                     .map_err(|_| "MCP URL environment reference is unavailable".into())
             })?;
         }
-        Ok(McpServerConfig {
-            name: self.name,
-            transport,
-            oauth: self.oauth,
-            auth: self.auth,
-        })
+        Ok(config)
     }
 
     pub(crate) async fn resolve_for_connect(
@@ -166,6 +181,31 @@ impl McpConfigEntry {
         if !self.enabled {
             return Err("Enable the MCP server before connecting or signing in".into());
         }
+        self.into_connection_definition()?
+            .resolve_for_connect(context, allow_commands, signal)
+            .await
+    }
+
+    fn resolve_with(
+        self,
+        context: McpConfigContext<'_>,
+        home: Option<&Path>,
+        lookup: impl Fn(&str) -> Result<String, String>,
+    ) -> Result<McpServerConfig, String> {
+        self.into_connection_definition()?
+            .resolve_with(context, home, lookup)
+    }
+}
+
+impl McpConnectionDefinition {
+    /// Resolves at connection time, within the caller's bounded/cancellable attempt.
+    /// OAuth secrets remain late-bound by the auth owner, not transport setup.
+    pub(crate) async fn resolve_for_connect(
+        self,
+        context: McpConfigContext<'_>,
+        allow_commands: bool,
+        signal: pi_core::AbortSignal,
+    ) -> Result<McpServerConfig, String> {
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let lookup = |key: &str| {
             std::env::var(key)

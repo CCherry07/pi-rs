@@ -37,6 +37,16 @@ pub struct AgentSessionOptions {
     /// The product owns this policy; session replay only reconciles names
     /// against the new registry and persists the resulting selection.
     pub additional_active_tools: Vec<String>,
+    /// Exact product-approved names whose selection may outlive temporary absence
+    /// from this generation's registry. This does not select or register tools.
+    /// Desired names remain in ordinary v4 selection records; only registered
+    /// names reach the runtime and provider. Explicit selection replaces intent.
+    /// An empty allowance retains ordinary removed-tool reconciliation.
+    pub temporarily_unavailable_tools: Vec<String>,
+    /// Exact-name, generation-local selection classifications. An explicit entry
+    /// overrides the temporary convenience list, including explicit denial.
+    /// Product policy still owns registry visibility and execution grants.
+    pub tool_selection_availability: BTreeMap<String, ToolSelectionAvailability>,
     /// Automatic compaction is enabled only when the model context window is
     /// known. Manual compaction remains available without this value.
     pub context_window: Option<u64>,
@@ -58,6 +68,19 @@ pub struct AgentSessionOptions {
     /// Session-owned retry policy for transient assistant/provider failures.
     pub retry: AutoRetrySettings,
     pub(crate) initial_model_fallback_message: Option<String>,
+}
+
+/// Product classification for an exact desired tool name. This is selection
+/// projection, not tool registration or an execution authorization boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolSelectionAvailability {
+    /// Prune intent even if the name is registered; explicit selection errors.
+    Denied,
+    /// Preserve intent while absent; exact accepted registration resolves it.
+    TemporarilyUnavailable,
+    /// Preserve intent but withhold it even if a matching alias is registered.
+    /// Only a later product classification resolves identity ambiguity.
+    UnresolvedUntilInventory,
 }
 
 /// Checks external inputs without mutating a published generation or session log.
@@ -720,7 +743,12 @@ impl AgentSessionInitialState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestoredSessionConfiguration {
+    /// Desired selection on the current branch after accepted recovery writes.
     pub active_tools: RestoredToolSelection,
+    /// Stable, deduplicated candidate names from the initial header and selection
+    /// records across all branches/lanes, including accepted recovery writes.
+    /// These are policy inputs, not an active selection or a capability grant.
+    pub historical_selected_tool_names: Vec<String>,
 }
 
 /// A restored journal can intentionally select no tools, or have no selection record at all.

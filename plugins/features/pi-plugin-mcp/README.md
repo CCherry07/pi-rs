@@ -31,7 +31,9 @@ transient and is not serialized into Pi session history.
 
 Both entry points attach negotiated instructions to tool namespaces. The Agent projects instructions
 for active namespaces into each provider request, including immediately after discovery. Instructions
-are captured during connection, replaced on reload and never accumulated in the base prompt. Official documentation tools, such as Cua Driver's
+are captured during connection and never accumulated in the base prompt. Supervised Coding reloads
+reuse unchanged connection metadata; reconnect or changed connection inputs obtain new instructions.
+A tools-list notification refreshes tools, not initialize-only instructions. Official documentation tools, such as Cua Driver's
 `get_guide`, remain callable through the same tool surface; native MCP skill/resource browsing
 is not required for that route.
 
@@ -94,7 +96,11 @@ tools and already loaded tools are excluded. The generic implementation is indep
 [`pi-plugin-tool-search`](../pi-plugin-tool-search/README.md); it never connects to MCP itself.
 
 Loaded tools use ordinary session selection records and survive branch navigation, resume and reload.
-Hiding/removing a tool on reload removes it from the selection while retaining historical results.
+While a configured server is pending, saved selection is intent only: absent or unresolved identities
+are not declared or executable. Exact visible/granted inventory can restore them at next idle, including
+after quit/reopen. Explicit deselection clears that intent. Hiding/removing a tool or revoking its grant
+removes it from current selection while retaining historical results; completed inventory with no exact
+identity match also removes it. Ambiguous normalized/hash/namespace identities are never guessed.
 Explicit tool selections may also name deferred tools. Resource tools use the widest exposure of their
 visible servers: any direct resource server makes the shared tools direct; otherwise they are deferred.
 
@@ -124,8 +130,8 @@ Activation uses ordinary Session tool selection and its v4 persistence; it does 
 new session file before the first assistant response. Child sessions use the same automatic activation
 rules within their allowed tool catalog. A child allowed only `read` cannot gain `codemode`; a child
 allowed `codemode` can reactivate it on reload even after deselection. Deferred tools stay available
-behind permitted entry points. Connections still prepare before generation publication, unlike Pi's
-asynchronous startup discovery.
+behind permitted entry points. Coding starts connections concurrently and publishes complete immutable
+generations at idle, rather than adding tools to an active turn. See the supervised lifecycle below.
 
 ```js
 const matches = await searchTools("documentation search");
@@ -180,8 +186,36 @@ not construct a session. Preparation completes before a host publishes its runti
 failure must leave the previous generation active. Commands use ordinary Pi plugin capabilities.
 Saving configuration does not mutate a live registry: enable/disable, exposure, reconnect, and
 `/mcp reload` all request the existing whole-session replacement transaction after their candidate
-configuration or connection check succeeds. Reload failure preserves the active generation, not
-its prior disk configuration: saved edits remain on disk, and the error explains retry/revert steps.
+configuration succeeds (standalone reconnect also probes first). A supervised reconnect instead
+invalidates the old attempt and stages fresh setup. A true global preparation/registry failure preserves
+the active generation, not its prior disk configuration: saved edits remain on disk for retry/correction.
+Per-server supervised failures are reported without discarding healthy sibling connections.
+
+### Supervised Coding lifecycle
+
+Coding opts into `prepare_supervised_generation`; strict `prepare`/`prepare_generation` and explicit
+`McpToolSet` clients retain their existing complete-setup contract. Every eligible local server starts
+concurrently. Only enabled direct exposure, including per-tool direct overrides, waits under one shared
+10-second startup budget; an indirect-only generation does not wait. Pending/auth/failed servers remain
+visible in management. Each setup attempt, including local value resolution, remains bounded.
+
+Ordinary Reload with unchanged transport/trust/auth inputs reuses the connection and its last snapshot;
+it does not rerun initialize, list tools or local value helpers just to refresh them. Use `/mcp reconnect`
+to replace that connection and refresh tools plus initialize-only instructions. Changed connection
+fingerprints also replace it. This reuse is a deliberate difference from upstream reload.
+
+Tools-list notifications refresh through the existing connection, coalescing bursts with bounded,
+cancellable listing. Additions, removals and schema changes appear only in a complete next-idle
+generation. Active turns keep their frozen registry and never replay tool calls to adopt new inventory.
+A failed refresh keeps the last valid tools and a connected-with-refresh-error diagnostic; unchanged
+inventory does not repeatedly rebuild generations. This lifecycle does not yet claim full MCP parity
+or official-suite conformance.
+
+Embedding hosts opting into this seam must keep the readiness owner only in their generation-freshness
+source, not executable snapshots. Selection preservation additionally consumes grant-filtered current
+and historical candidates plus a weak live desired-selection reader; startup must not restore a stale
+selection snapshot over an earlier explicit deselection. ACP explicit-server clients do not discover
+local configuration or inherit this local-library ownership.
 
 ## Shell management
 

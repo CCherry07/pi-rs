@@ -304,12 +304,16 @@ fn assert_loaded_instructions(request: &Value) {
 }
 
 #[tokio::test]
-async fn deferred_mcp_search_loads_tools_and_preserves_selection_across_tree_reload_and_resume() {
+async fn ready_deferred_mcp_search_preserves_loaded_selection_across_tree_reload_and_resume() {
     let mut fixture = Fixture::new(
         false,
         json!({"exposure":"deferred","toolExposure":{"secret":"hidden"}}),
     )
     .await;
+    super::mcp_test_support::wait_for_tools(&fixture.session, &[SEARCH, UNUSED]).await;
+    assert!(fixture.remote_calls.lock().unwrap().is_empty());
+    assert!(fixture.script.lock().unwrap().requests.is_empty());
+    assert!(!fixture.session.path().exists());
     fixture.assert_active("tool_search", true);
     fixture.assert_active(SEARCH, false);
     fixture.assert_active(UNUSED, false);
@@ -528,8 +532,10 @@ async fn deferred_mcp_search_loads_tools_and_preserves_selection_across_tree_rel
 }
 
 #[tokio::test]
-async fn deferred_resource_only_servers_load_shared_tools_on_demand() {
+async fn ready_deferred_resource_only_servers_load_shared_tools_on_demand() {
     let fixture = Fixture::new(true, json!({"exposure":"deferred"})).await;
+    super::mcp_test_support::wait_for_tools(&fixture.session, &RESOURCE_TOOLS).await;
+    assert!(fixture.remote_calls.lock().unwrap().is_empty());
     fixture.assert_active("tool_search", true);
     for name in RESOURCE_TOOLS {
         fixture.assert_active(name, false);
@@ -607,7 +613,7 @@ async fn deferred_override_activates_search_even_before_any_matching_tool_exists
 
 // Oracle: MCP ensureDiscoveryActive and session_start in legacy/pi's extensions/mcp/index.ts.
 #[tokio::test]
-async fn auto_codemode_appends_before_first_request_and_executes_mcp_without_declaring_it() {
+async fn auto_codemode_is_active_at_startup_and_executes_ready_mcp_without_declaring_it() {
     let fixture = Fixture::configured(false, json!({}), None, Some(&["read"])).await;
     let current = fixture.session.current();
     assert_eq!(current.snapshot().agent.active_tools, ["read", "codemode"]);
@@ -615,6 +621,11 @@ async fn auto_codemode_appends_before_first_request_and_executes_mcp_without_dec
         !current.history().path().exists(),
         "startup selection must remain lazily persisted"
     );
+    super::mcp_test_support::wait_for_tools(&fixture.session, &[SEARCH, UNUSED]).await;
+    assert!(fixture.script.lock().unwrap().requests.is_empty());
+    assert!(fixture.remote_calls.lock().unwrap().is_empty());
+    let current = fixture.session.current();
+    assert!(!current.history().path().exists());
     fixture.set_script([(
         "codemode",
         json!({"code":
@@ -684,8 +695,10 @@ async fn auto_codemode_appends_before_first_request_and_executes_mcp_without_dec
 }
 
 #[tokio::test]
-async fn codemode_resource_declarations_match_their_structured_returns() {
+async fn ready_mcp_resource_declarations_match_their_structured_returns_in_codemode() {
     let fixture = Fixture::configured(true, json!({}), None, Some(&["read"])).await;
+    super::mcp_test_support::wait_for_tools(&fixture.session, &RESOURCE_TOOLS).await;
+    assert!(fixture.remote_calls.lock().unwrap().is_empty());
     fixture.set_script([("codemode", json!({"code":r#"
         const cases = [
             ['list_mcp_resources', {}, 'resources', 'uri'],
@@ -905,7 +918,7 @@ async fn auto_codemode_reload_and_resume_apply_policy_to_restored_selection() {
 }
 
 #[tokio::test]
-async fn mcp_child_discovery_respects_grants_across_reload_and_restore() {
+async fn ready_mcp_child_discovery_respects_grants_across_reload_and_restore() {
     use pi_core::CustomMessageContent;
     use pi_plugin::{IsolatedSessionOptions, IsolatedSessionRequest};
 
@@ -972,6 +985,8 @@ async fn mcp_child_discovery_respects_grants_across_reload_and_restore() {
             child.reload().await.unwrap();
             assert_entry();
             if permitted {
+                super::mcp_test_support::wait_for_tools(&child, &[SEARCH]).await;
+                assert_entry();
                 if entry == "codemode" {
                     fixture.set_script([(
                         "codemode",

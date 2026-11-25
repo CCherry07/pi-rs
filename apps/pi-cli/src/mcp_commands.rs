@@ -454,6 +454,7 @@ fn render_text(inspection: &McpInspection, context: &McpCommandContext, note: Op
                 report.tools.len(),
                 if report.tools.len() == 1 { "" } else { "s" }
             ),
+            McpServerState::Pending => "pending".into(),
             McpServerState::Disconnected => "disconnected".into(),
             McpServerState::NeedsAuth => "needs sign-in".into(),
             McpServerState::Disabled => "disabled".into(),

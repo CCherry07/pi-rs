@@ -69,7 +69,7 @@ async fn invalid_reload_keeps_previous_generation_and_acp_mode_skips_files() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn local_value_helpers_run_only_at_connect_and_reload_not_metadata_or_acp() {
+async fn local_value_helpers_run_once_per_open_not_unchanged_reload_metadata_or_acp() {
     use serde_json::json;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/mcp", listener.local_addr().unwrap());
@@ -116,12 +116,33 @@ async fn local_value_helpers_run_only_at_connect_and_reload_not_metadata_or_acp(
         .create_session(pi_session::CreateSessionOptions::new(&project, &path))
         .await
         .unwrap();
+    super::mcp_test_support::wait_for_status(&session, "account", "needs sign-in").await;
     assert_eq!(fs::read(project.join("count")).unwrap(), b"x");
     session.current().catalog().command_completions();
     session.current().prompt("/mcp paths").await.unwrap();
     assert_eq!(fs::read(project.join("count")).unwrap(), b"x");
     session.reload().await.unwrap();
+    assert_eq!(fs::read(project.join("count")).unwrap(), b"x");
+    session
+        .current()
+        .prompt("/mcp reconnect account")
+        .await
+        .unwrap();
+    super::mcp_test_support::wait_for_status(&session, "account", "needs sign-in").await;
     assert_eq!(fs::read(project.join("count")).unwrap(), b"xx");
+    // An effective local-input change, unlike an unchanged generation rebuild,
+    // creates exactly one new open and therefore one helper execution.
+    fs::write(
+        agent.join("mcp.json"),
+        json!({"mcpServers":{"account":{
+            "url":url, "headers":{"Authorization":"!printf x >> count; printf 'Bearer changed-fixture'"}
+        }}}).to_string(),
+    ).unwrap();
+    session.reload().await.unwrap();
+    super::mcp_test_support::wait_for_status(&session, "account", "needs sign-in").await;
+    assert_eq!(fs::read(project.join("count")).unwrap(), b"xxx");
+    session.reload().await.unwrap();
+    assert_eq!(fs::read(project.join("count")).unwrap(), b"xxx");
     assert!(!project.join("forbidden").exists());
     assert!(!path.exists());
     config.load_mcp_config = false;

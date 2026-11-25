@@ -322,6 +322,7 @@ async fn prepared_session_defers_external_state_until_activation() {
         SessionGenerationOverlay::default(),
         None,
         None,
+        LiveRuntimeScopeId::new(),
     )
     .await
     .unwrap();
