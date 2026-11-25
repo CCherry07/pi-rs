@@ -171,9 +171,13 @@ Inside a session, bare `/mcp` opens semantic server/action selectors in interact
 `enable`, `disable`, `exposure`, and `reload` also publish only a fully prepared replacement, so a
 failed reload keeps the current registry alive, while saved configuration remains on disk for retry
 or correction. This manager supports server-wide exposure; edit `toolExposure` in the file for
-per-tool changes. OAuth `pi mcp login/logout` is intentionally not
-claimed yet: the commands report that the authorization Adapter is unavailable and never fabricate
-or mutate credentials.
+per-tool changes. OAuth `pi mcp login <server>` displays an authorization URL and uses hidden terminal
+input for the complete callback URL; `/mcp login <server>` uses a semantic input dialog. Open the URL
+manually, approve access, then copy the callback address even if the browser shows a connection error:
+no browser launcher or loopback listener is installed. `logout` deletes only that server's stored
+OAuth credentials. `--local` requires a trusted project-defined transport, not an inherited global one.
+Provider/header authentication is not managed by these commands. Automatic browser login, whole-login
+timeout flags, OAuth add flags and Coding provider-token resolver integration remain unsupported.
 
 ## Tool selection
 

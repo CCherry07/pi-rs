@@ -131,6 +131,54 @@ impl McpCommand {
         Ok(())
     }
 
+    async fn login(
+        &self,
+        context: &CommandContext,
+        name: &str,
+        scope: Option<McpScope>,
+    ) -> Result<(), CommandError> {
+        if !context.ui.is_available()? {
+            return Err(CommandError::Execution(
+                "MCP login requires an interactive callback prompt; use pi mcp login in a terminal"
+                    .into(),
+            ));
+        }
+        let signal = context.signal().clone();
+        let flow = async {
+            let (mut login, redirect) = self
+                .library
+                .begin_login(name, scope, signal.clone())
+                .await
+                .map_err(|error| CommandError::Execution(error.to_string()))?;
+            context.ui.notify(NoticeLevel::Info, format!(
+                "Open this URL in your browser:\n{}\nNo callback listener is running. After authorization, copy the complete callback URL from the address bar, even if the browser cannot connect.", redirect.authorization_url))?;
+            let Some(response) = context
+                .ui
+                .input(
+                    "Paste the complete MCP OAuth callback URL",
+                    "http://127.0.0.1/...?...&state=...",
+                )
+                .await?
+            else {
+                return Err(CommandError::Aborted);
+            };
+            login
+                .complete_redirect_url(response.trim(), signal.clone())
+                .await
+                .map_err(|error| CommandError::Execution(error.to_string()))?;
+            context.ui.notify(
+                NoticeLevel::Info,
+                format!("Signed in to MCP server {name:?}."),
+            )?;
+            Ok(())
+        };
+        tokio::select! {
+            biased;
+            () = signal.wait() => Err(CommandError::Aborted),
+            result = flow => result,
+        }
+    }
+
     async fn manage(&self, context: CommandContext) -> Result<CommandOutcome, CommandError> {
         if self.rows.is_empty() {
             context.ui.notify(
@@ -434,19 +482,21 @@ impl Command for McpCommand {
                     .strip_prefix(if login { "login " } else { "logout " })
                     .unwrap_or_default();
                 let (name, scope) = parse_scoped_name(rest)?;
-                let message = if login {
-                    self.library.login(name, scope).await
+                let scope = (scope == McpScope::Project).then_some(scope);
+                if login {
+                    self.login(&context, name, scope).await?;
                 } else {
-                    self.library.logout(name, scope).await
+                    let message = self
+                        .library
+                        .logout(name, scope)
+                        .map_err(CommandError::Execution)?;
+                    context.ui.notify(NoticeLevel::Info, message)?;
                 }
-                .map_err(CommandError::Execution)?;
-                context.ui.notify(NoticeLevel::Info, message)?;
                 return Ok(CommandOutcome::Handled);
             }
             "login" | "logout" | "reconnect" => {
                 return Err(CommandError::InvalidArguments(
-                    "Name an MCP server. OAuth login/logout requires an installed authorization Adapter."
-                        .into(),
+                    "Name an MCP server. Login uses a manually pasted OAuth callback URL.".into(),
                 ));
             }
             _ => return Err(CommandError::InvalidArguments(mcp_usage())),

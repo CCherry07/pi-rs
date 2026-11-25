@@ -9,7 +9,8 @@ means `codemode`, matching Pi. Set `"exposure": "direct"` explicitly to declare 
 Codemode (including its `codemode-deferred` alias) is supported by the independent
 [`pi-plugin-codemode`](../pi-plugin-codemode/README.md) script runtime, included in the coding product.
 Top-level `autoEnableCodemode` controls automatic script-entry activation and defaults to `true`.
-`oauth` and `auth` currently produce configuration diagnostics instead of being silently treated as supported.
+HTTP `oauth` settings and global-only `auth.provider` are supported by the transport layer.
+Provider tokens require a host-injected resolver; Coding/CLI do not install that resolver yet.
 
 ## Explicit-server API
 
@@ -183,6 +184,8 @@ pi mcp add <server> [--env KEY=VALUE] -- <command> [args...]
 pi mcp add <server> --url <url> [--header KEY=VALUE]
 pi mcp remove <server> [--local]
 pi mcp list [--json]
+pi mcp login <server> [--local]
+pi mcp logout <server> [--local]
 ```
 
 `--local` targets `<cwd>/.pi/mcp.json`; otherwise commands target
@@ -192,12 +195,21 @@ continues to ignore that file until the normal project-trust service says the pr
 server connects; disabled servers are successful rows. JSON includes `servers`, `errors`, and an
 optional untrusted-project `note`. Add/remove never create a session or require model credentials.
 
-OAuth `login`/`logout` spellings delegate through the optional `McpAuthorization` interface; the
-CLI installs no Adapter yet, so these commands fail explicitly without modifying credentials.
-The config parser likewise rejects `oauth`/`auth`. Browser authorization, credential persistence,
-provider auth, login timeout flags, OAuth add flags, live connection logs and per-tool exposure
-editing in the semantic manager are not implemented by this tranche. Edit `toolExposure` in the
-file and reload to change individual tools. This is a shell/manager subset, not full legacy UI parity.
+OAuth `login` uses the real `McpLibrary::begin_login` state machine: open the displayed URL manually,
+then paste the complete callback URL (hidden input in the terminal). `/mcp login <server>` uses the
+semantic input dialog and supports command cancellation. There is no browser launcher or loopback
+listener; after approval the browser may show a connection error, but its address can still be pasted.
+The configured callback URL/port is honored; the manual default is `http://127.0.0.1:53682/callback`.
+No access token is saved until the real code exchange succeeds. `logout` removes only the selected
+server-name/URL credential identity. Both commands reject provider/header authentication; `--local`
+requires a trusted, project-defined transport, not merely a policy override of a global server.
+Inspection and generation connections use the same durable `<agent-dir>/mcp-auth.json` store.
+
+Automatic browser/loopback authorization, a Coding provider-token resolver, login timeout flags,
+OAuth add flags, live connection logs and per-tool exposure editing in the semantic manager remain
+unimplemented. Configure OAuth fields or `toolExposure` directly in the file. This is a shell/manager
+subset, not full legacy UI parity. OAuth network/store behavior is covered by deterministic local
+fixtures, not real-account sign-ins.
 
 ## Configuration and boundaries
 

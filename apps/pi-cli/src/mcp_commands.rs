@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use pi_plugin_mcp::{
@@ -20,8 +21,8 @@ Commands:
   add <server>            Add or replace a server in mcp.json
   remove <server>         Remove a server from mcp.json
   list                    Show state, tools, and errors (exits 1 on failure)
-  login <server>          Reserved for the MCP OAuth integration
-  logout <server>         Reserved for the MCP OAuth integration
+  login <server>          OAuth sign-in with a manually pasted callback URL (terminal required)
+  logout <server>         Delete stored OAuth credentials for this server
 
 Options for add and remove:
   -l, --local             Use .pi/mcp.json in the current project
@@ -104,15 +105,12 @@ async fn authorize(
     if parsed.positional.len() != 1 {
         return command_error(format!("Usage: pi mcp {command} <server> [-l]"));
     }
-    let scope = if parsed.flags.contains("local") {
-        McpScope::Project
-    } else {
-        McpScope::Global
-    };
+    let scope = parsed.flags.contains("local").then_some(McpScope::Project);
+    let name = &parsed.positional[0];
     let result = if command == "login" {
-        library.login(&parsed.positional[0], scope).await
+        login(library, name, scope).await
     } else {
-        library.logout(&parsed.positional[0], scope).await
+        library.logout(name, scope)
     };
     match result {
         Ok(message) => {
@@ -121,6 +119,34 @@ async fn authorize(
         }
         Err(error) => command_error(error),
     }
+}
+
+async fn login(
+    library: &McpLibrary,
+    name: &str,
+    scope: Option<McpScope>,
+) -> Result<String, String> {
+    if !std::io::stdin().is_terminal() {
+        return Err("MCP login requires a terminal to paste the callback URL; automatic browser/loopback login is not implemented".into());
+    }
+    let (_, signal) = pi_core::AbortHandle::new();
+    let (mut flow, redirect) = library
+        .begin_login(name, scope, signal.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+    println!(
+        "Open this URL in your browser:\n{}\nAfter authorization, copy the complete callback URL from the address bar, even if the browser cannot connect. No callback listener is running.",
+        redirect.authorization_url
+    );
+    let response = rpassword::prompt_password("Paste the complete callback URL (hidden input): ")
+        .map_err(|_| "Could not read MCP OAuth callback URL".to_string())?;
+    if response.trim().is_empty() {
+        return Err("MCP OAuth sign-in cancelled".into());
+    }
+    flow.complete_redirect_url(response.trim(), signal)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(format!("Signed in to MCP server {name:?}."))
 }
 
 fn add(
@@ -147,7 +173,7 @@ fn add(
     };
     let command = &parsed.positional[1..];
     let url = parsed.values.get("url");
-    if (url.is_some()) == !command.is_empty() {
+    if url.is_some() != command.is_empty() {
         return command_error(add_usage());
     }
     if url.is_some() && (parsed.lists.contains_key("env") || parsed.values.contains_key("cwd")) {
@@ -212,9 +238,11 @@ fn add(
     };
     // Local authoring is allowed before trust, like current Pi. Use a trusted disk view only for
     // this explicit write; session loading continues to use the host's persisted trust decision.
-    let write_library = local
-        .then(|| McpLibrary::new(&context.agent_dir, Some(&context.cwd), true))
-        .unwrap_or_else(|| library.clone());
+    let write_library = if local {
+        McpLibrary::new(&context.agent_dir, Some(&context.cwd), true)
+    } else {
+        library.clone()
+    };
     let path = scoped_path(context, scope);
     match write_library.add(scope, &definition) {
         Ok(replaced) => {
@@ -258,9 +286,11 @@ fn remove(
     } else {
         McpScope::Global
     };
-    let write_library = local
-        .then(|| McpLibrary::new(&context.agent_dir, Some(&context.cwd), true))
-        .unwrap_or_else(|| library.clone());
+    let write_library = if local {
+        McpLibrary::new(&context.agent_dir, Some(&context.cwd), true)
+    } else {
+        library.clone()
+    };
     let path = scoped_path(context, scope);
     match write_library.remove(scope, name) {
         Ok(true) => {
