@@ -62,8 +62,10 @@ impl ReadinessRevision {
 }
 
 mod generation;
+mod recovery;
 mod refresh;
 pub use generation::{McpGenerationReadiness, WeakMcpGenerationReadiness};
+pub(crate) use recovery::{ConnectionAdmission, WeakConnectionSlot};
 mod input;
 pub(crate) use input::ConnectionInput;
 
@@ -113,6 +115,7 @@ struct AttemptState {
     task: Option<JoinHandle<()>>,
     refresh_task: Option<JoinHandle<()>>,
     refresh_seen: u64,
+    draining: Vec<Weak<McpConnection>>,
     abort: Option<pi_core::AbortHandle>,
 }
 
@@ -127,6 +130,7 @@ impl ConnectionSlot {
                 task: None,
                 refresh_task: None,
                 refresh_seen: 0,
+                draining: Vec::new(),
                 abort: None,
             }),
             changed,
@@ -171,8 +175,15 @@ impl ConnectionSlot {
         {
             return;
         }
+        if !force && matches!(state.readiness, ConnectionReadiness::Disconnected(_)) {
+            self.open_lazy(&mut state);
+            return;
+        }
         state.epoch += 1;
         let epoch = state.epoch;
+        for connection in state.draining.drain(..).filter_map(|weak| weak.upgrade()) {
+            connection.cancel();
+        }
         if let Some(abort) = state.abort.take() {
             abort.abort();
         }
@@ -254,8 +265,9 @@ impl ConnectionSlot {
             }
             Err(error) => ConnectionReadiness::Failed(Arc::new(error)),
         };
-        drop(state);
+        // A resumed waiter observes both the installed inventory and its readiness revision.
         self.changed.bump();
+        drop(state);
     }
 
     fn is_retired(&self) -> bool {
@@ -280,6 +292,9 @@ impl ConnectionSlot {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.epoch += 1;
         state.retired = true;
+        for connection in state.draining.drain(..).filter_map(|weak| weak.upgrade()) {
+            connection.cancel();
+        }
         if let Some(abort) = state.abort.take() {
             abort.abort();
         }
@@ -290,6 +305,8 @@ impl ConnectionSlot {
             task.abort();
         }
         let old = std::mem::replace(&mut state.readiness, ConnectionReadiness::Retired);
+        // Wake weak waiters even for silent last-owner cleanup (without a revision change).
+        self.changed.notify.notify_waiters();
         drop(state);
         if let ConnectionReadiness::Ready(inventory)
         | ConnectionReadiness::Disconnected(inventory) = old

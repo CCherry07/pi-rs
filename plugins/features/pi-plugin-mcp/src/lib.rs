@@ -13,6 +13,7 @@ pub mod config;
 mod credential_watch;
 mod diagnostics;
 mod directory;
+mod http_client;
 mod library;
 mod login;
 mod naming;

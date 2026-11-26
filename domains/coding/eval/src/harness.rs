@@ -22,6 +22,7 @@ impl CodingEvalHarness {
                 ".git",
                 "node_modules",
                 "target",
+                ".eval",
             ]),
             js_plugin_host: None,
         }

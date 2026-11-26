@@ -4,6 +4,8 @@
 //! inject provider credential lookup and drive OAuth redirects with their own UI.
 
 mod refresh;
+#[cfg(test)]
+pub(crate) use refresh::sse_fixture;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, OpenOptions};
@@ -20,7 +22,7 @@ use http::{HeaderName, HeaderValue};
 use pi_core::AbortSignal;
 use rmcp::model::ClientJsonRpcMessage;
 use rmcp::transport::auth::{
-    AuthClient, AuthError, AuthorizationManager, AuthorizationMetadata, AuthorizationRequest,
+    AuthError, AuthorizationManager, AuthorizationMetadata, AuthorizationRequest,
     AuthorizationSession, CredentialStore, OAuthClientConfig, OAuthTokenResponse, StateStore,
     StoredAuthorizationState, StoredCredentials,
 };
@@ -30,6 +32,8 @@ use rmcp::transport::streamable_http_client::{
 use serde::{Deserialize, Serialize};
 use sse_stream::Sse;
 
+use crate::client::operation::{ConnectionMode, RequestControl};
+use crate::http_client::{HttpError, PiHttpClient, PiHttpClientError};
 use crate::{McpOAuthClientRegistration, McpOAuthConfig};
 
 const MAX_STORE_BYTES: u64 = 1024 * 1024;
@@ -745,6 +749,7 @@ pub(crate) async fn oauth_http_client(
     server_url: &str,
     settings: Option<&McpOAuthConfig>,
     auth: &McpClientAuth,
+    mode: ConnectionMode,
 ) -> Result<refresh::OAuthHttpClient, String> {
     let server = auth.oauth_store.for_server(name, server_url)?;
     let (mut manager, explicit_metadata) = new_authorization_manager(
@@ -761,23 +766,21 @@ pub(crate) async fn oauth_http_client(
     if let (Some(values), Some(settings)) = (&auth.local_values, settings)
         && settings.client_secret.is_some()
     {
-        return Ok(refresh::OAuthHttpClient::Local(
-            refresh::LocalOAuthClient::new(
-                manager,
-                server,
-                settings.clone(),
-                values.clone(),
-                explicit_metadata,
-            ),
+        return Ok(refresh::LocalOAuthClient::new(
+            manager,
+            server,
+            settings.clone(),
+            values.clone(),
+            explicit_metadata,
+            mode,
         ));
     }
     if let Some(settings) = settings {
         configure_preregistered_refresh(&mut manager, settings, explicit_metadata).await?;
     }
-    Ok(refresh::OAuthHttpClient::Fixed(AuthClient::new(
-        reqwest::Client::new(),
-        manager,
-    )))
+    // All OAuth modes have one reaction owner. The SDK still owns credentials and exchanges,
+    // but its AuthClient must not add a second hidden replay beneath this coordinator.
+    Ok(refresh::LocalOAuthClient::prepared(manager, server, mode))
 }
 
 async fn configure_preregistered_refresh(
@@ -895,31 +898,65 @@ async fn new_authorization_manager(
 
 #[derive(Clone)]
 pub(crate) struct ProviderAuthClient {
-    inner: reqwest::Client,
+    inner: PiHttpClient,
     provider: String,
     resolver: Arc<dyn McpProviderTokenResolver>,
+    last_token: Arc<Mutex<Option<String>>>,
 }
 
 impl ProviderAuthClient {
     pub(crate) fn new(provider: String, resolver: Arc<dyn McpProviderTokenResolver>) -> Self {
         Self {
-            inner: reqwest::Client::new(),
+            inner: PiHttpClient::new(),
             provider,
             resolver,
+            last_token: Arc::new(Mutex::new(None)),
         }
     }
 
-    async fn token(&self) -> Result<Option<String>, StreamableHttpError<reqwest::Error>> {
-        self.resolver.token(&self.provider).await.map_err(|_| {
+    async fn token_for_message(
+        &self,
+        message: &ClientJsonRpcMessage,
+    ) -> Result<Option<String>, HttpError> {
+        let control = RequestControl::from_message(message);
+        if let Some(control) = &control {
+            control
+                .check_dispatch()
+                .map_err(|error| error.into_http())?;
+        }
+        let token = self.token().await;
+        // Request-time resolution does not authorize a cancelled or superseded transport.
+        // This is only a dispatch fence: no provider refresh, challenge replay, or budget use.
+        if let Some(control) = &control {
+            control
+                .check_dispatch()
+                .map_err(|error| error.into_http())?;
+        }
+        token
+    }
+
+    async fn token(&self) -> Result<Option<String>, HttpError> {
+        let token = self.resolver.token(&self.provider).await.map_err(|_| {
             StreamableHttpError::UnexpectedServerResponse(
                 "provider credential resolution failed".to_string().into(),
             )
-        })
+        })?;
+        *self.last_token.lock().map_err(|_| {
+            StreamableHttpError::UnexpectedServerResponse("provider token state is unavailable".into())
+        })? = token.clone();
+        Ok(token)
     }
 }
 
+fn provider_response<T>(result: Result<T, HttpError>) -> Result<T, HttpError> {
+    result.map_err(|error| match error {
+        StreamableHttpError::Client(error) => StreamableHttpError::Client(error.with_auth_provider()),
+        error => error,
+    })
+}
+
 impl StreamableHttpClient for ProviderAuthClient {
-    type Error = reqwest::Error;
+    type Error = PiHttpClientError;
 
     async fn post_message(
         &self,
@@ -929,15 +966,11 @@ impl StreamableHttpClient for ProviderAuthClient {
         _auth_header: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
-        self.inner
-            .post_message(
-                uri,
-                message,
-                session_id,
-                self.token().await?,
-                custom_headers,
-            )
-            .await
+        let token = self.token_for_message(&message).await?;
+        let result = self.inner
+            .post_message(uri, message, session_id, token, custom_headers)
+            .await;
+        provider_response(result)
     }
 
     async fn post_message_with_max_sse_event_size(
@@ -949,16 +982,18 @@ impl StreamableHttpClient for ProviderAuthClient {
         custom_headers: HashMap<HeaderName, HeaderValue>,
         max_sse_event_size: usize,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
-        self.inner
+        let token = self.token_for_message(&message).await?;
+        let result = self.inner
             .post_message_with_max_sse_event_size(
                 uri,
                 message,
                 session_id,
-                self.token().await?,
+                token,
                 custom_headers,
                 max_sse_event_size,
             )
-            .await
+            .await;
+        provider_response(result)
     }
 
     async fn delete_session(
@@ -968,9 +1003,14 @@ impl StreamableHttpClient for ProviderAuthClient {
         _auth_header: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<(), StreamableHttpError<Self::Error>> {
-        self.inner
-            .delete_session(uri, session_id, self.token().await?, custom_headers)
-            .await
+        // Best-effort cleanup reuses only this transport's acquired token. It cannot look up
+        // credentials or project/log a rejected cleanup response as an authentication error.
+        let token = match self.last_token.lock() {
+            Ok(token) => token.clone(),
+            Err(_) => return Ok(()),
+        };
+        let _ = self.inner.delete_session(uri, session_id, token, custom_headers).await;
+        Ok(())
     }
 
     async fn get_stream(
@@ -981,7 +1021,7 @@ impl StreamableHttpClient for ProviderAuthClient {
         _auth_header: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>> {
-        self.inner
+        let result = self.inner
             .get_stream(
                 uri,
                 session_id,
@@ -989,7 +1029,8 @@ impl StreamableHttpClient for ProviderAuthClient {
                 self.token().await?,
                 custom_headers,
             )
-            .await
+            .await;
+        provider_response(result)
     }
 
     async fn get_stream_with_max_sse_event_size(
@@ -1001,7 +1042,7 @@ impl StreamableHttpClient for ProviderAuthClient {
         custom_headers: HashMap<HeaderName, HeaderValue>,
         max_sse_event_size: usize,
     ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>> {
-        self.inner
+        let result = self.inner
             .get_stream_with_max_sse_event_size(
                 uri,
                 session_id,
@@ -1010,6 +1051,7 @@ impl StreamableHttpClient for ProviderAuthClient {
                 custom_headers,
                 max_sse_event_size,
             )
-            .await
+            .await;
+        provider_response(result)
     }
 }

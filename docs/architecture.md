@@ -2097,11 +2097,64 @@ limited to the typed uncorrelated discovery rejection, not arbitrary initializat
 replayed by this connection retry loop. Next-idle publication and the lifecycle supervisor remain
 separate contracts; bounded retries do not mutate a live generation.
 
-A checksum-pinned local rmcp 3.3.0 override preserves typed non-success POST status/Retry-After
-metadata with bounded diagnostic bodies; see [patch provenance and removal criteria](../vendor/rmcp-3.3.0/PI-PATCH.md).
-Only the existing transport error type and non-success metadata boundary change. Successful JSON/SSE
-decoding, OAuth, session recovery and SDK retry policy stay upstream-owned. MCP uses Pi's fixed delay
-schedule rather than parsing SDK error text or introducing a second wire implementation.
+The L3 checkpoint used a checksum-pinned local rmcp 3.3.0 override for typed status/Retry-After
+metadata at the non-success POST fallback; valid JSON-RPC error bodies still took the upstream
+RPC path. Historical provenance remains in Git commit
+`f54ddeb649c93b82bcefdfe445d60f5c1ce022d0`; decision #173 supersedes that delivery design.
+The later opt-in SDK prototype must not be integrated or shipped. The bounded decision #188
+transition removes the vendor/path override and restores the registry source/checksum together.
+Registry inputs are restored; compilation and validation are pending, not established by removal.
+
+The approved replacement is a private `pi-plugin-mcp` HTTP framing/decoding adapter over stock
+rmcp 3.3.0 public APIs. Its private associated error travels through `StreamableHttpError::Client`,
+not an I/O error masquerading as an HTTP status. Diagnostics expose only finite categories/statuses;
+private getters retain classification and auth-challenge information without forwarding raw URLs,
+headers, bodies or request errors through Display/Debug/source. Non-2xx precedes RPC-body semantics
+on every HTTP entry point. JSON success bodies have a 16 MiB aggregate limit; successful controls
+ignore bodies, whereas request 202/204 is a missing-reply failure. Caller headers are followed by
+transport-owned setters, not rejected merely for using a reserved name. Exact JSON caller-header
+ordering/folding, JSON arrays, successful-response session capture, SSE syntax and fatal SSE
+overflow remain separately open; this source-only tranche is not full parity.
+
+One private OAuth reaction coordinator retains rmcp AuthorizationManager/store as the wire/state
+owner. Plain 403 is terminal. Insufficient-scope 401/403 observes the challenge and requests sign-in
+without refresh/replay. Other 401 can refresh once and replay after successful recovery even when
+the token text is unchanged. Failed proactive refresh falls back to the current stored token.
+Static/token-provider headers do not reactive-refresh. Host auth readiness uses the immutable effective
+dispatch source: raw 401 is actionable only with an actually attached token/OAuth provider; static
+Authorization bypasses that provider, so static/anonymous raw 401 is an ordinary safe failure.
+Raw 403 is terminal unless the coordinator emits typed step-up guidance. Explicit/ACP uses a bounded
+local allowance; supervised application POST/resource requests retain their shared logical allowance
+and dispatch/cancellation fences. Each transport-owned common or response-stream GET opening,
+including resumption, is a fresh frozen `authorizedFetch` invocation with at most one auth callback
+and replay; it neither consumes nor inherits the originating application allowance. Response-stream
+recovery must never reexecute the original RPC. This corrects the earlier cross-POST/GET budget
+assumption, not the existing application POST/resource policy. Frozen detached resumptions do not
+carry the original sender abort signal; stronger Rust request/epoch isolation is a deliberate
+guarantee requiring evidence, not an existing Pi behavior. Terminal failed-open retry eligibility
+and the SDK's 50 ms response drain remain open alongside real cancellation/common-stream/isolation
+regressions. There is no nested SDK AuthClient replay loop.
+SDK session recovery remains enabled for Explicit and disabled
+only for the existing supervised replacement owner; the adapter is not a second session worker.
+
+Terminal session cleanup is a narrowly scoped freshness exception matching the frozen transport.
+After closing ordinary dispatch, one best-effort DELETE may use that transport's latest **acquired**
+bearer token, with a one-second bound and static-header precedence. It does not acquire credentials,
+refresh, retry, interpret the response, persist credentials or mutate CAS/session journals. The
+private wrapper/backend must not log tokens, headers or DELETE outcomes. Stock rmcp still emits
+a success info trace containing the diagnostic-sensitive session ID; `SDK-CLEANUP-TRACE` remains
+open pending product-subscriber evidence and separately reviewed public-seam handling. Neither
+absolute SDK silence nor full cleanup parity is claimed.
+Logout/new login does not rewrite an old transport's cache, so this DELETE may transmit an old token.
+The cache never passes into a replacement transport or any GET/POST/application replay; application
+dispatch still observes the ordinary freshness and cancellation fences.
+
+A separate approved Rust compatibility seam permits one fresh Initialize after typed, wire-unattached
+Discover HTTP 400/404, retaining the successful-response uncorrelated-error fallback. It does not
+widen setup/resource retry classifiers. Frozen `legacy/pi@0ab23c37` initializes directly and has no
+Discover step. Its actual client is repository-local `@earendil-works/pi-mcp@1.6.0`, not the official
+TypeScript SDK. Neither it nor the Rust product consumes HTTP `Retry-After` for scheduling; the new
+adapter does not retain that metadata. SSE `retry` remains a separate reconnection concept.
 
 Local-library policy explicitly supplies `<agent-dir>/mcp.log` to the client handler. Typed stable
 `notifications/message` payloads append timestamp/server/level/logger lines and indented continuations.

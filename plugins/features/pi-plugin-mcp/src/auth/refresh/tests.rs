@@ -19,6 +19,8 @@ struct Fixture {
     entered: Arc<Semaphore>,
     release: Arc<Semaphore>,
     rejected: Arc<Semaphore>,
+    hold_rejections: Arc<AtomicBool>,
+    reject_release: Arc<Semaphore>,
     server: tokio::task::JoinHandle<()>,
 }
 
@@ -45,6 +47,8 @@ impl Fixture {
         let entered = Arc::new(Semaphore::new(0));
         let release = Arc::new(Semaphore::new(0));
         let rejected = Arc::new(Semaphore::new(0));
+        let hold_rejections = Arc::new(AtomicBool::new(false));
+        let reject_release = Arc::new(Semaphore::new(0));
         let app = axum::Router::new()
             .route("/metadata", axum::routing::get(move || { let value = metadata.clone(); async { axum::Json(value) } }))
             .route("/token", axum::routing::post({
@@ -72,16 +76,17 @@ impl Fixture {
                 }
             }))
             .route("/mcp", axum::routing::post({
-                let (accepted, reject, requests, rejected) = (accepted.clone(), reject.clone(), requests.clone(), rejected.clone());
+                let (accepted, reject, requests, rejected, hold_rejections, reject_release) = (accepted.clone(), reject.clone(), requests.clone(), rejected.clone(), hold_rejections.clone(), reject_release.clone());
                 move |headers: axum::http::HeaderMap, axum::Json(message): axum::Json<Value>| {
                     let id = message["id"].as_u64().unwrap();
                     *requests.lock().unwrap().entry(id).or_insert(0) += 1;
                     let token = format!("Bearer {}", accepted.lock().unwrap());
                     let allowed = !reject.load(Ordering::SeqCst) && headers.get("authorization").and_then(|value| value.to_str().ok()) == Some(&token);
-                    let rejected = rejected.clone();
+                    let (rejected, hold_rejections, reject_release) = (rejected.clone(), hold_rejections.clone(), reject_release.clone());
                     async move {
                         if !allowed {
                             rejected.add_permits(1);
+                            if hold_rejections.load(Ordering::SeqCst) { reject_release.acquire().await.unwrap().forget(); }
                             return (StatusCode::UNAUTHORIZED, [("www-authenticate", "Bearer error=invalid_token")]).into_response();
                         }
                         axum::Json(json!({"jsonrpc":"2.0","id":id,"result":{}})).into_response()
@@ -107,9 +112,15 @@ impl Fixture {
             ..Default::default()
         };
         let client = Arc::new(
-            oauth_http_client("fixture", &url, Some(&settings), &auth)
-                .await
-                .unwrap(),
+            oauth_http_client(
+                "fixture",
+                &url,
+                Some(&settings),
+                &auth,
+                ConnectionMode::Explicit,
+            )
+            .await
+            .unwrap(),
         );
         assert!(
             !dir.path().join("helper-runs").exists(),
@@ -130,6 +141,8 @@ impl Fixture {
             entered,
             release,
             rejected,
+            hold_rejections,
+            reject_release,
             server,
         }
     }
@@ -142,7 +155,7 @@ impl Fixture {
         &self,
         id: u64,
     ) -> tokio::task::JoinHandle<
-        Result<StreamableHttpPostResponse, StreamableHttpError<reqwest::Error>>,
+        Result<StreamableHttpPostResponse, HttpError>,
     > {
         let client = self.client.clone();
         let uri: Arc<str> = self.url.clone().into();
@@ -223,7 +236,6 @@ async fn concurrent_requests_share_refresh_and_cancelling_a_waiter_does_not_canc
     let first = f.call(1);
     permits(&f.entered, 1).await;
     let others = (2..10).map(|id| f.call(id)).collect::<Vec<_>>();
-    permits(&f.rejected, 9).await;
     first.abort();
     assert!(first.await.unwrap_err().is_cancelled());
     f.release.add_permits(1);
@@ -233,7 +245,7 @@ async fn concurrent_requests_share_refresh_and_cancelling_a_waiter_does_not_canc
     assert_eq!(f.token_calls.load(Ordering::SeqCst), 1);
     assert_eq!(f.helper_runs(), b"x");
     for id in 2..10 {
-        assert_eq!(f.requests.lock().unwrap()[&id], 2);
+        assert_eq!(f.requests.lock().unwrap()[&id], 1, "token acquisition waits for the pending exchange");
     }
     let stored = CredentialStore::load(&f.store.for_server("fixture", &f.url).unwrap())
         .await
@@ -252,9 +264,11 @@ async fn failed_refresh_is_shared_redacted_and_preserves_the_store_then_can_retr
     f.fail.store(true, Ordering::SeqCst);
     f.hold.store(true, Ordering::SeqCst);
     let before = std::fs::read(f.dir.path().join("auth.json")).unwrap();
+    f.hold_rejections.store(true, Ordering::SeqCst);
     let calls = (1..9).map(|id| f.call(id)).collect::<Vec<_>>();
-    permits(&f.entered, 1).await;
     permits(&f.rejected, 8).await;
+    f.reject_release.add_permits(8);
+    permits(&f.entered, 1).await;
     f.release.add_permits(1);
     for task in calls {
         let error = task.await.unwrap().err().unwrap().to_string();
@@ -268,6 +282,7 @@ async fn failed_refresh_is_shared_redacted_and_preserves_the_store_then_can_retr
     );
     f.fail.store(false, Ordering::SeqCst);
     f.hold.store(false, Ordering::SeqCst);
+    f.hold_rejections.store(false, Ordering::SeqCst);
     assert!(f.call(9).await.unwrap().is_ok());
     assert_eq!(f.token_calls.load(Ordering::SeqCst), 2);
     assert_eq!(f.helper_runs(), b"xx");
@@ -331,7 +346,7 @@ async fn second_401_is_returned_without_a_refresh_loop() {
     f.reject.store(true, Ordering::SeqCst);
     assert!(matches!(
         f.call(1).await.unwrap(),
-        Err(StreamableHttpError::AuthRequired(_))
+        Err(StreamableHttpError::Client(error)) if error.auth_rejection().is_some()
     ));
     assert_eq!(f.requests.lock().unwrap()[&1], 2);
     assert_eq!(f.token_calls.load(Ordering::SeqCst), 1);

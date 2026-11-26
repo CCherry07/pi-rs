@@ -1,30 +1,40 @@
-//! rmcp freezes client settings; local configuration must resolve secrets only when refreshing.
-//! Only token/401 coordination lives here. rmcp still constructs and exchanges every OAuth request.
+//! One refresh coordinator for all OAuth clients, including Explicit and late local secrets.
+//! Only token/rejection coordination lives here; rmcp still constructs and exchanges OAuth requests.
 use super::*;
+use crate::client::operation::RequestControl;
 use oauth2::TokenResponse;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex as AsyncMutex, watch};
 
-#[derive(Clone)]
-pub(crate) enum OAuthHttpClient {
-    Fixed(AuthClient<reqwest::Client>),
-    Local(LocalOAuthClient),
-}
+pub(crate) type OAuthHttpClient = LocalOAuthClient;
 
 #[derive(Clone)]
 pub(crate) struct LocalOAuthClient {
-    http: reqwest::Client,
+    http: PiHttpClient,
     state: Arc<RefreshState>,
+    mode: ConnectionMode,
 }
 
 struct RefreshState {
     manager: AsyncMutex<AuthorizationManager>,
     store: ServerStore,
+    settings: RefreshSettings,
+    completed: AtomicU64,
+    flight: AsyncMutex<Option<Flight>>,
+    last_token: Mutex<Option<String>>,
+}
+
+enum RefreshSettings {
+    /// The SDK manager already holds restored DCR/CIMD or fixed preregistration settings.
+    Prepared,
+    /// Only trusted local-secret settings need late resolution on each refresh.
+    Local(Box<LocalRefreshSettings>),
+}
+
+struct LocalRefreshSettings {
     settings: McpOAuthConfig,
     values: crate::config::LocalValues,
     metadata: Option<AuthorizationMetadata>,
-    completed: AtomicU64,
-    flight: AsyncMutex<Option<Flight>>,
 }
 
 struct Flight {
@@ -41,7 +51,7 @@ enum RefreshFailure {
 }
 
 impl RefreshFailure {
-    fn http(self) -> StreamableHttpError<reqwest::Error> {
+    fn http(self) -> HttpError {
         match self {
             Self::AuthorizationRequired => AuthError::AuthorizationRequired.into(),
             Self::Failed(message) => AuthError::TokenRefreshFailed(message).into(),
@@ -56,49 +66,142 @@ impl LocalOAuthClient {
         settings: McpOAuthConfig,
         values: crate::config::LocalValues,
         metadata: Option<AuthorizationMetadata>,
+        mode: ConnectionMode,
+    ) -> Self {
+        Self::with_settings(
+            manager,
+            store,
+            RefreshSettings::Local(Box::new(LocalRefreshSettings {
+                settings,
+                values,
+                metadata,
+            })),
+            mode,
+        )
+    }
+
+    pub(super) fn prepared(manager: AuthorizationManager, store: ServerStore, mode: ConnectionMode) -> Self {
+        Self::with_settings(manager, store, RefreshSettings::Prepared, mode)
+    }
+
+    fn with_settings(
+        manager: AuthorizationManager,
+        store: ServerStore,
+        settings: RefreshSettings,
+        mode: ConnectionMode,
     ) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: PiHttpClient::new(),
             state: Arc::new(RefreshState {
                 manager: AsyncMutex::new(manager),
                 store,
                 settings,
-                values,
-                metadata,
                 completed: AtomicU64::new(0),
                 flight: AsyncMutex::new(None),
+                last_token: Mutex::new(None),
             }),
+            mode,
         }
+    }
+
+    fn control(&self, message: &ClientJsonRpcMessage) -> Option<RequestControl> {
+        (self.mode == ConnectionMode::Supervised)
+            .then(|| RequestControl::from_message(message))
+            .flatten()
+    }
+
+    fn check_dispatch(
+        control: Option<&RequestControl>,
+    ) -> Result<(), HttpError> {
+        control.map_or(Ok(()), |control| {
+            control.check_dispatch().map_err(|error| error.into_http())
+        })
+    }
+
+    fn check_completion(control: Option<&RequestControl>) -> Result<(), HttpError> {
+        control.map_or(Ok(()), |control| {
+            control.check_completion().map_err(|error| error.into_http())
+        })
+    }
+
+    async fn acquire_token<T>(
+        &self,
+        control: Option<&RequestControl>,
+        acquire: impl Future<Output = Result<(Option<String>, T), RefreshFailure>>,
+    ) -> Result<(Option<String>, T), HttpError> {
+        Self::check_dispatch(control)?;
+        // Terminal cleanup remembers acquisition, not successful dispatch. This never grants
+        // permission to send: the strict fence still runs after acquisition and before POST.
+        let acquired = acquire.await.and_then(|(token, value)| {
+            self.state.remember_token(token.clone())?;
+            Ok((token, value))
+        });
+        Self::check_dispatch(control)?;
+        acquired.map_err(RefreshFailure::http)
     }
 
     async fn request<T, F, Fut>(
         &self,
+        _uri: &str,
+        control: Option<RequestControl>,
         auth_token: Option<String>,
         call: F,
-    ) -> Result<T, StreamableHttpError<reqwest::Error>>
+    ) -> Result<T, HttpError>
     where
         F: Fn(Option<String>) -> Fut,
-        Fut: Future<Output = Result<T, StreamableHttpError<reqwest::Error>>>,
+        Fut: Future<Output = Result<T, HttpError>>,
     {
-        let (token, observed) = match auth_token {
-            Some(token) => (Some(token), self.state.completed.load(Ordering::Acquire)),
-            None => self.state.token().await.map_err(RefreshFailure::http)?,
-        };
-        match call(token.clone()).await {
-            Err(StreamableHttpError::AuthRequired(challenge)) => {
-                let Some(stale) = token else {
-                    return Err(StreamableHttpError::AuthRequired(challenge));
-                };
-                match self.state.refresh(stale.clone(), observed).await {
-                    // Exactly one challenge-triggered retry; never recursively retry this call.
-                    Ok(token) if token != stale => call(Some(token)).await,
-                    Ok(_) | Err(RefreshFailure::AuthorizationRequired) => {
-                        Err(StreamableHttpError::AuthRequired(challenge))
-                    }
-                    Err(error) => Err(error.http()),
-                }
+        Self::check_dispatch(control.as_ref())?;
+        let acquire = async {
+            match auth_token {
+                Some(token) => Ok((Some(token), self.state.completed.load(Ordering::Acquire))),
+                None => self.state.token().await,
             }
-            result => result,
+        };
+        let (token, observed) = self.acquire_token(control.as_ref(), acquire).await?;
+        let result = provider_response(call(token.clone()).await);
+        Self::check_completion(control.as_ref())?;
+        let error = match result {
+            Err(StreamableHttpError::Client(error)) if error.auth_rejection().is_some() => error,
+            result => return result,
+        };
+        if error.auth_rejection().is_some_and(|rejection| rejection.is_insufficient_scope()) {
+            // Scope changes require explicit sign-in; refresh cannot enlarge the grant.
+            return Err(StreamableHttpError::Client(error.require_sign_in()));
+        }
+        Self::check_dispatch(control.as_ref())?;
+        let recoverable = self.state.can_recover(token.as_deref()).await;
+        Self::check_dispatch(control.as_ref())?;
+        if !recoverable.map_err(RefreshFailure::http)? {
+            return Err(StreamableHttpError::Client(error.require_sign_in()));
+        }
+        // Reserve BEFORE starting or joining reactive refresh. No refund on failure/drop.
+        // Each transport-owned common/response GET opening has its own at-most-one auth
+        // reaction/replay, independent of the originating POST/resource allowance. This never
+        // reexecutes the RPC. Outer reconnect eligibility, completion and cancellation/epoch
+        // guarantees remain separate SSE-RESUME-CONTROL questions, not this local auth bound.
+        if let Some(control) = &control
+            && !control.try_recover().map_err(|error| error.into_http())?
+        {
+            return Err(StreamableHttpError::Client(error));
+        }
+        let refreshed = self.state.refresh(token, observed).await;
+        Self::check_dispatch(control.as_ref())?;
+        match refreshed {
+            Ok(_) => {
+                // Reload current storage, not a pre-exchange token: newer login/logout wins.
+                // A successful callback permits a replay even if the token is unchanged.
+                let acquire = async { self.state.current_token().await.map(|token| (token, ())) };
+                let (token, ()) = self.acquire_token(control.as_ref(), acquire).await?;
+                Self::check_dispatch(control.as_ref())?;
+                let result = provider_response(call(token).await);
+                Self::check_completion(control.as_ref())?;
+                result
+            }
+            Err(RefreshFailure::AuthorizationRequired) => {
+                Err(StreamableHttpError::Client(error.require_sign_in()))
+            }
+            Err(error) => Err(error.http()),
         }
     }
 }
@@ -110,45 +213,56 @@ impl RefreshState {
         })
     }
 
+    fn remember_token(&self, token: Option<String>) -> Result<(), RefreshFailure> {
+        *self.last_token.lock().map_err(|_| RefreshFailure::Failed("MCP token state is unavailable".into()))? = token;
+        Ok(())
+    }
+
+    async fn current_token(&self) -> Result<Option<String>, RefreshFailure> {
+        Ok(self.credentials().await?.and_then(|stored| stored.token_response)
+            .map(|token| token.access_token().secret().to_owned()))
+    }
+
+    async fn can_recover(&self, stale: Option<&str>) -> Result<bool, RefreshFailure> {
+        let current = self.credentials().await?;
+        Ok(current.as_ref().and_then(|stored| stored.token_response.as_ref()).is_some_and(|token| {
+            Some(token.access_token().secret().as_str()) != stale || token.refresh_token().is_some()
+        }))
+    }
+
     async fn token(self: &Arc<Self>) -> Result<(Option<String>, u64), RefreshFailure> {
+        // Pi waits for an already-running exchange before reading its current stored token.
+        let active = self.flight.lock().await.as_ref()
+            .filter(|flight| flight.result.borrow().is_none()).map(|flight| flight.result.clone());
+        if let Some(active) = active {
+            let _ = wait_refresh(active).await;
+        }
         let observed = self.completed.load(Ordering::Acquire);
         let stored = self.credentials().await?;
-        let Some((credentials, token)) = stored
-            .as_ref()
+        let Some((credentials, token)) = stored.as_ref()
             .and_then(|stored| stored.token_response.as_ref().map(|token| (stored, token)))
         else {
             return Ok((None, observed));
         };
         let expired = match (token.expires_in(), credentials.token_received_at) {
             (Some(expires), Some(received)) => {
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                // Keep rmcp's existing 30-second refresh skew and unknown-expiry behavior.
-                expires
-                    .as_secs()
-                    .saturating_sub(now.saturating_sub(received))
-                    < 30
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+                expires.as_secs().saturating_sub(now.saturating_sub(received)) <= 30
             }
             _ => false,
         };
-        let token = token.access_token().secret().to_owned();
-        if !expired {
-            return Ok((Some(token), observed));
+        let current = token.access_token().secret().to_owned();
+        if expired && token.refresh_token().is_some() {
+            // Proactive failure is not terminal: use CURRENT storage, including logout/new login.
+            let _ = self.refresh(Some(current), observed).await;
+            return Ok((self.current_token().await?, self.completed.load(Ordering::Acquire)));
         }
-        match self.refresh(token, observed).await {
-            Ok(token) => Ok((Some(token), self.completed.load(Ordering::Acquire))),
-            Err(RefreshFailure::AuthorizationRequired) => {
-                Ok((None, self.completed.load(Ordering::Acquire)))
-            }
-            Err(error) => Err(error),
-        }
+        Ok((Some(current), observed))
     }
 
-    async fn refresh(self: &Arc<Self>, stale: String, observed: u64) -> RefreshResult {
+    async fn refresh(self: &Arc<Self>, stale: Option<String>, observed: u64) -> RefreshResult {
         let mut flight = self.flight.lock().await;
-        let mut result = match flight.as_ref() {
+        let result = match flight.as_ref() {
             // An overlapping request shares success OR failure, even if its 401 arrived late.
             Some(active) if active.generation > observed || active.result.borrow().is_none() => {
                 active.result.clone()
@@ -173,18 +287,10 @@ impl RefreshState {
             }
         };
         drop(flight);
-        loop {
-            if let Some(value) = result.borrow_and_update().clone() {
-                return value;
-            }
-            result
-                .changed()
-                .await
-                .map_err(|_| RefreshFailure::Failed("MCP OAuth refresh task stopped".into()))?;
-        }
+        wait_refresh(result).await
     }
 
-    async fn exchange(&self, stale: String) -> RefreshResult {
+    async fn exchange(&self, stale: Option<String>) -> RefreshResult {
         let current = self.credentials().await?;
         let Some(token) = current
             .as_ref()
@@ -192,17 +298,23 @@ impl RefreshState {
         else {
             return Err(RefreshFailure::AuthorizationRequired);
         };
-        if token.access_token().secret() != &stale {
+        if Some(token.access_token().secret()) != stale.as_ref() {
             return Ok(token.access_token().secret().to_owned());
         }
         if token.refresh_token().is_none() {
             return Err(RefreshFailure::AuthorizationRequired);
         }
-        let settings = self
-            .values
-            .oauth(self.settings.clone(), pi_core::AbortHandle::new().1)
-            .await
-            .map_err(RefreshFailure::Failed)?;
+        let local_settings = match &self.settings {
+            RefreshSettings::Prepared => None,
+            RefreshSettings::Local(local) => Some((
+                local
+                    .values
+                    .oauth(local.settings.clone(), pi_core::AbortHandle::new().1)
+                    .await
+                    .map_err(RefreshFailure::Failed)?,
+                local.metadata.clone(),
+            )),
+        };
         let mut manager = self.manager.lock().await;
         // A detached refresh must not overwrite a newer login or resurrect a logout.
         manager.set_credential_store(RefreshStore {
@@ -211,9 +323,11 @@ impl RefreshState {
                 RefreshFailure::Failed("MCP OAuth credential snapshot failed".into())
             })?,
         });
-        configure_preregistered_refresh(&mut manager, &settings, self.metadata.clone())
-            .await
-            .map_err(RefreshFailure::Failed)?;
+        if let Some((settings, metadata)) = local_settings {
+            configure_preregistered_refresh(&mut manager, &settings, metadata)
+                .await
+                .map_err(RefreshFailure::Failed)?;
+        }
         match manager.refresh_token().await {
             Ok(tokens) => Ok(tokens.access_token().secret().to_owned()),
             Err(AuthError::AuthorizationRequired | AuthError::TokenRefreshRejected(_)) => {
@@ -224,6 +338,16 @@ impl RefreshState {
                 "MCP OAuth token refresh failed".into(),
             )),
         }
+    }
+}
+
+async fn wait_refresh(mut result: watch::Receiver<Option<RefreshResult>>) -> RefreshResult {
+    loop {
+        if let Some(value) = result.borrow_and_update().clone() {
+            return value;
+        }
+        result.changed().await
+            .map_err(|_| RefreshFailure::Failed("MCP OAuth refresh task stopped".into()))?;
     }
 }
 
@@ -289,146 +413,8 @@ impl CredentialStore for RefreshStore {
     }
 }
 
-impl StreamableHttpClient for OAuthHttpClient {
-    type Error = reqwest::Error;
-    async fn post_message(
-        &self,
-        uri: Arc<str>,
-        message: ClientJsonRpcMessage,
-        session_id: Option<Arc<str>>,
-        auth_token: Option<String>,
-        custom_headers: HashMap<HeaderName, HeaderValue>,
-    ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
-        match self {
-            Self::Fixed(client) => {
-                client
-                    .post_message(uri, message, session_id, auth_token, custom_headers)
-                    .await
-            }
-            Self::Local(client) => {
-                client
-                    .post_message(uri, message, session_id, auth_token, custom_headers)
-                    .await
-            }
-        }
-    }
-    async fn post_message_with_max_sse_event_size(
-        &self,
-        uri: Arc<str>,
-        message: ClientJsonRpcMessage,
-        session_id: Option<Arc<str>>,
-        auth_token: Option<String>,
-        custom_headers: HashMap<HeaderName, HeaderValue>,
-        max_sse_event_size: usize,
-    ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
-        match self {
-            Self::Fixed(client) => {
-                client
-                    .post_message_with_max_sse_event_size(
-                        uri,
-                        message,
-                        session_id,
-                        auth_token,
-                        custom_headers,
-                        max_sse_event_size,
-                    )
-                    .await
-            }
-            Self::Local(client) => {
-                client
-                    .post_message_with_max_sse_event_size(
-                        uri,
-                        message,
-                        session_id,
-                        auth_token,
-                        custom_headers,
-                        max_sse_event_size,
-                    )
-                    .await
-            }
-        }
-    }
-    async fn delete_session(
-        &self,
-        uri: Arc<str>,
-        session_id: Arc<str>,
-        auth_token: Option<String>,
-        custom_headers: HashMap<HeaderName, HeaderValue>,
-    ) -> Result<(), StreamableHttpError<Self::Error>> {
-        match self {
-            Self::Fixed(client) => {
-                client
-                    .delete_session(uri, session_id, auth_token, custom_headers)
-                    .await
-            }
-            Self::Local(client) => {
-                client
-                    .delete_session(uri, session_id, auth_token, custom_headers)
-                    .await
-            }
-        }
-    }
-    async fn get_stream(
-        &self,
-        uri: Arc<str>,
-        session_id: Option<Arc<str>>,
-        last_event_id: Option<String>,
-        auth_token: Option<String>,
-        custom_headers: HashMap<HeaderName, HeaderValue>,
-    ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>> {
-        match self {
-            Self::Fixed(client) => {
-                client
-                    .get_stream(uri, session_id, last_event_id, auth_token, custom_headers)
-                    .await
-            }
-            Self::Local(client) => {
-                client
-                    .get_stream(uri, session_id, last_event_id, auth_token, custom_headers)
-                    .await
-            }
-        }
-    }
-    async fn get_stream_with_max_sse_event_size(
-        &self,
-        uri: Arc<str>,
-        session_id: Option<Arc<str>>,
-        last_event_id: Option<String>,
-        auth_token: Option<String>,
-        custom_headers: HashMap<HeaderName, HeaderValue>,
-        max_sse_event_size: usize,
-    ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>> {
-        match self {
-            Self::Fixed(client) => {
-                client
-                    .get_stream_with_max_sse_event_size(
-                        uri,
-                        session_id,
-                        last_event_id,
-                        auth_token,
-                        custom_headers,
-                        max_sse_event_size,
-                    )
-                    .await
-            }
-            Self::Local(client) => {
-                client
-                    .get_stream_with_max_sse_event_size(
-                        uri,
-                        session_id,
-                        last_event_id,
-                        auth_token,
-                        custom_headers,
-                        max_sse_event_size,
-                    )
-                    .await
-            }
-        }
-    }
-}
-
 impl StreamableHttpClient for LocalOAuthClient {
-    type Error = reqwest::Error;
+    type Error = PiHttpClientError;
     async fn post_message(
         &self,
         uri: Arc<str>,
@@ -437,7 +423,7 @@ impl StreamableHttpClient for LocalOAuthClient {
         auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
-        self.request(auth_token, |token| {
+        self.request(&uri, self.control(&message), auth_token, |token| {
             self.http.post_message(
                 uri.clone(),
                 message.clone(),
@@ -457,7 +443,7 @@ impl StreamableHttpClient for LocalOAuthClient {
         custom_headers: HashMap<HeaderName, HeaderValue>,
         max_sse_event_size: usize,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
-        self.request(auth_token, |token| {
+        self.request(&uri, self.control(&message), auth_token, |token| {
             self.http.post_message_with_max_sse_event_size(
                 uri.clone(),
                 message.clone(),
@@ -473,18 +459,17 @@ impl StreamableHttpClient for LocalOAuthClient {
         &self,
         uri: Arc<str>,
         session_id: Arc<str>,
-        auth_token: Option<String>,
+        _auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<(), StreamableHttpError<Self::Error>> {
-        self.request(auth_token, |token| {
-            self.http.delete_session(
-                uri.clone(),
-                session_id.clone(),
-                token,
-                custom_headers.clone(),
-            )
-        })
-        .await
+        // Cleanup never acquires credentials, joins refresh, interprets a response or publishes
+        // errors. Its per-transport acquired-token cache is never read by GET/POST/replay.
+        let token = match self.state.last_token.lock() {
+            Ok(token) => token.clone(),
+            Err(_) => return Ok(()),
+        };
+        let _ = self.http.delete_session(uri, session_id, token, custom_headers).await;
+        Ok(())
     }
     async fn get_stream(
         &self,
@@ -494,7 +479,7 @@ impl StreamableHttpClient for LocalOAuthClient {
         auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>> {
-        self.request(auth_token, |token| {
+        self.request(&uri, None, auth_token, |token| {
             self.http.get_stream(
                 uri.clone(),
                 session_id.clone(),
@@ -514,7 +499,7 @@ impl StreamableHttpClient for LocalOAuthClient {
         custom_headers: HashMap<HeaderName, HeaderValue>,
         max_sse_event_size: usize,
     ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>> {
-        self.request(auth_token, |token| {
+        self.request(&uri, None, auth_token, |token| {
             self.http.get_stream_with_max_sse_event_size(
                 uri.clone(),
                 session_id.clone(),
@@ -528,5 +513,13 @@ impl StreamableHttpClient for LocalOAuthClient {
     }
 }
 
+#[cfg(test)]
+pub(crate) mod sse_fixture;
+#[cfg(test)]
+mod sse_tests;
+#[cfg(test)]
+mod sse_common_tests;
+#[cfg(test)]
+mod supervised_tests;
 #[cfg(all(test, unix))]
 mod tests;

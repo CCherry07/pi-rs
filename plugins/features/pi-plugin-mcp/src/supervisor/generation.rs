@@ -17,6 +17,8 @@ pub struct WeakMcpGenerationReadiness(Weak<GenerationLease>);
 
 struct GenerationLease {
     state: Mutex<LeaseState>,
+    retire: pi_core::AbortHandle,
+    retirement: pi_core::AbortSignal,
 }
 
 struct LeaseState {
@@ -28,8 +30,11 @@ struct LeaseState {
 
 impl McpGenerationReadiness {
     pub(crate) fn new(supervisor: McpSupervisor, snapshot: &ConnectionSnapshot) -> Self {
+        let (retire, retirement) = pi_core::AbortHandle::new();
         Self {
             lease: Arc::new(GenerationLease {
+                retire,
+                retirement,
                 state: Mutex::new(LeaseState {
                     supervisor: Some(supervisor),
                     candidate: snapshot.candidate,
@@ -58,6 +63,8 @@ impl McpGenerationReadiness {
 
 impl Drop for GenerationLease {
     fn drop(&mut self) {
+        // A raw supervisor may outlive this generation. Its slot revision is not a lease wake.
+        self.retire.abort();
         let state = self
             .state
             .get_mut()
@@ -73,6 +80,36 @@ impl Drop for GenerationLease {
 }
 
 impl WeakMcpGenerationReadiness {
+    /// The signal shares no ownership of the lease, source, supervisor, or exact slot.
+    pub(crate) fn retirement_signal(&self) -> Option<pi_core::AbortSignal> {
+        self.0.upgrade().map(|lease| lease.retirement.clone())
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.0.upgrade().is_some_and(|lease| {
+            let state = lease
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.published && state.supervisor.is_some() && !lease.retire.is_aborted()
+        })
+    }
+
+    /// Capture only an exact pin of this generation, never the supervisor's mutable name map.
+    pub(crate) fn connection_slot(&self, name: &str) -> Option<super::WeakConnectionSlot> {
+        let lease = self.0.upgrade()?;
+        let state = lease
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.supervisor.as_ref()?;
+        state
+            .pins
+            .iter()
+            .find(|slot| slot.input.name() == name)
+            .map(|slot| super::WeakConnectionSlot(Arc::downgrade(slot)))
+    }
+
     /// Never reuse an uncommitted candidate. Preparation failure must leave the active owner
     /// selectable even while another candidate or its executable snapshot is retained.
     pub fn active_supervisor(&self) -> Option<McpSupervisor> {
@@ -114,6 +151,7 @@ impl WeakMcpGenerationReadiness {
 
     pub(crate) async fn shutdown(&self, reloading: bool) -> Result<(), McpError> {
         let retired = self.0.upgrade().and_then(|lease| {
+            lease.retire.abort();
             let mut state = lease
                 .state
                 .lock()

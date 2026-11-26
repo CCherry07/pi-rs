@@ -197,6 +197,75 @@ mod tests {
     }
 
     #[test]
+    fn configured_eval_basename_prunes_copy_and_original_snapshots() {
+        let fixture = tempfile::tempdir().unwrap();
+        let copied = tempfile::tempdir().unwrap();
+        let sources = [
+            (".evaluation/keep.rs", "keep similarly named source"),
+            (".pi/APPEND_SYSTEM.md", "keep project context"),
+            ("nested/src/keep.rs", "keep nested source"),
+            ("src/source.rs", "source before"),
+        ];
+        let artifacts = [
+            ".eval/cargo-target/run/deep/cache.bin",
+            ".eval/mcp-evidence/run/stdout.log",
+            "nested/.eval/cargo-target/run/deep/cache.bin",
+            "nested/.eval/mcp-evidence/run/stdout.log",
+        ];
+        for (relative, contents) in sources
+            .into_iter()
+            .chain(artifacts.into_iter().map(|path| (path, "artifact before")))
+        {
+            let path = fixture.path().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        }
+        // Coding evaluation reserves this basename; the generic runner requires opt-in.
+        let ignored = BTreeSet::from([".eval".to_string()]);
+        let expected = sources
+            .into_iter()
+            .map(|(path, contents)| (path.to_string(), file_snapshot(contents.as_bytes())))
+            .collect::<BTreeMap<_, _>>();
+
+        copy_fixture(fixture.path(), copied.path(), &ignored).unwrap();
+        for directory in [".eval", "nested/.eval"] {
+            assert!(!copied.path().join(directory).exists(), "copied {directory}");
+        }
+        for (relative, contents) in sources {
+            assert_eq!(
+                std::fs::read_to_string(copied.path().join(relative)).unwrap(),
+                contents
+            );
+        }
+        assert_eq!(
+            snapshot_workspace(copied.path(), &BTreeSet::new()).unwrap(),
+            expected
+        );
+
+        // Independently snapshot the populated ORIGINAL, not just the filtered copy.
+        for relative in artifacts {
+            assert!(fixture.path().join(relative).is_file());
+        }
+        let before = snapshot_workspace(fixture.path(), &ignored).unwrap();
+        assert_eq!(before, expected);
+        for relative in artifacts {
+            std::fs::write(fixture.path().join(relative), "artifact after").unwrap();
+        }
+        std::fs::write(fixture.path().join("src/source.rs"), "source after").unwrap();
+        let after = snapshot_workspace(fixture.path(), &ignored).unwrap();
+        let mut expected_after = expected;
+        expected_after.insert("src/source.rs".into(), file_snapshot(b"source after"));
+        assert_eq!(after, expected_after);
+        let observed = changes(&before, &after);
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].path, "src/source.rs");
+        assert_eq!(observed[0].kind, WorkspaceChangeKind::Modified);
+        assert_eq!(observed[0].before_text.as_deref(), Some("source before"));
+        assert_eq!(observed[0].after_text.as_deref(), Some("source after"));
+        assert_ne!(observed[0].before_sha256, observed[0].after_sha256);
+    }
+
+    #[test]
     fn fixtures_and_snapshots_include_all_directories_unless_explicitly_ignored() {
         let fixture = tempfile::tempdir().unwrap();
         let directory = tempfile::tempdir().unwrap();
