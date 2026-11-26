@@ -1,7 +1,7 @@
 //! Pi connection retry policy over typed rmcp failures, never formatted error matching.
 use super::*;
+use crate::http_client::HttpError;
 use rmcp::service::{ClientInitializeError, ServiceError};
-use rmcp::transport::streamable_http_client::StreamableHttpError;
 
 const CONNECT_RETRY_DELAYS: [Duration; 2] =
     [Duration::from_millis(250), Duration::from_millis(1000)];
@@ -28,15 +28,23 @@ impl ConnectionFailure {
         Self {
             error,
             transient_http: transient_initialize(cause),
-            // Narrow the existing compatibility fallback to the actual oracle regression:
-            // an uncorrelated JSON-RPC error in discover. A failed transport, authorization
-            // or ordinary initialize error is not permission to repeat initialization.
+            // One fresh Initialize attempt for a 2xx uncorrelated discover response, or a
+            // typed 400/404 rejection of Discover with no session in the final wire headers.
+            // Ordinary Initialize/application failures never enter this compatibility path.
             legacy_fallback: matches!(
                 cause,
                 ClientInitializeError::UncorrelatedErrorResponse { .. }
-            ),
+            ) || rejected_unattached_discover(cause),
         }
     }
+}
+
+fn rejected_unattached_discover(error: &ClientInitializeError) -> bool {
+    let ClientInitializeError::TransportError { error, .. } = error else {
+        return false;
+    };
+    matches!(error.error.downcast_ref::<HttpError>(), Some(HttpError::Client(error))
+        if error.discover_rejection().is_some())
 }
 
 fn transient_initialize(error: &ClientInitializeError) -> bool {
@@ -59,21 +67,20 @@ fn transient_service(error: &ServiceError) -> bool {
 }
 
 fn transient_transport(error: &(dyn std::error::Error + 'static)) -> bool {
-    // StreamableHttpError::Client intentionally does not expose its inner error as source().
-    // All three HTTP adapters use reqwest; stdio and application/JSON-RPC errors never qualify.
-    match error.downcast_ref::<StreamableHttpError<reqwest::Error>>() {
-        Some(StreamableHttpError::HttpStatus { status, .. }) => transient_status(*status),
-        Some(StreamableHttpError::Client(error)) => match error.status() {
-            Some(status) => transient_status(status),
-            None => {
-                error.is_connect() || error.is_timeout() || error.is_request() || error.is_body()
-            }
-        },
-        _ => false,
+    // Finite private getters preserve evidence without exposing bodies/URLs or walking strings.
+    // All product HTTP adapters use this backend; stdio and JSON-RPC errors never qualify.
+    let Some(HttpError::Client(error)) = error.downcast_ref::<HttpError>() else {
+        return false;
+    };
+    match error.status() {
+        Some(status) => transient_status(status),
+        None => error.network_flags().is_some_and(|flags| {
+            flags.connect || flags.timeout || flags.request || flags.body
+        }),
     }
 }
 
-fn transient_status(status: http::StatusCode) -> bool {
+pub(super) fn transient_status(status: http::StatusCode) -> bool {
     matches!(status.as_u16(), 408 | 429)
         || status.is_server_error() && status != http::StatusCode::NOT_IMPLEMENTED
 }
@@ -156,9 +163,9 @@ mod tests {
             .send()
             .await
             .unwrap_err();
-        assert!(transient_transport(&StreamableHttpError::Client(error)));
+        assert!(transient_transport(&HttpError::Client(error.into())));
         assert!(!transient_transport(
-            &StreamableHttpError::<reqwest::Error>::UnexpectedServerResponse(
+            &HttpError::UnexpectedServerResponse(
                 "HTTP 503: network".into()
             )
         ));
@@ -181,10 +188,10 @@ mod tests {
         )));
         assert!(!transient_service(&ServiceError::TransportClosed));
         assert!(!transient_transport(
-            &StreamableHttpError::<reqwest::Error>::SessionExpired
+            &HttpError::SessionExpired
         ));
         assert!(!transient_transport(
-            &StreamableHttpError::<reqwest::Error>::Auth(
+            &HttpError::Auth(
                 rmcp::transport::auth::AuthError::AuthorizationRequired
             )
         ));

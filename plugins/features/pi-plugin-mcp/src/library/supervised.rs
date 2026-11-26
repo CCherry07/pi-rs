@@ -192,6 +192,10 @@ impl McpLibrary {
         // Filter only final qualified identities: filtering raw inventory first
         // would rename collision peers and could activate a different tool.
         let pool = pool.without_tools(&selection.quarantined);
+        // Bind only final-view grants and exact weak snapshot pins, never a mutable name lookup.
+        let pool = pool
+            .with_supervision(watch.downgrade())
+            .map_err(|error| error.to_string())?;
         let needs_codemode = policies.values().any(McpServerPolicy::uses_codemode);
         let needs_tool_search = policies.values().any(McpServerPolicy::uses_deferred);
         Ok(PreparedMcpGeneration {

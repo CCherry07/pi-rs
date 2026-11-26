@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
@@ -10,7 +10,9 @@ use pi_coding::Config;
 use pi_coding_eval::{
     CodingEvalCase, CodingEvalHarness, CodingEvalSystemPrompt, CodingEvalVariant,
 };
-use pi_eval::{ArtifactStore, EvalCase, EvalFixture, EvalStep, ExactOutputGrader};
+use pi_eval::{
+    ArtifactStore, EvalCase, EvalFixture, EvalStep, ExactOutputGrader, WorkspaceChangeKind,
+};
 
 #[derive(Default)]
 struct RequestCapture {
@@ -18,6 +20,7 @@ struct RequestCapture {
     bindings: BTreeMap<String, String>,
     bootstrap: BTreeMap<String, serde_json::Value>,
     copied_workspace_entries: Vec<String>,
+    workspace_probe: Option<fn(&Path)>,
 }
 
 async fn completion(
@@ -51,6 +54,9 @@ async fn completion(
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
+        if let Some(probe) = capture.workspace_probe.take() {
+            probe(Path::new(workspace));
+        }
     }
     capture.bindings = bindings;
     capture.requests.push(request);
@@ -207,6 +213,86 @@ async fn product_run_uses_isolated_settings_and_persists_native_artifacts() {
         std::fs::read_to_string(source_agent.join("memory.json")).unwrap(),
         "{\"enabled\":true}"
     );
+}
+
+#[tokio::test]
+async fn reserved_eval_artifacts_are_neither_copied_nor_reported_as_source_changes() {
+    const SOURCES: [(&str, &str); 4] = [
+        (".evaluation/keep.rs", "keep similarly named source"),
+        (".pi/APPEND_SYSTEM.md", "keep project context"),
+        ("nested/src/keep.rs", "keep nested source"),
+        ("src/source.rs", "source before"),
+    ];
+    const ARTIFACTS: [&str; 4] = [
+        ".eval/cargo-target/run/deep/cache.bin",
+        ".eval/mcp-evidence/run/stdout.log",
+        "nested/.eval/cargo-target/run/deep/cache.bin",
+        "nested/.eval/mcp-evidence/run/stdout.log",
+    ];
+    let product = ProductHarness::new().await;
+    let fixture = product.root.path().join("fixture");
+    for (relative, contents) in SOURCES
+        .into_iter()
+        .chain(ARTIFACTS.into_iter().map(|path| (path, "fixture artifact")))
+    {
+        let path = fixture.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+    product.capture.lock().unwrap().workspace_probe = Some(|workspace| {
+        for (relative, contents) in SOURCES {
+            assert_eq!(
+                std::fs::read_to_string(workspace.join(relative)).unwrap(),
+                contents
+            );
+        }
+        for directory in [".eval", "nested/.eval"] {
+            assert!(!workspace.join(directory).exists(), "copied {directory}");
+        }
+        // Recreate reserved Coding-evaluation artifacts after copying so the final
+        // snapshot must exclude real populated trees, not merely absent inputs.
+        for relative in ARTIFACTS {
+            let path = workspace.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "runtime artifact").unwrap();
+        }
+        std::fs::write(workspace.join("src/source.rs"), "source after").unwrap();
+    });
+    let case = CodingEvalCase::new(
+        EvalCase::new("workspace/reserved-eval-artifacts", "ignore evaluation artifacts")
+            .fixture(EvalFixture::Directory(fixture.clone()))
+            .step(EvalStep::PromptTemplate("workspace={{workspace}}".to_string()))
+            .grader(ExactOutputGrader::new("Paris"))
+            .active_tools(Vec::<String>::new()),
+    );
+    let run = product
+        .harness
+        .run(&case, "candidate", 1, product.config.clone())
+        .await
+        .unwrap();
+
+    assert!(run.passed, "{run:#?}");
+    let capture = product.capture.lock().unwrap();
+    assert_eq!(capture.requests.len(), 1);
+    assert!(capture.workspace_probe.is_none(), "workspace probe did not run");
+    let observed = &run.observation.workspace_changes;
+    assert_eq!(observed.len(), 1, "{observed:#?}");
+    assert_eq!(observed[0].path, "src/source.rs");
+    assert_eq!(observed[0].kind, WorkspaceChangeKind::Modified);
+    assert_eq!(observed[0].before_text.as_deref(), Some("source before"));
+    assert_eq!(observed[0].after_text.as_deref(), Some("source after"));
+    assert!(observed[0].before_sha256.is_some());
+    assert!(observed[0].after_sha256.is_some());
+    assert_ne!(observed[0].before_sha256, observed[0].after_sha256);
+    for (relative, contents) in SOURCES {
+        assert_eq!(std::fs::read_to_string(fixture.join(relative)).unwrap(), contents);
+    }
+    for relative in ARTIFACTS {
+        assert_eq!(
+            std::fs::read_to_string(fixture.join(relative)).unwrap(),
+            "fixture artifact"
+        );
+    }
 }
 
 #[tokio::test]

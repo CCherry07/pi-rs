@@ -14,7 +14,7 @@ use rmcp::model::{
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::client::ConnectedServer;
+use crate::client::{ConnectedServer, McpRequestError, RequestOperation};
 use crate::result::{project_resource_listing, project_resource_read};
 
 pub(crate) const RESOURCE_TOOL_NAMES: [&str; 3] = [
@@ -295,6 +295,34 @@ struct ResourcePage {
     unsupported_templates: bool,
 }
 
+enum ResourcePageError {
+    Request(McpRequestError),
+    Projection(ToolError),
+}
+
+impl ResourcePageError {
+    async fn retry(
+        self,
+        operation: &mut RequestOperation<'_>,
+        name: &str,
+    ) -> Result<(), ToolError> {
+        match self {
+            Self::Request(error) => {
+                if operation
+                    .recover(&error, true)
+                    .await
+                    .map_err(|error| error.into_tool_error(name))?
+                {
+                    Ok(())
+                } else {
+                    Err(error.into_tool_error(name))
+                }
+            }
+            Self::Projection(error) => Err(error),
+        }
+    }
+}
+
 async fn resource_page(
     server: &ConnectedServer,
     operation: ResourceOperation,
@@ -302,6 +330,22 @@ async fn resource_page(
     context: &ToolContext,
     updates: &ToolUpdateSink,
 ) -> Result<ResourcePage, ToolError> {
+    let mut request = server.operation(context);
+    loop {
+        match resource_page_once(&mut request, &server.name, operation, cursor, updates).await {
+            Ok(page) => return Ok(page),
+            Err(error) => error.retry(&mut request, &server.name).await?,
+        }
+    }
+}
+
+async fn resource_page_once(
+    request_operation: &mut RequestOperation<'_>,
+    name: &str,
+    operation: ResourceOperation,
+    cursor: Option<&str>,
+    updates: &ToolUpdateSink,
+) -> Result<ResourcePage, ResourcePageError> {
     let params = PaginatedRequestParams::default().with_cursor(cursor.map(str::to_owned));
     let request = match operation {
         ResourceOperation::List => {
@@ -312,8 +356,8 @@ async fn resource_page(
         ),
         ResourceOperation::Read => unreachable!("read does not paginate"),
     };
-    let response = match server
-        .request(context, request, operation.name(), updates)
+    let response = match request_operation
+        .request(request, operation.name(), updates)
         .await
     {
         Ok(response) => response,
@@ -326,18 +370,18 @@ async fn resource_page(
                 unsupported_templates: true,
             });
         }
-        Err(error) => return Err(error.into_tool_error(&server.name)),
+        Err(error) => return Err(ResourcePageError::Request(error)),
     };
     let (items, next_cursor) = match (operation, response) {
         (ResourceOperation::List, ServerResult::ListResourcesResult(result)) => (
-            listed_items(&server.name, result.resources)?,
+            listed_items(name, result.resources).map_err(ResourcePageError::Projection)?,
             result.next_cursor,
         ),
         (ResourceOperation::Templates, ServerResult::ListResourceTemplatesResult(result)) => (
-            listed_items(&server.name, result.resource_templates)?,
+            listed_items(name, result.resource_templates).map_err(ResourcePageError::Projection)?,
             result.next_cursor,
         ),
-        _ => return Err(unexpected_response(&server.name)),
+        _ => return Err(ResourcePageError::Projection(unexpected_response(name))),
     };
     Ok(ResourcePage {
         items,
@@ -352,11 +396,28 @@ async fn all_resources(
     context: &ToolContext,
     updates: &ToolUpdateSink,
 ) -> Result<Vec<Value>, ToolError> {
+    let mut request = server.operation(context);
+    loop {
+        // Items, seen cursors and transport admission belong to this complete attempt. A retry
+        // never combines pages/cursors from two sessions, nor receives another recovery budget.
+        match all_resources_once(&mut request, &server.name, operation, updates).await {
+            Ok(items) => return Ok(items),
+            Err(error) => error.retry(&mut request, &server.name).await?,
+        }
+    }
+}
+
+async fn all_resources_once(
+    request: &mut RequestOperation<'_>,
+    name: &str,
+    operation: ResourceOperation,
+    updates: &ToolUpdateSink,
+) -> Result<Vec<Value>, ResourcePageError> {
     let mut items = Vec::new();
     let mut cursor = None;
     let mut seen = HashSet::new();
     for _ in 0..MAX_LIST_PAGES {
-        let page = resource_page(server, operation, cursor.as_deref(), context, updates).await?;
+        let page = resource_page_once(request, name, operation, cursor.as_deref(), updates).await?;
         if page.unsupported_templates {
             return Ok(Vec::new());
         }
@@ -365,16 +426,14 @@ async fn all_resources(
             return Ok(items);
         };
         if !seen.insert(next.clone()) {
-            return Err(ToolError::Execution(format!(
-                "MCP resource listing from server {} returned a duplicate cursor",
-                server.name
+            return Err(ResourcePageError::Projection(ToolError::Execution(
+                format!("MCP resource listing from server {name} returned a duplicate cursor"),
             )));
         }
         cursor = Some(next);
     }
-    Err(ToolError::Execution(format!(
-        "MCP resource listing from server {} exceeded {MAX_LIST_PAGES} pages",
-        server.name
+    Err(ResourcePageError::Projection(ToolError::Execution(
+        format!("MCP resource listing from server {name} exceeded {MAX_LIST_PAGES} pages"),
     )))
 }
 

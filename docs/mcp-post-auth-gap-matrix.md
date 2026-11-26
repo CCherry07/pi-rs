@@ -192,15 +192,22 @@ L3 regressions in `tests/lifecycle_retry.rs` fail on the original implementation
 HTTP retries/backoff are missing, and the broad handshake fallback also retries permanent failures
 and failed stdio startup. Narrowing that fallback fixes the latter cases. Typed classification in
 `client/retry.rs` initially could not classify status failures because pinned rmcp 3.3 flattened
-non-success POST responses into a formatted string; `9e07746d` failed the three transient cases.
+ordinary non-success POST responses into a formatted string; `9e07746d` failed the three transient
+cases. Valid JSON-RPC error bodies instead follow the upstream RPC path, also losing the HTTP status.
+The frozen TypeScript client is the repository-local `@earendil-works/pi-mcp@1.6.0`. It exposes
+HTTP status before decoding an error body but does not read HTTP `Retry-After`; the product uses
+fixed 250/1000 ms setup delays and a 250 ms resource retry. The Rust patch preserves optional
+`Retry-After` metadata without using it for scheduling. This is distinct from SSE `retry` fields
+and makes no claim about the separate official TypeScript SDK.
 
 @Suzuya approved a minimal, explicitly pinned compatibility patch after verifying that rmcp has no
 public successful-response injection/decoding seam. Patch only the non-success response metadata;
 keep successful bodies, SSE decoding, OAuth and session recovery unchanged. Do not parse error
 strings, edit the Cargo cache, or add independent SDK retry policy. The source is vendored from the
-checksum-verified locked `rmcp-3.3.0` crate; provenance, reviewed delta and removal criterion belong
-in `vendor/rmcp-3.3.0/PI-PATCH.md`. The approved supervisor and L1/L2/L4–L6 are not yet implemented.
-L3 is implemented locally under the explicit validation exception below; no landing/full-parity claim.
+checksum-verified locked `rmcp-3.3.0` crate; historical provenance, reviewed delta and removal
+criterion remain in Git commit `f54ddeb649c93b82bcefdfe445d60f5c1ce022d0`. At that L3-only checkpoint, the approved supervisor and
+L1/L2/L4–L6 were not yet implemented. L3 was implemented locally under the explicit validation
+exception below; this historical checkpoint is not the current no-vendor delivery design.
 
 The metadata patch now passes its red→green regression (`92f3d846` red, `cbbbd25d` SDK/product green),
 13 focused SDK HTTP tests, all seven lifecycle product tests, and all 262 standalone SDK library tests
@@ -401,8 +408,317 @@ No stack setting, depth contract, test assertion or unrelated test was weakened.
 green unfiltered workspace. No land, push, amend, rebase or metadata rewrite is authorized; any
 managed-tool trailers remain for the planned identical-tree whole-series cleanup.
 
+The completed local ownership sequence is `acbad60`, `c2e088d4`, `0867b64`, `5ce96a60`, then
+`bd6646a99ab3a6a670925032e48b9b16318090a3`, all after `f54ddeb`. The final tree is
+`2f9160b9794c79717b0e608621400322c6e461a2`: its net change contains exactly the frozen 69 paths,
+with every recorded blob and mode matching. The managed tool attributed the entire newly created,
+jointly written `library/supervised.rs` to @Stroheim because default ownership could not split it;
+`question-e50de5628c12454ab783d5547463fcd3` approved retaining that disclosed attribution, not a
+claim of narrower authorship. The last 45 test lines went through their original owner's managed
+commit, not a manual staging workaround.
+
+Managed commits preserved 18 stale index snapshots. After proving that HEAD matched every frozen
+blob, `git diff HEAD` was empty, and all owners/processes were idle, the narrowly authorized
+`question-4d54e174272a41b6935f9cc5900a7dc4` repair ran exactly `git reset --keep HEAD`.
+Before/after receipts in ignored `target/evidence/mcp-lifecycle-checkpoint/` then verified unchanged
+HEAD, branch and all refs, all 1,766 tracked-file SHA-256 values, all 1,262 then-existing evidence-file
+hashes, an index identical to HEAD and clean status. Those raw receipts were subsequently lost in
+the storage incident below; their historical verification is not a claim of current availability. No source/history movement, land, push or
+metadata cleanup occurred. The combined-tree evidence above therefore remains applicable to this
+checkpoint, with the same explicit depth-512 exception; it does not validate each intermediate commit.
+
 L4/L5 request lifetime, E1–E3 and Q1/A3 remain open; these local regressions are not official-conformance
 evidence. Neither this checkpoint nor its narrow exception marks #132 or lifecycle parity complete.
+
+## Official-suite preparation: verified artifacts, execution blocked
+
+Preparation alone was authorized by `question-b4e4afe9b63d4df8b41d8ebc1683395d`. The exact public
+`@modelcontextprotocol/conformance@0.2.0-alpha.11` artifact and its runtime closure were preserved
+during the completed audit under ignored `target/evidence/mcp-conformance-0.2.0-alpha.11/`;
+the subsequent storage incident below made that evidence directory unavailable. No repository
+dependency manifest or lock changed. The root archive SHA-256 is
+`67d28b0d50d64458232945d9b3af75178add5d05819c748ec2c8b26e5cb038c5`.
+The isolated Node 22.23.2/npm 10.9.8 resolution locked 119 package instances from 114 unique public
+registry tarballs, all independently SRI/SHA-256 verified. Its lock SHA-256 is
+`209cbd57a441ed5ab28e20c5760804272784fe2619630ea899b42b7e88ba8ede`. This records the current
+caret-range resolution, not an assertion that the historical oracle used that dependency tree.
+
+Source/publishing hooks in 37 packages remained inert. No preinstall/install/postinstall hook,
+native-addon artifact or implicit native-build requirement was found. The clarified authorization
+`question-44e93cbeb3364d4b9a83d23dabab924d` nevertheless required every advertised runtime
+export/main/bin and import-graph artifact to exist before scriptless installation. The verified
+`@modelcontextprotocol/sdk@1.32.2` tarball advertises but lacks both `dist/esm/index.js` and
+`dist/cjs/index.js` root exports. The actual suite imports present SDK subpaths; that does not waive
+the stricter prerequisite. Installation stopped without building/fabricating files or silently
+selecting another version. No installed dependency tree or offline reinstall result is claimed.
+
+A bounded static audit recorded 687 modules and 1,973 edges, with an optional `debug` import of
+`supports-color` and computed Express template loading explicitly unresolved. Its literal traversal
+is not proof of runtime containment. The actual local OS toy probe permits IPv4/IPv6 loopback and
+denies outbound TCP to reserved documentation addresses with EPERM, but unsandboxed own-host
+non-loopback IPv4/IPv6 clients exchanged payloads with wildcard and explicit-interface listeners,
+including ordinary exec children. Thus the tested macOS sandbox **fails the required inbound
+exposure boundary**. A tighter numeric-loopback profile was rejected by `sandbox-exec`; no bypass
+or remote-host reachability claim followed.
+
+`preparation-status.md`, the integrity receipts, `sdk-missing-root-exports.json`, static graph and
+`isolation-probes/` recorded these results before their loss in the storage incident below. No package/suite/adapter entrypoint, lifecycle hook,
+validator, official list command or scenario ran. There was no `pi.dev` request, real credential use,
+sudo, firewall/global-setting change or suite/baseline patch. Draft `auth/offline-access-scope`
+remains excluded. Installation needs a separately reviewed artifact/requirement decision; execution
+also needs an approved boundary that contains non-loopback listeners and subsequent explicit run
+authorization. **Q1/A3 remain unmeasured and open.**
+
+### Subsequent validation-storage incident
+
+On 2026-11-26, owning Cargo runs `e3151f77`, `6e090d22` and `9524b7a2` failed before test execution
+because incremental/dependency object or metadata files disappeared. These are infrastructure
+failures, not product test failures or successful reruns. At 03:05 UTC the coordinator independently
+confirmed that `target/evidence/`, including both the lifecycle checkpoint receipts and official-suite
+preparation directories, was absent; `target/debug` had meanwhile been recreated. No removal owner
+was established. The active helpers reported no cleanup, target relocation or environment workaround.
+
+The original `target/evidence` receipts and official-preparation bundle are gone. Only historical
+verified tool/process summaries remain; **no raw bundle is currently restored**. HEAD still identified
+`bd6646a`; no checkpoint reset was repeated, no missing receipts were fabricated, and no official
+artifacts were reacquired. Cleanup ownership remains unknown, not attributed to an agent or daemon.
+
+New evidence belongs under the already-ignored, non-Cargo root `.eval/mcp-evidence/<run-id>/`.
+Post-loss observations and any later explicitly regenerated material must be labeled as such, never
+as the missing originals. A guarded restart requires a quiet interval, unchanged target inode/birth
+and disposable sentinel, then one smallest focused Cargo check. Subsequent Cargo runs are serialized
+under one build owner, with target/sentinel identity captured before and after each run and evidence
+manifests/hashes archived outside `target/`. No `cargo clean`, target-directory/environment workaround,
+or concurrent helper build is authorized. Any renewed artifact loss or target/sentinel change returns
+immediately to hold rather than repeated rebuilding. This incident waives neither behavioral
+assertions nor the independently blocked official acquisition/execution boundary.
+
+The guarded restart subsequently passed a 781.82-second copy-command-inclusive quiet interval
+(after a separate 461.66-second observation). Target device/inode/birth, the sentinel and all 30,448
+metadata entries stayed unchanged; ordinary resident macOS storage daemons were recorded separately,
+without attribution. The sole smallest check, `cargo check -p pi-plugin-mcp` (`068da84e`), passed in
+10.32 seconds with the same target identity and sentinel afterward. The serialized post-box auth
+run `2cb24e9c` then passed all 18 `auth::refresh` cases and strict MCP all-target Clippy, with unchanged
+source hashes and stable post-run identity/sentinel. These are new post-loss results, archived with
+input/output/guard hashes under `.eval/mcp-evidence/target-guard-20261126T033557Z/`, not regenerated
+original receipts. Expected build-tree additions do not mean that the quiet-period metadata hash
+remained unchanged during Cargo. At that guarded restart, the full runtime recovery matrix and
+HTTP/RPC opt-in had not yet run; this guarded resumption was not L4/L5 acceptance.
+
+## Superseding no-vendor source migration and bounded validation window
+
+Decision #173 requires unmodified crates.io rmcp 3.3.0, not the vendored SDK or its later
+`PreserveHttpErrorStatus` prototype. Decision #188 releases only the exact scoped batch in
+[the validation-window proposal](mcp-stock-validation-window.md). Its dependency transition removes
+the path patch/exclude, vendor tree/nested lock/provenance, obsolete checker and attributes together,
+and restores only the registry source/checksum in the root lock. Preimages and index state are
+preserved outside the fresh batch target. Registry inputs are restored; compilation and validation
+remain pending. Executable source stays frozen. No source repair, persistence implementation,
+acquisition, official/prototype execution, target cleanup, commit, landing or push is released.
+
+The public generic client seam supports `PiHttpClientError` through `StreamableHttpError::Client`;
+there is no need to disguise ordinary HTTP failures as I/O errors. The approved source design gives
+ordinary application/setup HTTP paths status-before-RPC handling, finite safe diagnostics with
+private classification/challenge getters, a 16 MiB JSON success-body cap and request-versus-control
+202/204 semantics. Method/protocol and nonempty owned session/bearer headers follow frozen precedence. Fixed setup/resource delays stay at
+their existing owners; HTTP `Retry-After` is not consumed or retained by the new adapter. Only typed
+Discover 400/404 with no owned or effective caller session header gets one fresh Initialize fallback;
+this is Rust compatibility, not frozen Pi behavior. No general retry classifier is broadened.
+
+The approved single private OAuth reaction coordinator preserves SDK AuthorizationManager/store
+and existing Explicit versus supervised session-recovery ownership. Plain 403 has no callback;
+insufficient-scope 401/403 observes a challenge and requires sign-in without refresh/replay. Other
+401 may refresh once and replay after success even with unchanged token text. Proactive failure
+falls back to the current stored token; static/token-provider authentication never reactive-refreshes.
+Explicit/ACP uses a bounded local allowance; supervised application POST/resource requests use the
+existing shared logical allowance and cancellation fences. Each transport-owned common or response
+GET opening/resumption has its own at-most-one auth callback/replay, independent of the originating
+application allowance. Recovery of a response stream must never reexecute its original RPC. This
+approved contract correction does not change application POST/resource policy. No nested SDK
+AuthClient retry loop is allowed. Frozen transport
+`streamable-http.ts:194–197,353–403` and `oauth/auth-provider.ts:78–94` establish these distinctions;
+product auth-readiness projection additionally depends on the actually attached auth provider
+(`extensions/mcp/runtime.ts:319–324`). The approved projection makes coordinator-issued sign-in/step-up
+actionable, or raw 401 with an actual token/OAuth provider attached. Static Authorization bypasses
+that provider, so static/anonymous raw 401 is an ordinary safe failure; raw 403 is terminal without
+coordinator step-up. This retires the old Rust static-401 pending-auth behavior. Attachment comes
+from immutable effective dispatch, never merely `config.auth`, token presence or error text.
+
+A separately approved terminal-cleanup exception follows frozen `streamable-http.ts:259–260,326–340,
+377–380`: after closing ordinary dispatch, a one-second best-effort DELETE reuses that transport's
+latest acquired token, even if logout/new login has since superseded it. There is no provider/token
+lookup, refresh/retry, response interpretation, private wrapper/backend logging of tokens, headers
+or outcomes, persistence or CAS/journal mutation. The cache must never enter a replacement transport
+or ordinary GET/POST/replay. This is not a last-sent authority latch or a session-capture workaround. Its owning source/tests remain unvalidated.
+**SDK-CLEANUP-TRACE** remains explicitly **OPEN** under the lead's qualified private-silence ruling:
+private cleanup returns success after discarding outcomes, but stock rmcp invokes an info trace
+containing the diagnostic-sensitive session ID. Actual visibility depends on the subscriber; later
+acceptance requires capture against the product subscriber and, if visible, a separately approved
+stock-compatible suppression/redaction plan. Global silence and full cleanup parity are not claimed.
+No subscriber/filter, fake-error, SDK or lifecycle workaround is approved; this row blocks #124 closure.
+
+Individual follow-ups remain **OPEN**, not shared non-support or accepted permanent differences:
+
+- **JSON-ARRAYS:** frozen `streamable-http.ts:315` emits every array member; the public SDK JSON
+  response holds one message. A bridge needs its own ordering/cancellation proof, not fake RPC.
+- **SESSION-CAPTURE:** frozen `:296–297,392–395,527–528` captures nonempty session headers after
+  successful applicable POST/GET, including controls, not rejected responses. Public GET/Accepted
+  responses and the stock worker cannot yet reproduce those updates without a reviewed seam.
+- **SSE-SYNTAX:** duplicate/unknown/bare fields, malformed UTF-8 replacement, EOF/tail dispatch
+  and line-time versus frame-time ID/retry updates differ from the public parser/worker.
+- **SSE-ACCOUNTING:** the current pre-parser follows stock retained-raw-line accounting, including
+  field prefixes/metadata and pending-line bytes, rather than frozen decoded data payload plus
+  joining newlines. Conservative rejection is not exact payload-limit parity.
+- **SSE-PREFIX-DELIVERY:** whole-chunk validation can discard a complete valid earlier event when
+  a later event in the same chunk overflows. Splitting those bytes can deliver the prefix instead.
+  Stock has the same defect; inheriting it is not frozen-Pi equivalence. The frozen unfinished-line
+  cap also has chunk-sensitive behavior, so universal partition invariance is not claimed.
+- **SSE-FATAL-OVERFLOW:** raw bounds alone do not reproduce the SDK's private fatal-overflow marker.
+  POST can reconnect after an event ID; common GET can reconnect without one. Repeated successful
+  HTTP reopens followed by overflow can cycle immediately because the failed-open retry budget
+  does not govern that cycle. No hidden latch, fake stream or second session stack is approved.
+- **SSE-RESUME-CONTROL:** the corrected contract permits an independent bounded auth reaction for
+  each GET opening/resumption, as frozen `authorizedFetch` does. A source-derived isolated success
+  can have POST2/GET2/token4/callback2/exchange2; these counts assume no cancellation, overlapping
+  refresh, token change or reuse and exclude separately counted startup/common traffic. The earlier
+  no-second-refresh expectation tested a Rust contract, not Pi conformance. Real-SDK source-only
+  fixtures/cases are released, but unrun. Frozen detached resumption lacks the original sender abort;
+  stronger Rust cancellation/epoch isolation needs its own evidence. Common-stream and sibling
+  isolation, close/backoff and exact request completion remain open. No request/event-ID map, task
+  local, hidden latch, fake SSE, wire metadata, SDK change or disabled GET is approved.
+- **SSE-RECONNECT-ELIGIBILITY:** frozen resumption/common reopens stop on exhausted 401, ordinary
+  403 or sign-in/step-up errors, while genuinely transient callback/network/408/429/5xx failures may
+  reopen. Stock retries every failed reopen without classifying its error; the current production
+  backoff has no intrinsic attempt cap, although external cancellation/timeout/shutdown can stop it.
+  Initial common GET fails before the auto-reconnector and is not the same case: frozen Pi retries
+  an initial common 503, whereas stock returns that failure without creating its reconnect loop.
+  This initial-transient loss needs a separate oracle-desired regression from established-stream
+  retry eligibility. A finite-count test override must not mask the production policy; count-only
+  retry configuration is not parity.
+- **SSE-RESPONSE-COMPLETION:** stock drains the reconnecting response stream for up to 50 ms after
+  forwarding a response; retry:0/fast EOF can initiate another GET. Frozen checks its answered flag
+  before reopening after that stream ends. Source-only characterization/desired-red cases must not
+  encode this stock divergence as desired behavior or hide it behind a held final stream.
+- **CALLER-HEADER-ORDER/FOLD:** frozen caller records retain source order and coalesce case variants
+  before owned setters. Rust's JSON-to-BTreeMap conversion loses that order. A private configuration
+  follow-up must preserve it through individual late-value resolution, identity and reload; neither
+  last-wins nor rejecting case duplicates is an accepted parity disposition.
+
+Source review also found auth-specific blockers distinct from those SDK/parser limits. Per-client
+refresh coalescing plus save CAS does not serialize rotating-token consumption across separately
+prepared clients/epochs sharing a credential key; store-scoped locking and post-lock reread require
+a reviewed design. The lead requires legacy `proper-lockfile` interoperability, not an fs2-only
+advisory divergence: exact server key/hash and logical lock path (`realpath:false`), atomic acquire,
+initial acquisition plus 250 retries at 100 ms (nominal 25 seconds, not an absolute deadline),
+20-second recorded-mtime staleness, compatible precision/10-second heartbeat and normal-release
+cleanup, private 0700 lock directory, and an explicit path/symlink threat review.
+Memory key locks remain scoped to their shared backend Arc. Implementation remains held pending
+that no-new-dependency plan; later Rust↔Rust and Rust↔Node tests must establish cross-process claims.
+The read-only investigation found additional identity/storage blockers: frozen refresh keys use
+`mcp__<normalized-name>|String(new URL(url))`, including fragments, whereas current Rust credential
+keys omit that prefix and strip fragments. Current connection/public OAuth validation already rejects
+fragments: this is a storage/path/conformance constraint, not a demonstrated live-connection race.
+Broader URL coverage must settle storage and lock identity together. Node also uses a proper-lockfile
+document-lock directory and a top-level namespace state format; Rust uses an fs2 document-lock file,
+atomic replacement and a `servers` wrapper. Refresh-lock protocol compatibility alone does not
+establish credential-format, document-write or login/logout CAS interoperability. No key/schema or
+URL-validation change or dual-lock workaround is released; protocol-only Node helper evidence must
+not be called shared-state proof. Proper-lockfile stale removal/release is unfenced, and frozen MCP
+uses a no-op compromise handler; compatibility is not unconditional exclusion during compromise.
+Public `McpOAuthSignIn::refresh` also needs a separate cancellation/CAS scope review: adding a trait
+guard alone does not provide the coordinator's detached persistence or protect newer login/logout.
+Token/completed-generation snapshot consistency needs its own race regression; the proposed
+closed-empty-watch outcome is a bounded coordination failure, not spin, repair or sign-in guidance.
+These are design findings only; guard/snapshot implementation remains held. The lead requires one
+complete persistence-boundary design first and withdraws refresh-lock-only interoperability as an
+assumption. That design must preserve existing credentials through explicit read-both/migrate-once,
+without silent overwrite or dual write; cover pending sign-in, old/new Rust and Node concurrency,
+permissions/size, document-lock ordering, crash recovery and rollback. Temporary dual document locks
+are a design question, not a release, and cannot alone fix old-format writers or in-flight refreshes.
+Default agent-directory files may target full frozen interoperability; custom/memory stores must
+state narrower guarantees where path/lock-directory identity is unknown.
+
+Read-only persistence review found a concrete downgrade hazard: the current defaulted Rust
+`servers` field accepts a Node document as an empty Rust document, and a later update (even a
+no-op removal) can rewrite it without the Node entries. Dual document locks cannot repair that
+writer. The proposed migration is explicit, quiescent and all-or-nothing, with preflight stopping
+on ambiguous identities, unrepresentable metadata/pending states or mixed documents. A fixed,
+non-map `servers` marker could make the inspected old Rust fail deserialization while surviving
+the frozen Node store operations. This is a proposed reserved storage extension, not Node schema
+identity: conflicting existing data and unknown marker versions must fail preflight, and it cannot
+fence an old exchange already sent to the authorization server. Quiescence remains necessary.
+Normal write/parser/size policies also need decisions. In-place writes match Node more closely
+but retain truncation risk. Atomic replacement can share the canonical pathname lock for a stable
+resolved target; supported links, metadata preservation and filesystem durability need explicit
+limits. Neither strategy makes arbitrary hardlink aliases or all mixed writers atomic.
+
+Frozen Node locks individual loads and saves but provides no matching conditional publication
+across them; concurrent Node refresh or browser completion can undo logout. Rust content-digest
+CAS is not an ABA-proof generation fence. Shared refresh locking therefore cannot establish
+universal mixed-runtime latest-action-wins semantics. Decision #187 approves only the atomic
+supported-subset design: canonical-path locking, stable resolved regular-file single-link targets,
+faithfully preserved required metadata, and safe rejection before publication for unsupported
+cases—never a silent fallback to truncating in-place writes. A versioned non-map marker is approved
+in principle; encoding/collisions and the CLI settlement design remain to be settled. Original-byte
+no-clobber backup, quiescent representability checks, unknown-field preservation or rejection, the
+1 MiB/malformed boundary, and cooperative-only limitations remain mandatory. This releases no
+migration, schema, guard, storage hook or production change. The independent frozen HTTP/SSE
+tranche need not wait for persistence implementation or every parity gap: its single proposed
+no-vendor/offline validation window is documented in [the release batch](mcp-stock-validation-window.md).
+Decision #188 releases exactly that batch, not this persistence design or broader validation.
+
+**PUBLIC-REFRESH-LIFETIME** remains open: detached exchange/save survives caller cancellation only
+while its host runtime/process keeps running. The session-free Rust CLI cancellation/timeout path
+does not drain detached token work before returning or `process::exit`. A graceful CLI guarantee
+needs a separately reviewed app-owned settlement handoff through save and lease cleanup, with a
+chosen drain budget and an explicit incomplete outcome. No hidden exit hook or blocking Drop is
+approved. Frozen Node is friendlier to outstanding I/O but also provides no forced-exit durability.
+**INTERACTIVE-REFRESH-FIRST** is a separate source gap: Rust shell login currently connect-probes,
+then starts browser authorization when needed; it does not explicitly call the public refresh
+route before browser start as frozen `startMcpSignIn` does. Neither gap is covered by in-runtime
+refresh tests or by the current public-refresh API alone.
+
+The authorized OAuth post-response gate fix and regressions are now source-frozen, uncompiled and
+unrun: normal supersession may drain admitted results without relaxing cancellation, retirement or
+new-dispatch fences. Terminal actionable application-auth failures also lack the frozen exact-client drop/NeedsAuth readiness
+handoff; handshake-only projection does not close that cross-layer A3 gap. Challenge handling also
+remains incomplete: actionable handshake headers reach a fresh-probe sign-in path, but there is no
+lasting frozen `onChallenge` observation, reactive refresh does not carry challenge/resource-metadata
+input, and explicit auth metadata bypasses challenge-scope recording. Projection/no-refresh tests
+do not establish subsequent login or challenge-aware refresh behavior. These findings are static,
+not executed failures, and the provisional source freezes are being revised before validation.
+
+The later runtime run `3a652f7d` genuinely executed 20 cases with 14 passes and six failures. Subsequent
+runtime/fixture corrections expanded the source matrix to 21 but were not rerun. Source review has
+since added two real-slot OAuth drain cases (23 runtime cases) and a third carrier case; these are
+also uncompiled/unrun. Ten additional real-SDK runtime SSE regressions are source-frozen and
+read-only-reviewed under the approved source-only release. The original 23 runtime tests remain
+unchanged, yielding 33 in that owning module. The separate auth-SSE subset now has 13 tests covering
+23 scenarios: four response-stream tests/nine scenarios plus nine common-stream tests/14 scenarios.
+Common initial/reopened terminal failures and their distinct transient-503 paths are written and
+source-reviewed, not observed red/green. Review distinguishes local GET bounds, deliberate Rust
+ownership, stock characterization and oracle-desired cases. Five-second bounds are per observation
+or result, not whole multi-phase test durations. The old-epoch persistence fence is bounded
+cooperative polling of actual saved state, not event-driven settlement or task quiescence.
+No new regression has run or closed an SSE gap.
+The obsolete SDK prototype printed 6/6 in `3d7d7894`, then failed the post-run
+storage guard: target identity changed, its sentinel and SDK subdirectory were missing, and the
+target root was empty. Its source/lock hashes remained unchanged, but this is exploratory output,
+**not accepted migration validation**. No cause is attributed to a resident OS service. The incident receipts survived under
+`.eval/mcp-evidence/target-guard-20261126T033557Z/`; historical lost originals were not reconstructed.
+The second incident reinstated the build/layout hold.
+
+The three-file Coding-eval prerequisite now reserves the `.eval` directory basename in its existing
+private exclusions. Added generic and real-product regressions independently cover copy, populated
+original snapshots, nested cache/evidence, preserved `.pi`/`.evaluation`/normal source, and source-only
+changes. Its frozen patch SHA-256 is
+`1d4508f68c3c6a991df293de00ca93bc4e235cf8bae705f20f88a58b9ba2e39d`.
+Readback and targeted diff hygiene passed; tests and formatting are **unvalidated**. Generic defaults,
+native fingerprint coverage and native fixture copying are unchanged. A checkout-root `.eval` cache
+and evidence layout is approved only for the named decision #188 batch, not as an inherently durable
+location or a replacement for lost historical receipts. Prior auth
+18/18, product 2/2 and checkpoint gates do not validate the new adapter/auth policy. L4/L5, the named
+HTTP gaps, E1–E3, Q1/A3 and the full parity task remain open.
 
 ## Existing coverage to preserve
 

@@ -151,7 +151,7 @@ impl ConnectionInput {
             // Parsing validates placeholders, not the eventual URL/header values.
             // Validate the resolved transport before any authentication or network work.
             crate::validate_configs(std::slice::from_ref(&config))?;
-            connect_inventory(config, self.options, self.auth).await
+            connect_inventory(config, self.options.supervised(), self.auth).await
         })
         .await
         .map_err(|_| McpError::Timeout(timeout_name))?

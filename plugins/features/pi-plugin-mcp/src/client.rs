@@ -24,7 +24,8 @@ use rmcp::model::{
     CallToolRequest, CallToolRequestParams, ClientRequest, ServerResult, Tool as McpToolSpec,
 };
 use rmcp::service::{
-    ClientLifecycleMode, ClientServiceExt, RunningService, RunningServiceCancellationToken,
+    ClientInitializeError, ClientLifecycleMode, ClientServiceExt, RunningService,
+    RunningServiceCancellationToken,
 };
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
@@ -36,12 +37,19 @@ use tokio::sync::Mutex;
 use crate::auth::{McpClientAuth, ProviderAuthClient, oauth_http_client};
 use crate::client_handler::McpClientHandler;
 use crate::directory::render_servers_section;
+use crate::http_client::HttpError;
 use crate::naming::{identifier_component, qualified_tool_name};
 use crate::policy::{McpExposure, McpServerPolicy};
 use crate::resources::create_resource_tools;
 use crate::result::{normalize_input_schema, project_result_with_resources};
 
 mod discovery;
+mod lifetime;
+pub(crate) use lifetime::ConnectionUse;
+pub(crate) mod operation;
+use operation::ConnectionMode;
+mod request;
+pub(crate) use request::RequestOperation;
 mod retry;
 use retry::ConnectionFailure;
 
@@ -349,6 +357,14 @@ struct McpPool {
 pub(crate) struct McpConnectionOptions {
     root: Option<PathBuf>,
     log_path: Option<PathBuf>,
+    mode: ConnectionMode,
+}
+
+impl McpConnectionOptions {
+    pub(crate) fn supervised(mut self) -> Self {
+        self.mode = ConnectionMode::Supervised;
+        self
+    }
 }
 
 impl From<&McpServerPolicy> for McpConnectionOptions {
@@ -356,6 +372,7 @@ impl From<&McpServerPolicy> for McpConnectionOptions {
         Self {
             root: policy.root.clone(),
             log_path: policy.log_path.clone(),
+            mode: ConnectionMode::Explicit,
         }
     }
 }
@@ -367,6 +384,9 @@ pub(crate) struct McpConnection {
     metadata: Option<Arc<rmcp::model::ServerPeerInfo>>,
     discovery_revision: u64,
     discovery: discovery::DiscoveryControl,
+    dispatch: Arc<operation::DispatchGate>,
+    active_requests: std::sync::atomic::AtomicUsize,
+    draining: std::sync::atomic::AtomicBool,
     handler: McpClientHandler,
     peer: Peer<RoleClient>,
     service: Mutex<Option<RunningService<RoleClient, McpClientHandler>>>,
@@ -401,6 +421,7 @@ impl McpConnection {
     /// Invalidate the transport synchronously even if an old generation keeps a
     /// view alive. Cleanup can still be awaited separately through `close`.
     pub(crate) fn cancel(&self) {
+        self.dispatch.retire();
         self.discovery.cancel();
         if let Some(cancellation) = self
             .cancellation
@@ -420,6 +441,7 @@ impl McpConnection {
     }
 
     pub(crate) async fn close(&self) -> Result<(), McpError> {
+        self.dispatch.retire();
         self.discovery.cancel();
         let Some(mut service) = self.service.lock().await.take() else {
             return Ok(());
@@ -446,6 +468,7 @@ pub(crate) struct ConnectedServer {
     pub(crate) name: String,
     policy: McpServerPolicy,
     connection: Arc<McpConnection>,
+    supervision: Option<request::SupervisedConnection>,
 }
 
 impl ConnectedServer {
@@ -454,6 +477,7 @@ impl ConnectedServer {
             name: connection.name().to_string(),
             policy,
             connection,
+            supervision: None,
         })
     }
 }
@@ -883,13 +907,14 @@ async fn connect_server(
         &client_auth,
         handler.clone(),
         auto,
+        options.mode,
     )
     .await
     {
         Ok(service) => service,
-        // Some deployed legacy servers return an uncorrelated JSON-RPC error
-        // to server/discover. A fresh transport can still complete the stable
-        // initialize handshake; retrying cannot reuse ambiguous transport state.
+        // Deployed legacy servers may reject an unattached Discover with 400/404, or
+        // return an uncorrelated JSON-RPC error. Make only one fresh transport for the
+        // stable Initialize handshake; never reuse ambiguous transport state.
         Err(failure) if failure.legacy_fallback => {
             connect_once(
                 &name,
@@ -899,6 +924,7 @@ async fn connect_server(
                 &client_auth,
                 handler.clone(),
                 ClientLifecycleMode::Initialize,
+                options.mode,
             )
             .await?
         }
@@ -909,6 +935,7 @@ async fn connect_server(
     Ok(connection)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn connect_once(
     name: &str,
     config: &McpTransport,
@@ -917,6 +944,7 @@ async fn connect_once(
     client_auth: &McpClientAuth,
     handler: McpClientHandler,
     lifecycle: ClientLifecycleMode,
+    mode: ConnectionMode,
 ) -> Result<RunningService<RoleClient, McpClientHandler>, ConnectionFailure> {
     let stderr = handler.stderr.clone();
     let result =
@@ -930,7 +958,8 @@ async fn connect_once(
                 let headers = http_headers(name, headers)?;
                 let has_static_authorization = headers.contains_key(&http::header::AUTHORIZATION);
                 let transport_config = StreamableHttpClientTransportConfig::with_uri(url.clone())
-                    .custom_headers(headers);
+                    .custom_headers(headers)
+                    .reinit_on_expired_session(mode == ConnectionMode::Explicit);
                 if let Some(provider_auth) = provider_auth.filter(|_| !has_static_authorization) {
                     let resolver = client_auth.provider_tokens.clone().ok_or_else(|| {
                         McpError::Initialize {
@@ -944,7 +973,7 @@ async fn connect_once(
                     );
                     handler.serve_with_lifecycle(transport, lifecycle).await
                 } else if !has_static_authorization {
-                    let oauth_client = oauth_http_client(name, url, oauth, client_auth)
+                    let oauth_client = oauth_http_client(name, url, oauth, client_auth, mode)
                         .await
                         .map_err(|_| McpError::Initialize {
                             server: name.to_string(),
@@ -954,7 +983,10 @@ async fn connect_once(
                         StreamableHttpClientTransport::with_client(oauth_client, transport_config);
                     handler.serve_with_lifecycle(transport, lifecycle).await
                 } else {
-                    let transport = StreamableHttpClientTransport::from_config(transport_config);
+                    let transport = StreamableHttpClientTransport::with_client(
+                        operation::DispatchHttpClient::default(),
+                        transport_config,
+                    );
                     handler.serve_with_lifecycle(transport, lifecycle).await
                 }
             }
@@ -987,24 +1019,60 @@ async fn connect_once(
         stderr.finish().await;
     }
     result.map_err(|error| {
-        let diagnostic = if error.is_authorization_required() {
-            McpError::AuthorizationRequired(McpAuthorizationRequired {
-                server: name.to_string(),
-                provider: provider_auth.map(|auth| auth.provider.clone()),
-                static_authorization: matches!(config, McpTransport::Http { headers, .. }
-                    if headers.keys().any(|key| key.eq_ignore_ascii_case("authorization"))),
-                challenge: error.auth_challenge().map(str::to_owned),
-            })
-        } else {
-            McpError::Initialize {
-                server: name.to_string(),
-                message: stderr.message(
-                    "handshake failed; check endpoint, credentials and server availability",
-                ),
-            }
-        };
+        let diagnostic = handshake_diagnostic(name, config, provider_auth, &stderr, &error);
         ConnectionFailure::handshake(diagnostic, &error)
     })
+}
+
+fn handshake_diagnostic(
+    name: &str,
+    config: &McpTransport,
+    provider_auth: Option<&McpProviderAuth>,
+    stderr: &crate::diagnostics::StderrCapture,
+    error: &ClientInitializeError,
+) -> McpError {
+    if let Some(challenge) = handshake_auth_challenge(error) {
+        McpError::AuthorizationRequired(McpAuthorizationRequired {
+            server: name.to_string(),
+            provider: provider_auth.map(|auth| auth.provider.clone()),
+            static_authorization: matches!(config, McpTransport::Http { headers, .. }
+                if headers.keys().any(|key| key.eq_ignore_ascii_case("authorization"))),
+            challenge: challenge.map(str::to_owned),
+        })
+    } else {
+        McpError::Initialize {
+            server: name.to_string(),
+            message: stderr.message(
+                "handshake failed; check endpoint, credentials and server availability",
+            ),
+        }
+    }
+}
+
+// Auth readiness follows the actual immutable HTTP wrapper, not configured auth or token
+// presence. The private backend never exposes credentials/challenges through an error chain.
+fn handshake_auth_challenge(error: &ClientInitializeError) -> Option<Option<&str>> {
+    match error {
+        ClientInitializeError::LegacyFallbackFailed { fallback, .. } => {
+            handshake_auth_challenge(fallback)
+        }
+        ClientInitializeError::TransportError { error, .. } => {
+            match error.error.downcast_ref::<HttpError>()? {
+                HttpError::Client(error) => {
+                    let rejection = error.auth_rejection()?;
+                    (rejection.requires_sign_in()
+                        || (rejection.status() == http::StatusCode::UNAUTHORIZED
+                            && rejection.has_auth_provider()))
+                        .then_some(rejection.challenge())
+                }
+                HttpError::Auth(rmcp::transport::auth::AuthError::AuthorizationRequired) => {
+                    Some(None)
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 fn connected_transport(
@@ -1018,6 +1086,9 @@ fn connected_transport(
         metadata: service.peer().peer_info(),
         discovery_revision,
         discovery: discovery::DiscoveryControl::default(),
+        dispatch: Arc::default(),
+        active_requests: Default::default(),
+        draining: Default::default(),
         handler,
         peer: service.peer().clone(),
         cancellation: std::sync::Mutex::new(Some(service.cancellation_token())),
@@ -1173,25 +1244,11 @@ fn http_headers(
 ) -> Result<HashMap<http::HeaderName, http::HeaderValue>, McpError> {
     let invalid = || McpError::InvalidHttp {
         server: name.into(),
-        message: "invalid, duplicate or protocol-owned header",
+        message: "invalid or duplicate header",
     };
     let mut result = HashMap::new();
     for (key, value) in headers {
         let key: http::HeaderName = key.parse().map_err(|_| invalid())?;
-        if matches!(
-            key.as_str(),
-            "host"
-                | "content-length"
-                | "content-type"
-                | "accept"
-                | "connection"
-                | "transfer-encoding"
-                | "mcp-session-id"
-                | "mcp-protocol-version"
-                | "last-event-id"
-        ) {
-            return Err(invalid());
-        }
         let mut value: http::HeaderValue = value.parse().map_err(|_| invalid())?;
         value.set_sensitive(true);
         if result.insert(key, value).is_some() {
@@ -1255,6 +1312,7 @@ impl Plugin for McpToolPlugin {
 
 struct McpTool {
     server: Arc<ConnectedServer>,
+    frozen_remote: McpToolSpec,
     remote_name: String,
     descriptor: McpToolDescriptor,
     output_schema: Value,
@@ -1274,6 +1332,7 @@ impl McpTool {
         } else {
             ToolExecutionMode::Sequential
         };
+        let frozen_remote = remote.clone();
         let remote_name = remote.name.into_owned();
         let title = remote
             .title
@@ -1307,6 +1366,7 @@ impl McpTool {
                 parameters,
             },
             server,
+            frozen_remote,
             remote_name,
             output_schema,
             execution_mode,
@@ -1383,6 +1443,7 @@ impl Tool for McpTool {
 #[derive(Debug)]
 pub(crate) enum McpRequestError {
     Aborted,
+    Control(operation::OperationError),
     Timeout(Duration),
     Disconnected(String),
     Service(rmcp::service::ServiceError),
@@ -1396,7 +1457,10 @@ impl McpRequestError {
 
     pub(crate) fn into_tool_error(self, server: &str) -> ToolError {
         match self {
-            Self::Aborted => ToolError::Aborted,
+            Self::Aborted | Self::Control(operation::OperationError::Cancelled) => {
+                ToolError::Aborted
+            }
+            Self::Control(error) => ToolError::Execution(error.to_string()),
             Self::Timeout(timeout) => ToolError::Execution(format!(
                 "MCP request timed out for server {server} after {} seconds without progress",
                 timeout.as_secs_f64(),
@@ -1419,82 +1483,17 @@ impl ConnectedServer {
                 .metadata()
                 .is_some_and(|info| info.capabilities.resources.is_some())
     }
-
-    pub(crate) async fn request(
-        &self,
-        context: &ToolContext,
-        request: ClientRequest,
-        tool: &str,
-        updates: &ToolUpdateSink,
-    ) -> Result<ServerResult, McpRequestError> {
-        let result = self.request_inner(context, request, tool, updates).await;
-        if matches!(&result, Err(McpRequestError::Service(_))) && self.connection.is_closed() {
-            self.connection.handler.stderr.finish().await;
-            return Err(McpRequestError::Disconnected(
-                self.connection.handler.stderr.message("Connection closed"),
-            ));
-        }
-        result
-    }
-
-    async fn request_inner(
-        &self,
-        context: &ToolContext,
-        request: ClientRequest,
-        tool: &str,
-        updates: &ToolUpdateSink,
-    ) -> Result<ServerResult, McpRequestError> {
-        context
-            .signal()
-            .check()
-            .map_err(|_| McpRequestError::Aborted)?;
-        // Subscribe before sending: a fast server may report progress immediately.
-        let mut progress = self.connection.handler.progress.subscribe();
-        let timeout = self.policy.timeout;
-        let deadline = tokio::time::sleep(timeout);
-        tokio::pin!(deadline);
-        let mut request = tokio::select! {
-            result = self.connection.peer.send_cancellable_request(request, Default::default()) => result.map_err(McpRequestError::Service)?,
-            () = context.signal().wait() => return Err(McpRequestError::Aborted),
-            () = &mut deadline => return Err(McpRequestError::Timeout(timeout)),
-        };
-        loop {
-            tokio::select! {
-                biased;
-                () = context.signal().wait() => {
-                    let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, request.cancel(Some("cancelled by user".into()))).await;
-                    return Err(McpRequestError::Aborted);
-                }
-                result = &mut request.rx => return result
-                    .map_err(|_| McpRequestError::Service(rmcp::service::ServiceError::TransportClosed))?
-                    .map_err(McpRequestError::Service),
-                () = &mut deadline => {
-                    let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, request.cancel(Some("request timeout".into()))).await;
-                    return Err(McpRequestError::Timeout(timeout));
-                }
-                notification = progress.recv() => {
-                    if let Ok(notification) = notification
-                        && notification.progress_token == request.progress_token
-                    {
-                        deadline.as_mut().reset(tokio::time::Instant::now() + timeout);
-                        let text = notification.message.unwrap_or_else(|| match notification.total {
-                            Some(total) => format!("Progress {}/{total}", notification.progress),
-                            None => format!("Progress {}", notification.progress),
-                        });
-                        updates.send(ToolUpdate {
-                            content: vec![ContentBlock::Text(TextContent::new(text))],
-                            details: Some(serde_json::json!({"server": self.name, "tool": tool})),
-                        });
-                    }
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 #[path = "client_contract_tests.rs"]
 mod contract_tests;
+
+#[cfg(test)]
+mod http_tests;
+
+#[cfg(test)]
+mod recovery_tests;
 
 #[cfg(test)]
 mod snapshot_tests;
@@ -1921,13 +1920,15 @@ mod tests {
         );
         assert!(validate_configs(std::slice::from_ref(&config)).is_ok());
         assert!(!format!("{config:?}").contains("secret"));
-        for key in ["Host", "Accept", "Mcp-Session-Id", "bad header"] {
-            assert!(
-                validate_configs(&[config
-                    .clone()
-                    .headers(BTreeMap::from([(key.into(), "secret".into())]))])
-                .is_err()
-            );
+        for key in ["Host", "Accept", "Content-Type", "Mcp-Session-Id", "Mcp-Protocol-Version", "Last-Event-Id"] {
+            assert!(validate_configs(&[config.clone().headers(BTreeMap::from([
+                (key.into(), "secret".into()),
+            ]))]).is_ok());
+        }
+        for (key, value) in [("bad header", "secret"), ("X-Custom", "secret\r\ninvalid")] {
+            assert!(validate_configs(&[config.clone().headers(BTreeMap::from([
+                (key.into(), value.into()),
+            ]))]).is_err());
         }
     }
 

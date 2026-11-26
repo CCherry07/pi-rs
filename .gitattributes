@@ -1,4 +1,0 @@
-# Retain the published crate byte-for-byte and standard unified-diff context.
-# scripts/check-rmcp-patch.py verifies the original and reviewed delta exactly.
-vendor/rmcp-3.3.0/tests/test_json_schema_detection.rs -whitespace
-vendor/rmcp-3.3.0/PI-PATCH.diff -whitespace

@@ -8,6 +8,7 @@ mod mcp_configuration;
 mod mcp_deferred;
 mod mcp_lifecycle;
 mod mcp_notifications;
+mod mcp_recovery;
 mod mcp_reload;
 mod mcp_resources;
 mod mcp_test_support;
