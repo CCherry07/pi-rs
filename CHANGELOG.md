@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.9.0](https://github.com/CCherry07/pi-rs/compare/v0.8.6...v0.9.0) (2026-11-28)
+
+
+### Features
+
+* Add comprehensive tests and enhancements for UI command handling and session transfer ([f12552b](https://github.com/CCherry07/pi-rs/commit/f12552b88164554171b72fa597d5c3f5ab3c5a9e))
+* add PowerShell plugin and enhance existing tools ([a04d677](https://github.com/CCherry07/pi-rs/commit/a04d677970a08c5f8ee7cd38f652f3a12571783d))
+* add private MCP server diagnostics ([b888cd8](https://github.com/CCherry07/pi-rs/commit/b888cd8837bfb1f5135870aa8874c73f737e5e2c))
+* add tests and implement functionality for new model operations ([f09db38](https://github.com/CCherry07/pi-rs/commit/f09db389616d461802bee3481cbc1cbca5128278))
+* Add tests for availability and credential handling in PI plugins ([3e40060](https://github.com/CCherry07/pi-rs/commit/3e4006070f0ccc9514c5dd53e463ee2eea80f407))
+* **ci:** enhance whitespace checking and remove redundant tests ([2b267d1](https://github.com/CCherry07/pi-rs/commit/2b267d103f42afca7a63112a171f859e877e8efe))
+* enhance context handling in extension host and plugins ([4a78bb5](https://github.com/CCherry07/pi-rs/commit/4a78bb565d778432618076d05d5a403f5134252b))
+* Enhance Extension UI with Pi Component Integration ([75f99c3](https://github.com/CCherry07/pi-rs/commit/75f99c3f8bfe43becd8618a3adf78413fee41a56))
+* Enhance MCP tests and implement cleanup trace functionality ([244aa30](https://github.com/CCherry07/pi-rs/commit/244aa3066afefe4b88623d6546a2fb42c8bd7d7f))
+* Enhance OpenRouter plugin with model catalog and support for Anthropics API ([e74d283](https://github.com/CCherry07/pi-rs/commit/e74d2830e02b85d90ea7b9f2e0994257e7f907e8))
+* enhance replay validation and add tests for tool call results ([d260cde](https://github.com/CCherry07/pi-rs/commit/d260cde1d61fe75acb47fceeee8f613ce08d864a))
+* enhance RPC integration, session controls and auth checks ([1fcf29a](https://github.com/CCherry07/pi-rs/commit/1fcf29a2af360e7f50768c070667e9f4d06d7ca1))
+* Implement Codex authentication with token rotation and update OAuth handling ([4e08084](https://github.com/CCherry07/pi-rs/commit/4e08084bba404b47e80836ec6de6c8d64d4cbcfc))
+* improve desktop history, dynamic hooks, and MCP integration ([303fe1e](https://github.com/CCherry07/pi-rs/commit/303fe1eb1c880925f979ae8998515aeef80eac8b))
+* integrate supervised MCP generations and selection recovery ([bbdb115](https://github.com/CCherry07/pi-rs/commit/bbdb115e9f47993ba494d3c49aaca68edcf25c6e))
+* Introduce xAI provider with dynamic model loading ([e74d283](https://github.com/CCherry07/pi-rs/commit/e74d2830e02b85d90ea7b9f2e0994257e7f907e8))
+* js plugin ([#21](https://github.com/CCherry07/pi-rs/issues/21)) ([8df724b](https://github.com/CCherry07/pi-rs/commit/8df724bff3271cc2141eeb6b583b9cb1862926a2))
+* preserve deferred tool selection intent ([0a39767](https://github.com/CCherry07/pi-rs/commit/0a39767851d4a2ef90328a2a78baf0a13cf481c2))
+* reconcile MCP selection across pending discovery ([5051a45](https://github.com/CCherry07/pi-rs/commit/5051a4522abe491f973ea9f77f7ba2a082724321))
+* Refactor AgentHarnessBuilder to own configuration and implement SessionGenerationFactory ([4fc85f7](https://github.com/CCherry07/pi-rs/commit/4fc85f7b6db35b6562aebcbe69ea6c84757da9e6))
+* Refactor code for improved readability and maintainability across multiple files ([b9f873a](https://github.com/CCherry07/pi-rs/commit/b9f873ae2d3efaa9fe584ede5639380cca9735ae))
+* Refactor subagent desktop functionality and remove unused code ([1c9f5fd](https://github.com/CCherry07/pi-rs/commit/1c9f5fda5e4165b8db1100483f4e91c09f45936f))
+* **rpc:** add oracle generation and preflight scripts ([7918843](https://github.com/CCherry07/pi-rs/commit/7918843df7d811a2292cb031620ca3f64e4b90a4))
+* supervise MCP connections and refresh tool inventory ([8f4565c](https://github.com/CCherry07/pi-rs/commit/8f4565cf9d8ba65396fec802c552f11b065db896))
+
+
+### Bug Fixes
+
+* align coding prompts and tools with current Pi ([469b923](https://github.com/CCherry07/pi-rs/commit/469b923f26097141e5e08f4dee3773ea624976b5))
+* preserve owned prompt and tool conformance components ([c88e3bb](https://github.com/CCherry07/pi-rs/commit/c88e3bb787b6cd7c5178e1dd354841c5417a42a5))
+* retry transient MCP connection setup ([dec9962](https://github.com/CCherry07/pi-rs/commit/dec9962891be1107ef26df299367bb7313aa0267))
+
 ## [0.8.6](https://github.com/CCherry07/pi-rs/compare/v0.8.5...v0.8.6) (2026-10-01)
 
 
