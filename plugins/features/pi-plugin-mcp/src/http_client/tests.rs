@@ -61,6 +61,75 @@ fn message(method: &str) -> ClientJsonRpcMessage {
     serde_json::from_value(value).unwrap()
 }
 
+#[test]
+fn sdk_post_request_preserves_inputs_without_private_dispatch_state() {
+    let uri: Arc<str> = Arc::from("https://post.example/mcp");
+    let session: Option<Arc<str>> = Some(Arc::from("post-session"));
+    let headers = HashMap::from([(
+        HeaderName::from_static("x-sdk-post"),
+        HeaderValue::from_static("post-value"),
+    )]);
+    let request = PostRequest::from_sdk(
+        uri.clone(),
+        serde_json::from_value(json!({
+            "jsonrpc": "2.0",
+            "id": 17,
+            "method": "server/discover",
+            "params": {}
+        }))
+        .unwrap(),
+        session.clone(),
+        Some("post-token".into()),
+        headers.clone(),
+        4_097,
+    );
+
+    assert_eq!(request.uri, uri);
+    assert_eq!(
+        serde_json::to_value(request.message).unwrap(),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 17,
+            "method": "server/discover",
+            "params": {}
+        })
+    );
+    assert_eq!(request.session, session);
+    assert_eq!(request.token.as_deref(), Some("post-token"));
+    assert_eq!(request.headers, headers);
+    assert_eq!(request.max_event_bytes, 4_097);
+    assert!(request.dispatch.is_none());
+    assert!(request.session_observer.is_none());
+}
+
+#[test]
+fn sdk_stream_request_preserves_inputs_without_private_authority_state() {
+    let uri: Arc<str> = Arc::from("https://stream.example/mcp");
+    let session: Option<Arc<str>> = Some(Arc::from("stream-session"));
+    let headers = HashMap::from([(
+        HeaderName::from_static("x-sdk-stream"),
+        HeaderValue::from_static("stream-value"),
+    )]);
+    let request = StreamRequest::from_sdk(
+        uri.clone(),
+        session.clone(),
+        Some("stream-cursor".into()),
+        Some("stream-token".into()),
+        headers.clone(),
+        8_193,
+    );
+
+    assert_eq!(request.uri, uri);
+    assert_eq!(request.session, session);
+    assert_eq!(request.cursor.as_deref(), Some("stream-cursor"));
+    assert_eq!(request.token.as_deref(), Some("stream-token"));
+    assert_eq!(request.headers, headers);
+    assert_eq!(request.max_event_bytes, 8_193);
+    assert!(request.control.is_none());
+    assert!(request.dispatch.is_none());
+    assert!(request.session_observer.is_none());
+}
+
 async fn post(
     server: &Server,
     method: &str,

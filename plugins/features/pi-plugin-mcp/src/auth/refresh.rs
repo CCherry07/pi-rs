@@ -128,6 +128,15 @@ impl LocalOAuthClient {
         })
     }
 
+    fn finish_sdk_post(
+        control: Option<&RequestControl>,
+        project: impl FnOnce() -> Result<StreamableHttpPostResponse, HttpError>,
+    ) -> Result<StreamableHttpPostResponse, HttpError> {
+        let projection = provider_response(project());
+        Self::check_completion(control)?;
+        projection
+    }
+
     async fn acquire_token<T>(
         &self,
         control: Option<&RequestControl>,
@@ -503,15 +512,14 @@ impl StreamableHttpClient for LocalOAuthClient {
         auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
-        self.request(&uri, self.control(&message), auth_token, |token| {
-            self.http.post_message(
-                uri.clone(),
-                message.clone(),
-                session_id.clone(),
-                token,
-                custom_headers.clone(),
-            )
-        })
+        self.post_message_with_max_sse_event_size(
+            uri,
+            message,
+            session_id,
+            auth_token,
+            custom_headers,
+            StreamableHttpClientTransportConfig::default().max_sse_event_size,
+        )
         .await
     }
     async fn post_message_with_max_sse_event_size(
@@ -523,17 +531,20 @@ impl StreamableHttpClient for LocalOAuthClient {
         custom_headers: HashMap<HeaderName, HeaderValue>,
         max_sse_event_size: usize,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
-        self.request(&uri, self.control(&message), auth_token, |token| {
-            self.http.post_message_with_max_sse_event_size(
-                uri.clone(),
-                message.clone(),
-                session_id.clone(),
-                token,
-                custom_headers.clone(),
+        let control = self.control(&message);
+        let response = <Self as crate::http_client::HttpClient>::post(
+            self,
+            crate::http_client::PostRequest::from_sdk(
+                uri,
+                message,
+                session_id,
+                auth_token,
+                custom_headers,
                 max_sse_event_size,
-            )
-        })
-        .await
+            ),
+        )
+        .await?;
+        Self::finish_sdk_post(control.as_ref(), || response.into_sdk())
     }
     async fn delete_session(
         &self,
@@ -562,15 +573,14 @@ impl StreamableHttpClient for LocalOAuthClient {
         auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>> {
-        self.request(&uri, None, auth_token, |token| {
-            self.http.get_stream(
-                uri.clone(),
-                session_id.clone(),
-                last_event_id.clone(),
-                token,
-                custom_headers.clone(),
-            )
-        })
+        self.get_stream_with_max_sse_event_size(
+            uri,
+            session_id,
+            last_event_id,
+            auth_token,
+            custom_headers,
+            StreamableHttpClientTransportConfig::default().max_sse_event_size,
+        )
         .await
     }
     async fn get_stream_with_max_sse_event_size(
@@ -582,17 +592,19 @@ impl StreamableHttpClient for LocalOAuthClient {
         custom_headers: HashMap<HeaderName, HeaderValue>,
         max_sse_event_size: usize,
     ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>> {
-        self.request(&uri, None, auth_token, |token| {
-            self.http.get_stream_with_max_sse_event_size(
-                uri.clone(),
-                session_id.clone(),
-                last_event_id.clone(),
-                token,
-                custom_headers.clone(),
+        <Self as crate::http_client::HttpClient>::open_stream(
+            self,
+            crate::http_client::StreamRequest::from_sdk(
+                uri,
+                session_id,
+                last_event_id,
+                auth_token,
+                custom_headers,
                 max_sse_event_size,
-            )
-        })
+            ),
+        )
         .await
+        .map(|response| response.body)
     }
 }
 

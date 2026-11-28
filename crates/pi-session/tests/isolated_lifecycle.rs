@@ -389,18 +389,16 @@ async fn closing_an_isolated_owner_drains_prompt_cleanup() {
         result = &mut close => panic!("close skipped active prompt: {result:?}"),
         () = bounded(probe.settled.notified()) => {}
     }
-    // Losing the first close future must not remove tree membership while a
-    // child is still draining, so the owner can be closed again safely.
+    // Losing the close waiter must not cancel the admitted close transaction.
+    // The detached transaction still drains the child before removing the tree.
     drop(close);
-    let mut close = Box::pin(manager.close_session(&owner));
-    poll_fn(|context| {
-        assert!(close.as_mut().poll(context).is_pending());
-        Poll::Ready(())
+    probe.release_settled.notify_one();
+    bounded(async {
+        while !probe.finished.load(Ordering::SeqCst) || !manager.sessions().is_empty() {
+            tokio::task::yield_now().await;
+        }
     })
     .await;
-    probe.release_settled.notify_one();
-    bounded(close).await.unwrap();
-    assert!(probe.finished.load(Ordering::SeqCst));
     assert!(bounded(wait).await.unwrap().aborted);
     assert!(manager.sessions().is_empty());
     bounded(manager.shutdown()).await.unwrap();

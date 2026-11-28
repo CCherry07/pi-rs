@@ -213,9 +213,8 @@ async fn cancelled_shutdown_retires_the_plugin_context_after_its_final_write() {
         session.plugin_context(pi_plugin::PluginContextScope::Command),
     );
     let shutdown = tokio::spawn({
-        let manager = manager.clone();
-        let owner = owner.clone();
-        async move { manager.close_session(&owner).await }
+        let session = Arc::clone(&session);
+        async move { session.shutdown().await }
     });
     tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
         .await

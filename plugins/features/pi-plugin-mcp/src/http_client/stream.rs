@@ -25,6 +25,27 @@ pub(crate) struct StreamRequest {
 }
 
 impl StreamRequest {
+    pub(crate) fn from_sdk(
+        uri: Arc<str>,
+        session: Option<Arc<str>>,
+        cursor: Option<String>,
+        token: Option<String>,
+        headers: HashMap<HeaderName, HeaderValue>,
+        max_event_bytes: usize,
+    ) -> Self {
+        Self {
+            uri,
+            session,
+            cursor,
+            token,
+            headers,
+            max_event_bytes,
+            control: None,
+            dispatch: None,
+            session_observer: None,
+        }
+    }
+
     pub(crate) fn check_dispatch(&self) -> Result<(), HttpError> {
         self.control.as_ref().map_or(Ok(()), |control| {
             control.check_dispatch().map_err(|error| error.into_http())
