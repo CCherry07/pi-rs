@@ -263,16 +263,14 @@ impl StreamableHttpClient for PiHttpClient {
         custom_headers: HashMap<HeaderName, HeaderValue>,
         max_sse_event_size: usize,
     ) -> Result<StreamableHttpPostResponse, HttpError> {
-        PostRequest {
+        PostRequest::from_sdk(
             uri,
             message,
-            session: session_id,
-            token: auth_token.clone(),
-            headers: custom_headers,
-            max_event_bytes: max_sse_event_size,
-            dispatch: None,
-            session_observer: None,
-        }
+            session_id,
+            auth_token.clone(),
+            custom_headers,
+            max_sse_event_size,
+        )
         .execute(self, auth_token)
         .await?
         .into_sdk()
@@ -307,17 +305,14 @@ impl StreamableHttpClient for PiHttpClient {
         max_sse_event_size: usize,
     ) -> Result<BoxStream<'static, Result<sse_stream::Sse, sse_stream::Error>>, HttpError> {
         // Keep the public SDK stream-only contract; the product worker retains metadata.
-        StreamRequest {
+        StreamRequest::from_sdk(
             uri,
-            session: session_id,
-            cursor: last_event_id,
-            token: auth_token.clone(),
-            headers: custom_headers,
-            max_event_bytes: max_sse_event_size,
-            control: None,
-            dispatch: None,
-            session_observer: None,
-        }
+            session_id,
+            last_event_id,
+            auth_token.clone(),
+            custom_headers,
+            max_sse_event_size,
+        )
         .execute(self, auth_token)
         .await
         .map(|response| response.body)

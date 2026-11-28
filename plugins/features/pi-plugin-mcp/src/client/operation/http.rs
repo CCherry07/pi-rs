@@ -1,11 +1,12 @@
 //! Static-header dispatch fence over the private HTTP backend and stock SDK transport.
 use super::RequestControl;
-use crate::http_client::{PiHttpClient, PiHttpClientError};
+use crate::http_client::{HttpClient, PiHttpClient, PiHttpClientError, PostRequest, StreamRequest};
 use futures::stream::BoxStream;
 use http::{HeaderName, HeaderValue};
 use rmcp::model::ClientJsonRpcMessage;
 use rmcp::transport::streamable_http_client::{
-    StreamableHttpClient, StreamableHttpError, StreamableHttpPostResponse,
+    StreamableHttpClient, StreamableHttpClientTransportConfig, StreamableHttpError,
+    StreamableHttpPostResponse,
 };
 use std::{collections::HashMap, sync::Arc};
 
@@ -44,14 +45,15 @@ impl StreamableHttpClient for DispatchHttpClient {
         auth: Option<String>,
         headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
-        if let Some(control) = RequestControl::from_message(&message) {
-            control
-                .check_dispatch()
-                .map_err(|error| error.into_http())?;
-        }
-        self.0
-            .post_message(uri, message, session, auth, headers)
-            .await
+        self.post_message_with_max_sse_event_size(
+            uri,
+            message,
+            session,
+            auth,
+            headers,
+            StreamableHttpClientTransportConfig::default().max_sse_event_size,
+        )
+        .await
     }
 
     async fn post_message_with_max_sse_event_size(
@@ -63,14 +65,12 @@ impl StreamableHttpClient for DispatchHttpClient {
         headers: HashMap<HeaderName, HeaderValue>,
         max: usize,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
-        if let Some(control) = RequestControl::from_message(&message) {
-            control
-                .check_dispatch()
-                .map_err(|error| error.into_http())?;
-        }
-        self.0
-            .post_message_with_max_sse_event_size(uri, message, session, auth, headers, max)
-            .await
+        <Self as HttpClient>::post(
+            self,
+            PostRequest::from_sdk(uri, message, session, auth, headers, max),
+        )
+        .await?
+        .into_sdk()
     }
 
     async fn delete_session(
@@ -94,7 +94,15 @@ impl StreamableHttpClient for DispatchHttpClient {
         BoxStream<'static, Result<sse_stream::Sse, sse_stream::Error>>,
         StreamableHttpError<Self::Error>,
     > {
-        self.0.get_stream(uri, session, last, auth, headers).await
+        self.get_stream_with_max_sse_event_size(
+            uri,
+            session,
+            last,
+            auth,
+            headers,
+            StreamableHttpClientTransportConfig::default().max_sse_event_size,
+        )
+        .await
     }
 
     async fn get_stream_with_max_sse_event_size(
@@ -109,8 +117,11 @@ impl StreamableHttpClient for DispatchHttpClient {
         BoxStream<'static, Result<sse_stream::Sse, sse_stream::Error>>,
         StreamableHttpError<Self::Error>,
     > {
-        self.0
-            .get_stream_with_max_sse_event_size(uri, session, last, auth, headers, max)
-            .await
+        <Self as HttpClient>::open_stream(
+            self,
+            StreamRequest::from_sdk(uri, session, last, auth, headers, max),
+        )
+        .await
+        .map(|response| response.body)
     }
 }

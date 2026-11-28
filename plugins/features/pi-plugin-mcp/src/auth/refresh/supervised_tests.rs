@@ -945,6 +945,27 @@ async fn provider_rejection_matrix_marks_actual_provider_without_callback_refres
     }
 }
 
+#[test]
+fn oauth_sdk_post_projection_preserves_authoritative_completion_error_precedence() {
+    let (guard, _gate, control) = operation();
+    let projection = || {
+        drop(guard);
+        Err(StreamableHttpError::Client(PiHttpClientError::protocol(
+            "projection failed",
+        )))
+    };
+
+    let Err(StreamableHttpError::Io(error)) =
+        LocalOAuthClient::finish_sdk_post(Some(&control), projection)
+    else {
+        panic!("authoritative completion must override the projection error")
+    };
+    assert_eq!(
+        error.get_ref().unwrap().downcast_ref::<OperationError>(),
+        Some(&OperationError::Cancelled)
+    );
+}
+
 #[tokio::test]
 async fn completed_oauth_json_drains_after_supersession_but_not_authoritative_cancellation() {
     for kind in kinds() {

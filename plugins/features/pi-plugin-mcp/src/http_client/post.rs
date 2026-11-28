@@ -71,6 +71,26 @@ impl PostResponse {
 }
 
 impl PostRequest {
+    pub(crate) fn from_sdk(
+        uri: Arc<str>,
+        message: ClientJsonRpcMessage,
+        session: Option<Arc<str>>,
+        token: Option<String>,
+        headers: HashMap<HeaderName, HeaderValue>,
+        max_event_bytes: usize,
+    ) -> Self {
+        Self {
+            uri,
+            message,
+            session,
+            token,
+            headers,
+            max_event_bytes,
+            dispatch: None,
+            session_observer: None,
+        }
+    }
+
     /// Runs after credential acquisition, preserving the existing POST dispatch fence.
     pub(crate) async fn execute(
         &self,

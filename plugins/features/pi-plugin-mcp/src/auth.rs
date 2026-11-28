@@ -27,13 +27,16 @@ use rmcp::transport::auth::{
     StoredAuthorizationState, StoredCredentials,
 };
 use rmcp::transport::streamable_http_client::{
-    SseError, StreamableHttpClient, StreamableHttpError, StreamableHttpPostResponse,
+    SseError, StreamableHttpClient, StreamableHttpClientTransportConfig, StreamableHttpError,
+    StreamableHttpPostResponse,
 };
 use serde::{Deserialize, Serialize};
 use sse_stream::Sse;
 
 use crate::client::operation::{ConnectionMode, RequestControl};
-use crate::http_client::{HttpError, PiHttpClient, PiHttpClientError};
+use crate::http_client::{
+    HttpClient, HttpError, PiHttpClient, PiHttpClientError, PostRequest, StreamRequest,
+};
 use crate::{McpOAuthClientRegistration, McpOAuthConfig};
 
 const MAX_STORE_BYTES: u64 = 1024 * 1024;
@@ -989,12 +992,15 @@ impl StreamableHttpClient for ProviderAuthClient {
         _auth_header: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
-        let token = self.token_for_message(&message).await?;
-        let result = self
-            .inner
-            .post_message(uri, message, session_id, token, custom_headers)
-            .await;
-        provider_response(result)
+        self.post_message_with_max_sse_event_size(
+            uri,
+            message,
+            session_id,
+            None,
+            custom_headers,
+            StreamableHttpClientTransportConfig::default().max_sse_event_size,
+        )
+        .await
     }
 
     async fn post_message_with_max_sse_event_size(
@@ -1006,19 +1012,19 @@ impl StreamableHttpClient for ProviderAuthClient {
         custom_headers: HashMap<HeaderName, HeaderValue>,
         max_sse_event_size: usize,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
-        let token = self.token_for_message(&message).await?;
-        let result = self
-            .inner
-            .post_message_with_max_sse_event_size(
+        let response = <Self as HttpClient>::post(
+            self,
+            PostRequest::from_sdk(
                 uri,
                 message,
                 session_id,
-                token,
+                None,
                 custom_headers,
                 max_sse_event_size,
-            )
-            .await;
-        provider_response(result)
+            ),
+        )
+        .await?;
+        provider_response(response.into_sdk())
     }
 
     async fn delete_session(
@@ -1049,17 +1055,15 @@ impl StreamableHttpClient for ProviderAuthClient {
         _auth_header: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>> {
-        let result = self
-            .inner
-            .get_stream(
-                uri,
-                session_id,
-                last_event_id,
-                self.token().await?,
-                custom_headers,
-            )
-            .await;
-        provider_response(result)
+        self.get_stream_with_max_sse_event_size(
+            uri,
+            session_id,
+            last_event_id,
+            None,
+            custom_headers,
+            StreamableHttpClientTransportConfig::default().max_sse_event_size,
+        )
+        .await
     }
 
     async fn get_stream_with_max_sse_event_size(
@@ -1071,17 +1075,18 @@ impl StreamableHttpClient for ProviderAuthClient {
         custom_headers: HashMap<HeaderName, HeaderValue>,
         max_sse_event_size: usize,
     ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>> {
-        let result = self
-            .inner
-            .get_stream_with_max_sse_event_size(
+        <Self as HttpClient>::open_stream(
+            self,
+            StreamRequest::from_sdk(
                 uri,
                 session_id,
                 last_event_id,
-                self.token().await?,
+                None,
                 custom_headers,
                 max_sse_event_size,
-            )
-            .await;
-        provider_response(result)
+            ),
+        )
+        .await
+        .map(|response| response.body)
     }
 }
