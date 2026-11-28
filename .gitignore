@@ -41,6 +41,12 @@ docs/
 !/docs/rpc-conformance.md
 !/docs/tool-prompt-comparison-notes.md
 !/docs/mcp-post-auth-gap-matrix.md
+!/docs/superpowers/
+/docs/superpowers/*
+!/docs/superpowers/specs/
+!/docs/superpowers/specs/*.md
+!/docs/superpowers/plans/
+!/docs/superpowers/plans/*.md
 !/docs/research/
 /docs/research/*
 !/docs/research/prompt-legacy-comparison.md
