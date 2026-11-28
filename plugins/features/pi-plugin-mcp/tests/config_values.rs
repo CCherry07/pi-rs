@@ -116,7 +116,16 @@ async fn trusted_live_inspection_rereads_helpers_and_static_authorization_wins()
         fs::write(dir.path().join("token"), format!("{value}\n")).unwrap();
         library.credential_watch().unwrap();
         let report = library.inspect().await;
-        assert_eq!(report.servers[0].state, McpServerState::NeedsAuth);
+        // Static Authorization bypasses OAuth; a rejected header is a failure, not
+        // an actionable OAuth challenge (legacy McpServerConnection.needsSignIn).
+        assert_eq!(report.servers[0].state, McpServerState::Failed);
+        assert!(
+            report.servers[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("handshake failed")
+        );
         let serialized = serde_json::to_string(&report).unwrap();
         assert!(!serialized.contains(value));
     }

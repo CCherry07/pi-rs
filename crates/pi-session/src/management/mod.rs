@@ -14,7 +14,7 @@ pub use replacement::{
     AgentSessionReplacement, PreparedSessionGeneration, SessionGenerationActivation,
     SessionGenerationFactory, SessionGenerationOverlay, SessionGenerationRequest,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -25,7 +25,8 @@ use std::task::{Context, Poll};
 use self::paths::comparable_path;
 use crate::{AgentSessionInitialState, ForkPosition, SessionError};
 use isolated::IsolatedSessionRegistry;
-use replacement::{ResolvedSessionTransition, SessionSlot, SessionTarget};
+use pi_core::{AbortHandle, AbortSignal};
+use replacement::{ReplacementCancellation, ResolvedSessionTransition, SessionSlot, SessionTarget};
 
 /// Owns and coordinates multiple active Pi sessions.
 ///
@@ -42,6 +43,8 @@ struct MultiSessionManagerInner {
     isolated_sessions: IsolatedSessionRegistry,
     operation_gate: Arc<tokio::sync::RwLock<()>>,
     closed: AtomicBool,
+    shutdown: AbortHandle,
+    shutdown_signal: AbortSignal,
 }
 
 /// A cloneable handle to one frontend-owned Pi session.
@@ -140,6 +143,7 @@ struct ManagedSessionReplacement {
     owner: PiSession,
     manager: Arc<MultiSessionManagerInner>,
     _operation: tokio::sync::OwnedRwLockWriteGuard<()>,
+    cancellation: ReplacementCancellation,
 }
 
 /// Polls a lifecycle transaction in place and detaches only its unfinished
@@ -258,6 +262,7 @@ impl MultiSessionManager {
     where
         F: SessionGenerationFactory + 'static,
     {
+        let (shutdown, shutdown_signal) = AbortHandle::new();
         Self {
             inner: Arc::new(MultiSessionManagerInner {
                 factory: Arc::new(factory),
@@ -265,6 +270,8 @@ impl MultiSessionManager {
                 isolated_sessions: IsolatedSessionRegistry::default(),
                 operation_gate: Arc::new(tokio::sync::RwLock::new(())),
                 closed: AtomicBool::new(false),
+                shutdown,
+                shutdown_signal,
             }),
         }
     }
@@ -320,16 +327,31 @@ impl MultiSessionManager {
     }
 
     pub async fn close_session(&self, session: &PiSession) -> Result<(), MultiSessionManagerError> {
-        let _operation = self.inner.operation_gate.write().await;
         self.inner.ensure_open()?;
-        self.inner.close_session_tree_locked(session).await
+        self.inner.ensure_managed(session)?;
+        // A descendant may be inside replacement while holding the manager-wide lifecycle gate.
+        // Mark and cancel the whole currently-owned tree before waiting for that gate, otherwise
+        // owner close and the descendant replacement can wait on each other indefinitely.
+        self.inner.request_close_session_tree(session);
+        let manager = Arc::clone(&self.inner);
+        let session = session.clone();
+        complete_on_drop(async move {
+            let _operation = manager.operation_gate.write().await;
+            manager.ensure_open()?;
+            manager.close_session_tree_locked(&session).await
+        })
+        .await
     }
 
     pub async fn shutdown(&self) -> Result<(), MultiSessionManagerError> {
+        // Signal before waiting for the lifecycle gate. A replacement may be inside a new
+        // generation's session_start callback while holding that gate; cancellation drops the
+        // unpublished candidate and lets shutdown acquire the gate instead of deadlocking.
+        self.inner.closed.store(true, Ordering::Release);
+        self.inner.shutdown.abort();
         let _operation = self.inner.operation_gate.write().await;
         // Drain on repeated calls too: a previously cancelled shutdown future
         // must leave the registry's task ownership available for the next caller.
-        self.inner.closed.store(true, Ordering::Release);
         self.inner.isolated_sessions.drain_all().await;
         let sessions = self
             .inner
@@ -460,6 +482,21 @@ impl MultiSessionManagerInner {
         Ok(session)
     }
 
+    fn request_close_session_tree(&self, root: &PiSession) {
+        let mut pending = vec![root.clone()];
+        let mut seen = HashSet::new();
+        while let Some(session) = pending.pop() {
+            if !seen.insert(session.registration_id().to_owned()) {
+                continue;
+            }
+            session.slot.request_close();
+            pending.extend(
+                self.isolated_sessions
+                    .owned_sessions(session.registration_id()),
+            );
+        }
+    }
+
     async fn close_session_tree_locked(
         &self,
         root: &PiSession,
@@ -508,10 +545,12 @@ impl ManagedSessionReplacement {
         let operation = Arc::clone(&manager.operation_gate).write_owned().await;
         manager.ensure_open()?;
         manager.ensure_managed(&owner)?;
+        let cancellation = owner.slot.begin_managed_replacement()?;
         Ok(Self {
             owner,
             manager,
             _operation: operation,
+            cancellation,
         })
     }
 
@@ -529,7 +568,15 @@ impl ManagedSessionReplacement {
         request: SessionReplacementRequest,
     ) -> Result<AgentSessionReplacement, MultiSessionManagerError> {
         let transition = request.resolve(&self.owner, &self.manager)?;
-        let replacement = self.owner.slot.transition(transition).await?;
+        let replacement = tokio::select! {
+            result = self.owner.slot.transition(transition) => result?,
+            () = self.manager.shutdown_signal.wait() => {
+                return Err(MultiSessionManagerError::Closed);
+            }
+            () = self.cancellation.signal().wait() => {
+                return Err(SessionError::Closed.into());
+            }
+        };
         if replacement == AgentSessionReplacement::Replaced {
             self.owner
                 .current()

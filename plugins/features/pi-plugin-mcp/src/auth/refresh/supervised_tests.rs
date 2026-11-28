@@ -250,9 +250,7 @@ impl Fixture {
         &self,
         control: Option<RequestControl>,
         id: u64,
-    ) -> tokio::task::JoinHandle<
-        Result<StreamableHttpPostResponse, HttpError>,
-    > {
+    ) -> tokio::task::JoinHandle<Result<StreamableHttpPostResponse, HttpError>> {
         let client = self.client.clone();
         let uri = Arc::<str>::from(self.url.clone());
         tokio::spawn(async move {
@@ -393,7 +391,13 @@ async fn spent_allowance_does_not_join_refresh_and_proactive_renewal_on_later_pa
 async fn every_oauth_mode_observes_exact_plain_and_scope_rejection_matrix() {
     for kind in kinds() {
         for mode in [ConnectionMode::Explicit, ConnectionMode::Supervised] {
-            for reply in [Reply::Plain401, Reply::Challenge, Reply::Plain403, Reply::Scope401, Reply::Scope403] {
+            for reply in [
+                Reply::Plain401,
+                Reply::Challenge,
+                Reply::Plain403,
+                Reply::Scope401,
+                Reply::Scope403,
+            ] {
                 let f = Fixture::new(kind, mode).await;
                 f.plan.lock().unwrap().push_back(reply);
                 let (_guard, _gate, control) = operation();
@@ -402,7 +406,9 @@ async fn every_oauth_mode_observes_exact_plain_and_scope_rejection_matrix() {
                 if reactive {
                     assert!(result.is_ok());
                 } else {
-                    let Err(StreamableHttpError::Client(error)) = result else { panic!("expected private rejection") };
+                    let Err(StreamableHttpError::Client(error)) = result else {
+                        panic!("expected private rejection")
+                    };
                     if matches!(reply, Reply::Plain403) {
                         assert_eq!(error.status(), Some(http::StatusCode::FORBIDDEN));
                         assert!(error.auth_rejection().is_none());
@@ -416,14 +422,20 @@ async fn every_oauth_mode_observes_exact_plain_and_scope_rejection_matrix() {
                 }
                 assert_eq!(f.exchanges.load(Ordering::SeqCst), usize::from(reactive));
                 assert_eq!(f.posts.load(Ordering::SeqCst), 1 + usize::from(reactive));
-                assert_eq!(control.try_recover().unwrap(), !(reactive && mode == ConnectionMode::Supervised));
+                assert_eq!(
+                    control.try_recover().unwrap(),
+                    !(reactive && mode == ConnectionMode::Supervised)
+                );
             }
         }
     }
     let f = Fixture::new(ClientKind::Public, ConnectionMode::Supervised).await;
     f.store.sign_out("fixture", &f.url).unwrap();
     let (_guard, _gate, control) = operation();
-    let Err(StreamableHttpError::Client(error)) = f.call(Some(control.clone()), 1).await.unwrap() else { panic!("expected grant rejection") };
+    let Err(StreamableHttpError::Client(error)) = f.call(Some(control.clone()), 1).await.unwrap()
+    else {
+        panic!("expected grant rejection")
+    };
     let auth = error.auth_rejection().unwrap();
     assert!(auth.requires_sign_in() && auth.has_auth_provider());
     assert_eq!(f.exchanges.load(Ordering::SeqCst), 0);
@@ -432,7 +444,7 @@ async fn every_oauth_mode_observes_exact_plain_and_scope_rejection_matrix() {
 
 #[tokio::test]
 async fn explicit_fixed_uses_same_coordinator_and_contextless_supervised_call_is_separately_bounded()
-{
+ {
     let explicit = Fixture::new(ClientKind::Fixed, ConnectionMode::Explicit).await;
     assert_eq!(explicit.client.mode, ConnectionMode::Explicit);
     explicit.reject();
@@ -531,9 +543,18 @@ async fn callers_share_exchange_but_independently_reserve_before_joining_and_nev
         let (_guard, _gate, control) = operation();
         let result = f.call(Some(control.clone()), 1).await.unwrap();
         if unchanged {
-            assert!(result.is_ok(), "successful unchanged-token refresh must replay");
+            assert!(
+                result.is_ok(),
+                "successful unchanged-token refresh must replay"
+            );
         } else {
-            assert!(!result.err().unwrap().to_string().contains("private fixture secret"));
+            assert!(
+                !result
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("private fixture secret")
+            );
         }
         assert!(!control.try_recover().unwrap());
         assert_eq!(f.posts.load(Ordering::SeqCst), 1 + usize::from(unchanged));
@@ -613,11 +634,30 @@ async fn cancelled_proactive_waiter_saves_rotation_without_initial_dispatch_or_s
         Some(&OperationError::Cancelled)
     );
     assert_eq!(f.posts.load(Ordering::SeqCst), 0);
-    let before = f.store.read(|document| serde_json::to_value(document).unwrap()).unwrap();
-    f.client.delete_session(Arc::from(f.url.as_str()), Arc::from("cleanup"), None, HashMap::new()).await.unwrap();
-    assert_eq!(*f.cleanup_headers.lock().unwrap(), vec![Some("Bearer fresh-1".into())]);
+    let before = f
+        .store
+        .read(|document| serde_json::to_value(document).unwrap())
+        .unwrap();
+    f.client
+        .delete_session(
+            Arc::from(f.url.as_str()),
+            Arc::from("cleanup"),
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        *f.cleanup_headers.lock().unwrap(),
+        vec![Some("Bearer fresh-1".into())]
+    );
     assert_eq!(f.exchanges.load(Ordering::SeqCst), 1);
-    assert_eq!(f.store.read(|document| serde_json::to_value(document).unwrap()).unwrap(), before);
+    assert_eq!(
+        f.store
+            .read(|document| serde_json::to_value(document).unwrap())
+            .unwrap(),
+        before
+    );
     let stored = CredentialStore::load(&f.store.for_server("fixture", &f.url).unwrap())
         .await
         .unwrap()
@@ -649,11 +689,10 @@ async fn exhausted_caller_does_not_wait_for_another_callers_shared_reactive_exch
     f.reject_release.add_permits(1);
     permit(&f.entered, 1).await;
     f.reject_release.add_permits(1);
-    let second_call =
-        tokio::time::timeout(std::time::Duration::from_secs(3), second_call)
-            .await
-            .unwrap()
-            .unwrap();
+    let second_call = tokio::time::timeout(std::time::Duration::from_secs(3), second_call)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(matches!(
         second_call,
         Err(StreamableHttpError::Client(error)) if error.auth_rejection().is_some()
@@ -721,8 +760,7 @@ fn provider_call(
     resolver: Arc<ProbeResolver>,
     control: RequestControl,
     max_sse: bool,
-) -> tokio::task::JoinHandle<Result<StreamableHttpPostResponse, HttpError>>
-{
+) -> tokio::task::JoinHandle<Result<StreamableHttpPostResponse, HttpError>> {
     let uri = Arc::<str>::from(f.url.clone());
     tokio::spawn(async move {
         let client = ProviderAuthClient::new("fixture".into(), resolver);
@@ -794,7 +832,8 @@ async fn provider_token_await_checks_dispatch_without_refresh_or_replay() {
 }
 
 #[tokio::test]
-async fn unchanged_token_success_replays_once_in_every_oauth_mode_and_second_rejection_is_terminal() {
+async fn unchanged_token_success_replays_once_in_every_oauth_mode_and_second_rejection_is_terminal()
+{
     for kind in kinds() {
         for mode in [ConnectionMode::Explicit, ConnectionMode::Supervised] {
             for second in [Reply::Auto, Reply::Plain401, Reply::Scope403] {
@@ -806,14 +845,22 @@ async fn unchanged_token_success_replays_once_in_every_oauth_mode_and_second_rej
                 if matches!(second, Reply::Auto) {
                     assert!(result.is_ok());
                 } else {
-                    let Err(StreamableHttpError::Client(error)) = result else { panic!("expected raw replay rejection") };
+                    let Err(StreamableHttpError::Client(error)) = result else {
+                        panic!("expected raw replay rejection")
+                    };
                     let auth = error.auth_rejection().unwrap();
                     assert!(auth.has_auth_provider());
-                    assert!(!auth.requires_sign_in(), "second response must not run another callback");
+                    assert!(
+                        !auth.requires_sign_in(),
+                        "second response must not run another callback"
+                    );
                 }
                 assert_eq!(f.exchanges.load(Ordering::SeqCst), 1);
                 assert_eq!(f.posts.load(Ordering::SeqCst), 2);
-                assert_eq!(control.try_recover().unwrap(), mode == ConnectionMode::Explicit);
+                assert_eq!(
+                    control.try_recover().unwrap(),
+                    mode == ConnectionMode::Explicit
+                );
             }
         }
     }
@@ -852,7 +899,9 @@ async fn proactive_failure_uses_current_store_and_never_resurrects_logout_or_ove
             assert_eq!(f.posts.load(Ordering::SeqCst), 1);
             assert!(control.try_recover().unwrap());
             let token = CredentialStore::load(&f.store.for_server("fixture", &f.url).unwrap())
-                .await.unwrap().and_then(|stored| stored.token_response)
+                .await
+                .unwrap()
+                .and_then(|stored| stored.token_response)
                 .map(|token| token.access_token().secret().to_owned());
             assert_eq!(token.as_deref(), expected);
         }
@@ -862,12 +911,24 @@ async fn proactive_failure_uses_current_store_and_never_resurrects_logout_or_ove
 #[tokio::test]
 async fn provider_rejection_matrix_marks_actual_provider_without_callback_refresh_or_replay() {
     for max_sse in [false, true] {
-        for reply in [Reply::Plain401, Reply::Challenge, Reply::Plain403, Reply::Scope401, Reply::Scope403] {
+        for reply in [
+            Reply::Plain401,
+            Reply::Challenge,
+            Reply::Plain403,
+            Reply::Scope401,
+            Reply::Scope403,
+        ] {
             let f = Fixture::new(ClientKind::Fixed, ConnectionMode::Supervised).await;
             f.plan.lock().unwrap().push_back(reply);
             let resolver = Arc::new(ProbeResolver::default());
             let (_guard, _gate, control) = operation();
-            let Err(StreamableHttpError::Client(error)) = provider_call(&f, resolver.clone(), control.clone(), max_sse).await.unwrap() else { panic!("expected provider rejection") };
+            let Err(StreamableHttpError::Client(error)) =
+                provider_call(&f, resolver.clone(), control.clone(), max_sse)
+                    .await
+                    .unwrap()
+            else {
+                panic!("expected provider rejection")
+            };
             if matches!(reply, Reply::Plain403) {
                 assert!(error.auth_rejection().is_none());
                 assert_eq!(error.status(), Some(http::StatusCode::FORBIDDEN));
@@ -898,17 +959,31 @@ async fn completed_oauth_json_drains_after_supersession_but_not_authoritative_ca
                 let call = f.call(Some(control), 1);
                 permit(&f.body_entered, 1).await;
                 let expected = match invalidation {
-                    0 => { gate.supersede(); None }
-                    1 => { drop(guard); Some(OperationError::Cancelled) }
-                    _ => { gate.retire(); Some(OperationError::AuthorityRetired) }
+                    0 => {
+                        gate.supersede();
+                        None
+                    }
+                    1 => {
+                        drop(guard);
+                        Some(OperationError::Cancelled)
+                    }
+                    _ => {
+                        gate.retire();
+                        Some(OperationError::AuthorityRetired)
+                    }
                 };
                 f.body_release.add_permits(1);
                 let result = call.await.unwrap();
                 match expected {
                     None => assert!(result.is_ok(), "admitted OAuth response must drain"),
                     Some(expected) => {
-                        let Err(StreamableHttpError::Io(error)) = result else { panic!("expected authoritative fence") };
-                        assert_eq!(error.get_ref().unwrap().downcast_ref::<OperationError>(), Some(&expected));
+                        let Err(StreamableHttpError::Io(error)) = result else {
+                            panic!("expected authoritative fence")
+                        };
+                        assert_eq!(
+                            error.get_ref().unwrap().downcast_ref::<OperationError>(),
+                            Some(&expected)
+                        );
                     }
                 }
                 assert_eq!(f.posts.load(Ordering::SeqCst), 1 + usize::from(replay));
@@ -921,9 +996,18 @@ async fn completed_oauth_json_drains_after_supersession_but_not_authoritative_ca
 #[tokio::test]
 async fn acquired_before_abort_is_cached_for_cleanup_without_authorizing_initial_or_replay_post() {
     for initial in [false, true] {
-        for token in [None, Some(String::new()), Some("acquired-before-abort".to_owned())] {
+        for token in [
+            None,
+            Some(String::new()),
+            Some("acquired-before-abort".to_owned()),
+        ] {
             let f = Fixture::new(ClientKind::Public, ConnectionMode::Supervised).await;
-            assert!(f.client.state.remember_token(Some("older-token".into())).is_ok());
+            assert!(
+                f.client
+                    .state
+                    .remember_token(Some("older-token".into()))
+                    .is_ok()
+            );
             let (guard, _gate, control) = operation();
             let entered = Arc::new(Semaphore::new(0));
             let release = Arc::new(Semaphore::new(0));
@@ -936,17 +1020,23 @@ async fn acquired_before_abort_is_cached_for_cleanup_without_authorizing_initial
                 let release = release.clone();
                 async move {
                     if initial {
-                        client.acquire_token(Some(&control), async move {
-                            entered.add_permits(1);
-                            release.acquire().await.unwrap().forget();
-                            Ok((token, 0_u64))
-                        }).await.map(|_| ())
+                        client
+                            .acquire_token(Some(&control), async move {
+                                entered.add_permits(1);
+                                release.acquire().await.unwrap().forget();
+                                Ok((token, 0_u64))
+                            })
+                            .await
+                            .map(|_| ())
                     } else {
-                        client.acquire_token(Some(&control), async move {
-                            entered.add_permits(1);
-                            release.acquire().await.unwrap().forget();
-                            Ok((token, ()))
-                        }).await.map(|_| ())
+                        client
+                            .acquire_token(Some(&control), async move {
+                                entered.add_permits(1);
+                                release.acquire().await.unwrap().forget();
+                                Ok((token, ()))
+                            })
+                            .await
+                            .map(|_| ())
                     }
                 }
             });
@@ -954,20 +1044,49 @@ async fn acquired_before_abort_is_cached_for_cleanup_without_authorizing_initial
             drop(guard);
             release.add_permits(1);
             let result = call.await.unwrap();
-            let Err(StreamableHttpError::Io(error)) = result else { panic!("acquisition cannot grant dispatch") };
-            assert_eq!(error.get_ref().unwrap().downcast_ref::<OperationError>(), Some(&OperationError::Cancelled));
-            let before = f.store.read(|document| serde_json::to_value(document).unwrap()).unwrap();
-            f.client.delete_session(Arc::from(f.url.as_str()), Arc::from("cleanup"), None, HashMap::new()).await.unwrap();
-            assert_eq!(*f.cleanup_headers.lock().unwrap(), vec![token.filter(|token| !token.is_empty()).map(|token| format!("Bearer {token}"))]);
+            let Err(StreamableHttpError::Io(error)) = result else {
+                panic!("acquisition cannot grant dispatch")
+            };
+            assert_eq!(
+                error.get_ref().unwrap().downcast_ref::<OperationError>(),
+                Some(&OperationError::Cancelled)
+            );
+            let before = f
+                .store
+                .read(|document| serde_json::to_value(document).unwrap())
+                .unwrap();
+            f.client
+                .delete_session(
+                    Arc::from(f.url.as_str()),
+                    Arc::from("cleanup"),
+                    None,
+                    HashMap::new(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                *f.cleanup_headers.lock().unwrap(),
+                vec![
+                    token
+                        .filter(|token| !token.is_empty())
+                        .map(|token| format!("Bearer {token}"))
+                ]
+            );
             assert_eq!(f.posts.load(Ordering::SeqCst), 0);
             assert_eq!(f.exchanges.load(Ordering::SeqCst), 0);
-            assert_eq!(f.store.read(|document| serde_json::to_value(document).unwrap()).unwrap(), before);
+            assert_eq!(
+                f.store
+                    .read(|document| serde_json::to_value(document).unwrap())
+                    .unwrap(),
+                before
+            );
         }
     }
 }
 
 #[tokio::test]
-async fn oauth_cleanup_keeps_old_acquisition_after_login_change_but_never_exports_it_to_replacement() {
+async fn oauth_cleanup_keeps_old_acquisition_after_login_change_but_never_exports_it_to_replacement()
+ {
     for logout in [false, true] {
         let f = Fixture::new(ClientKind::Public, ConnectionMode::Explicit).await;
         assert!(f.call(None, 1).await.unwrap().is_ok());
@@ -977,30 +1096,106 @@ async fn oauth_cleanup_keeps_old_acquisition_after_login_change_but_never_export
             save(&f.store, &f.url, &f.client_id, "new-login", 3600);
             *f.accepted.lock().unwrap() = "new-login".into();
         }
-        let before = f.store.read(|document| serde_json::to_value(document).unwrap()).unwrap();
-        f.client.delete_session(Arc::from(f.url.as_str()), Arc::from("cleanup"), None, HashMap::new()).await.unwrap();
-        assert_eq!(f.store.read(|document| serde_json::to_value(document).unwrap()).unwrap(), before);
-        assert_eq!(*f.cleanup_headers.lock().unwrap(), vec![Some("Bearer initial".into())]);
+        let before = f
+            .store
+            .read(|document| serde_json::to_value(document).unwrap())
+            .unwrap();
+        f.client
+            .delete_session(
+                Arc::from(f.url.as_str()),
+                Arc::from("cleanup"),
+                None,
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            f.store
+                .read(|document| serde_json::to_value(document).unwrap())
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            *f.cleanup_headers.lock().unwrap(),
+            vec![Some("Bearer initial".into())]
+        );
 
         let settings = McpOAuthConfig {
             client_id: Some(f.client_id.clone()),
             auth_server_metadata_url: Some(format!("{}/metadata", f.url.trim_end_matches("/mcp"))),
             ..Default::default()
         };
-        let replacement = oauth_http_client("fixture", &f.url, Some(&settings),
-            &McpClientAuth::default().with_oauth_store(f.store.clone()), ConnectionMode::Explicit).await.unwrap();
-        let before = f.store.read(|document| serde_json::to_value(document).unwrap()).unwrap();
-        replacement.delete_session(Arc::from(f.url.as_str()), Arc::from("replacement"), None, HashMap::new()).await.unwrap();
-        assert_eq!(f.store.read(|document| serde_json::to_value(document).unwrap()).unwrap(), before);
-        assert_eq!(*f.cleanup_headers.lock().unwrap(), vec![Some("Bearer initial".into()), None]);
+        let replacement = oauth_http_client(
+            "fixture",
+            &f.url,
+            Some(&settings),
+            &McpClientAuth::default().with_oauth_store(f.store.clone()),
+            ConnectionMode::Explicit,
+        )
+        .await
+        .unwrap();
+        let before = f
+            .store
+            .read(|document| serde_json::to_value(document).unwrap())
+            .unwrap();
+        replacement
+            .delete_session(
+                Arc::from(f.url.as_str()),
+                Arc::from("replacement"),
+                None,
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            f.store
+                .read(|document| serde_json::to_value(document).unwrap())
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            *f.cleanup_headers.lock().unwrap(),
+            vec![Some("Bearer initial".into()), None]
+        );
 
         // A separate active replacement reads current storage, never either closed cache.
-        let active = oauth_http_client("fixture", &f.url, Some(&settings),
-            &McpClientAuth::default().with_oauth_store(f.store.clone()), ConnectionMode::Explicit).await.unwrap();
-        let message = serde_json::from_value(json!({"jsonrpc":"2.0","id":2,"method":"ping"})).unwrap();
-        assert_eq!(active.post_message(Arc::from(f.url.as_str()), message, None, None, HashMap::new()).await.is_ok(), !logout);
-        active.delete_session(Arc::from(f.url.as_str()), Arc::from("active-replacement"), None, HashMap::new()).await.unwrap();
-        assert_eq!(f.cleanup_headers.lock().unwrap().last().unwrap().as_deref(), (!logout).then_some("Bearer new-login"));
+        let active = oauth_http_client(
+            "fixture",
+            &f.url,
+            Some(&settings),
+            &McpClientAuth::default().with_oauth_store(f.store.clone()),
+            ConnectionMode::Explicit,
+        )
+        .await
+        .unwrap();
+        let message =
+            serde_json::from_value(json!({"jsonrpc":"2.0","id":2,"method":"ping"})).unwrap();
+        assert_eq!(
+            active
+                .post_message(
+                    Arc::from(f.url.as_str()),
+                    message,
+                    None,
+                    None,
+                    HashMap::new()
+                )
+                .await
+                .is_ok(),
+            !logout
+        );
+        active
+            .delete_session(
+                Arc::from(f.url.as_str()),
+                Arc::from("active-replacement"),
+                None,
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            f.cleanup_headers.lock().unwrap().last().unwrap().as_deref(),
+            (!logout).then_some("Bearer new-login")
+        );
         assert_eq!(f.exchanges.load(Ordering::SeqCst), 0);
     }
 }
@@ -1012,21 +1207,50 @@ async fn provider_cleanup_caches_before_abort_and_replacement_starts_empty() {
     resolver.hold.store(true, Ordering::SeqCst);
     let client = ProviderAuthClient::new("fixture".into(), resolver.clone());
     let (guard, _gate, control) = operation();
-    let mut message: ClientJsonRpcMessage = serde_json::from_value(json!({"jsonrpc":"2.0","id":1,"method":"ping"})).unwrap();
-    if let ClientJsonRpcMessage::Request(request) = &mut message { control.attach(&mut request.request); }
+    let mut message: ClientJsonRpcMessage =
+        serde_json::from_value(json!({"jsonrpc":"2.0","id":1,"method":"ping"})).unwrap();
+    if let ClientJsonRpcMessage::Request(request) = &mut message {
+        control.attach(&mut request.request);
+    }
     let call = tokio::spawn({
         let client = client.clone();
         let uri = Arc::from(f.url.as_str());
-        async move { client.post_message(uri, message, None, None, HashMap::new()).await }
+        async move {
+            client
+                .post_message(uri, message, None, None, HashMap::new())
+                .await
+        }
     });
     permit(&resolver.entered, 1).await;
     drop(guard);
     resolver.release.add_permits(1);
-    assert!(matches!(call.await.unwrap(), Err(StreamableHttpError::Io(_))));
-    client.delete_session(Arc::from(f.url.as_str()), Arc::from("cleanup"), None, HashMap::new()).await.unwrap();
+    assert!(matches!(
+        call.await.unwrap(),
+        Err(StreamableHttpError::Io(_))
+    ));
+    client
+        .delete_session(
+            Arc::from(f.url.as_str()),
+            Arc::from("cleanup"),
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
     let replacement = ProviderAuthClient::new("fixture".into(), resolver.clone());
-    replacement.delete_session(Arc::from(f.url.as_str()), Arc::from("replacement"), None, HashMap::new()).await.unwrap();
-    assert_eq!(*f.cleanup_headers.lock().unwrap(), vec![Some("Bearer initial".into()), None]);
+    replacement
+        .delete_session(
+            Arc::from(f.url.as_str()),
+            Arc::from("replacement"),
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        *f.cleanup_headers.lock().unwrap(),
+        vec![Some("Bearer initial".into()), None]
+    );
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
     assert_eq!(f.posts.load(Ordering::SeqCst), 0);
     assert_eq!(f.exchanges.load(Ordering::SeqCst), 0);
@@ -1036,20 +1260,44 @@ async fn provider_cleanup_caches_before_abort_and_replacement_starts_empty() {
 async fn terminal_cleanup_absorbs_poisoned_cache_without_lookup_or_dispatch() {
     let f = Fixture::new(ClientKind::Public, ConnectionMode::Supervised).await;
     let state = f.client.state.clone();
-    assert!(std::thread::spawn(move || {
-        let _guard = state.last_token.lock().unwrap();
-        panic!("poison cleanup cache");
-    }).join().is_err());
-    f.client.delete_session(Arc::from(f.url.as_str()), Arc::from("cleanup"), None, HashMap::new()).await.unwrap();
+    assert!(
+        std::thread::spawn(move || {
+            let _guard = state.last_token.lock().unwrap();
+            panic!("poison cleanup cache");
+        })
+        .join()
+        .is_err()
+    );
+    f.client
+        .delete_session(
+            Arc::from(f.url.as_str()),
+            Arc::from("cleanup"),
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
 
     let resolver = Arc::new(ProbeResolver::default());
     let provider = ProviderAuthClient::new("fixture".into(), resolver.clone());
     let cache = provider.last_token.clone();
-    assert!(std::thread::spawn(move || {
-        let _guard = cache.lock().unwrap();
-        panic!("poison cleanup cache");
-    }).join().is_err());
-    provider.delete_session(Arc::from(f.url.as_str()), Arc::from("cleanup"), None, HashMap::new()).await.unwrap();
+    assert!(
+        std::thread::spawn(move || {
+            let _guard = cache.lock().unwrap();
+            panic!("poison cleanup cache");
+        })
+        .join()
+        .is_err()
+    );
+    provider
+        .delete_session(
+            Arc::from(f.url.as_str()),
+            Arc::from("cleanup"),
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
     assert!(f.cleanup_headers.lock().unwrap().is_empty());
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 0);
     assert_eq!(f.posts.load(Ordering::SeqCst), 0);
@@ -1061,15 +1309,40 @@ async fn cleanup_reuses_last_token_without_oauth_refresh_or_provider_resolution(
     let f = Fixture::new(ClientKind::Fixed, ConnectionMode::Explicit).await;
     assert!(f.call(None, 1).await.unwrap().is_ok());
     save(&f.store, &f.url, &f.client_id, "expired", 0);
-    f.client.delete_session(Arc::from(f.url.as_str()), Arc::from("cleanup"), None, HashMap::new()).await.unwrap();
+    f.client
+        .delete_session(
+            Arc::from(f.url.as_str()),
+            Arc::from("cleanup"),
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
     assert_eq!(f.exchanges.load(Ordering::SeqCst), 0);
     assert_eq!(f.posts.load(Ordering::SeqCst), 1);
 
     let resolver = Arc::new(ProbeResolver::default());
     let provider = ProviderAuthClient::new("fixture".into(), resolver.clone());
     let message = serde_json::from_value(json!({"jsonrpc":"2.0","id":2,"method":"ping"})).unwrap();
-    provider.post_message(Arc::from(f.url.as_str()), message, None, None, HashMap::new()).await.unwrap();
-    provider.delete_session(Arc::from(f.url.as_str()), Arc::from("cleanup"), None, HashMap::new()).await.unwrap();
+    provider
+        .post_message(
+            Arc::from(f.url.as_str()),
+            message,
+            None,
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    provider
+        .delete_session(
+            Arc::from(f.url.as_str()),
+            Arc::from("cleanup"),
+            None,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
     assert_eq!(f.exchanges.load(Ordering::SeqCst), 0);
 }

@@ -27,6 +27,9 @@ impl Plugin for McpProductPlugin {
         self.pool
             .plugin_with_tool_search_registration(self.library.register_tool_search)
             .register(context)?;
+        if !self.library.register_management {
+            return Ok(());
+        }
         let command = Arc::new(McpCommand {
             library: self.library.clone(),
             rows: self.rows.clone(),
@@ -45,6 +48,9 @@ impl Plugin for McpProductPlugin {
         self.library.publish_generation();
         if let Some(diagnostic) = self.library.selection_diagnostic() {
             context.ui.notify(NoticeLevel::Warning, diagnostic)?;
+        }
+        for notice in self.library.extension_overrides() {
+            context.ui.notify(NoticeLevel::Warning, notice.clone())?;
         }
         for name in self.library.pending_direct_servers() {
             context.ui.notify(NoticeLevel::Info, format!("MCP server {name:?} is still connecting; its direct tools are unavailable in this generation and can appear after the next idle refresh."))?;
@@ -302,6 +308,7 @@ fn scope_label(scope: McpScope) -> &'static str {
     match scope {
         McpScope::Global => "global",
         McpScope::Project => "project",
+        McpScope::Extension => "extension",
     }
 }
 
@@ -371,7 +378,7 @@ impl Command for McpCommand {
                     .unwrap_or_else(|e| e)
             ),
             "" | "status" => {
-                let rows = self
+                let mut rows = self
                     .rows
                     .iter()
                     .map(|row| {
@@ -399,8 +406,14 @@ impl Command for McpCommand {
                             }
                         )
                     })
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                    .collect::<Vec<_>>();
+                rows.extend(
+                    self.library
+                        .extension_overrides()
+                        .iter()
+                        .map(|notice| format!("overridden · {notice}")),
+                );
+                let rows = rows.join("\n");
                 format!(
                     "MCP generation snapshot\n{}\n/mcp paths · /mcp test <name> · /mcp reload",
                     if rows.is_empty() {

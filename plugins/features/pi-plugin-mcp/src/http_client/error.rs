@@ -62,16 +62,26 @@ pub(crate) struct PiHttpClientError {
 
 enum FailureKind {
     Request(reqwest::Error),
-    Http { status: StatusCode, origin: RequestOrigin },
+    Http {
+        status: StatusCode,
+        origin: RequestOrigin,
+    },
     Auth(AuthRejection),
+    // The RPC was already accepted. Its stream's failure is not rejection of the POST.
+    ResponseStream(Box<super::HttpError>),
     MissingReply,
     Protocol(&'static str),
-    BodyLimit { kind: &'static str, limit: usize },
+    BodyLimit {
+        kind: &'static str,
+        limit: usize,
+    },
 }
 
 impl PiHttpClientError {
     pub(crate) fn request(error: reqwest::Error) -> Self {
-        Self { kind: FailureKind::Request(error) }
+        Self {
+            kind: FailureKind::Request(error),
+        }
     }
 
     pub(crate) fn status(&self) -> Option<StatusCode> {
@@ -79,7 +89,24 @@ impl PiHttpClientError {
             FailureKind::Request(error) => error.status(),
             FailureKind::Http { status, .. } => Some(*status),
             FailureKind::Auth(rejection) => Some(rejection.status()),
-            FailureKind::MissingReply | FailureKind::Protocol(_) | FailureKind::BodyLimit { .. } => None,
+            FailureKind::ResponseStream(_)
+            | FailureKind::MissingReply
+            | FailureKind::Protocol(_)
+            | FailureKind::BodyLimit { .. } => None,
+        }
+    }
+
+    pub(crate) fn response_stream(cause: super::HttpError) -> Self {
+        Self {
+            kind: FailureKind::ResponseStream(Box::new(cause)),
+        }
+    }
+
+    /// Preserve typed evidence without granting application replay or auth-state authority.
+    pub(crate) fn response_stream_cause(&self) -> Option<&super::HttpError> {
+        match &self.kind {
+            FailureKind::ResponseStream(cause) => Some(cause),
+            _ => None,
         }
     }
 
@@ -98,8 +125,10 @@ impl PiHttpClientError {
     /// Evidence for the separately bounded setup fallback, never a general retry signal.
     pub(crate) fn discover_rejection(&self) -> Option<StatusCode> {
         match self.kind {
-            FailureKind::Http { status, origin: RequestOrigin::DiscoverUnattached }
-                if matches!(status, StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND) => Some(status),
+            FailureKind::Http {
+                status,
+                origin: RequestOrigin::DiscoverUnattached,
+            } if matches!(status, StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND) => Some(status),
             _ => None,
         }
     }
@@ -127,10 +156,16 @@ impl PiHttpClientError {
     }
 
     pub(super) fn response(status: StatusCode, origin: RequestOrigin) -> Self {
-        Self { kind: FailureKind::Http { status, origin } }
+        Self {
+            kind: FailureKind::Http { status, origin },
+        }
     }
 
-    pub(super) fn auth(status: StatusCode, challenge: Option<String>, insufficient_scope: bool) -> Self {
+    pub(super) fn auth(
+        status: StatusCode,
+        challenge: Option<String>,
+        insufficient_scope: bool,
+    ) -> Self {
         Self {
             kind: FailureKind::Auth(AuthRejection {
                 status,
@@ -143,7 +178,9 @@ impl PiHttpClientError {
     }
 
     pub(super) fn missing_reply() -> Self {
-        Self { kind: FailureKind::MissingReply }
+        Self {
+            kind: FailureKind::MissingReply,
+        }
     }
 
     #[cfg(test)]
@@ -151,12 +188,16 @@ impl PiHttpClientError {
         matches!(self.kind, FailureKind::MissingReply)
     }
 
-    pub(super) fn protocol(message: &'static str) -> Self {
-        Self { kind: FailureKind::Protocol(message) }
+    pub(crate) fn protocol(message: &'static str) -> Self {
+        Self {
+            kind: FailureKind::Protocol(message),
+        }
     }
 
     pub(super) fn limit(kind: &'static str, limit: usize) -> Self {
-        Self { kind: FailureKind::BodyLimit { kind, limit } }
+        Self {
+            kind: FailureKind::BodyLimit { kind, limit },
+        }
     }
 }
 
@@ -170,11 +211,20 @@ impl fmt::Display for PiHttpClientError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.kind {
             FailureKind::Request(_) => f.write_str("MCP HTTP request failed"),
-            FailureKind::Http { status, .. } => write!(f, "MCP HTTP response status {}", status.as_u16()),
-            FailureKind::Auth(rejection) => write!(f, "MCP authentication rejected (HTTP {})", rejection.status.as_u16()),
+            FailureKind::Http { status, .. } => {
+                write!(f, "MCP HTTP response status {}", status.as_u16())
+            }
+            FailureKind::Auth(rejection) => write!(
+                f,
+                "MCP authentication rejected (HTTP {})",
+                rejection.status.as_u16()
+            ),
+            FailureKind::ResponseStream(_) => f.write_str("MCP response stream failed"),
             FailureKind::MissingReply => f.write_str("MCP request accepted without a response"),
             FailureKind::Protocol(message) => f.write_str(message),
-            FailureKind::BodyLimit { kind, limit } => write!(f, "MCP {kind} exceeded {limit} bytes"),
+            FailureKind::BodyLimit { kind, limit } => {
+                write!(f, "MCP {kind} exceeded {limit} bytes")
+            }
         }
     }
 }

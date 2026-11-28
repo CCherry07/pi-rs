@@ -12,6 +12,9 @@ use rmcp::service::{NotificationContext, RequestContext};
 use rmcp::{ClientHandler, ErrorData, RoleClient};
 use tokio::sync::{broadcast, watch};
 
+#[cfg(test)]
+pub(crate) mod testing;
+
 #[derive(Clone)]
 pub(crate) struct McpClientHandler {
     roots: Vec<Root>,
@@ -19,6 +22,8 @@ pub(crate) struct McpClientHandler {
     pub(crate) stderr: StderrCapture,
     pub(crate) progress: broadcast::Sender<ProgressNotificationParam>,
     pub(crate) tools_changed: watch::Sender<u64>,
+    #[cfg(test)]
+    pub(crate) callbacks: Option<testing::Callbacks>,
 }
 
 impl McpClientHandler {
@@ -42,11 +47,21 @@ impl McpClientHandler {
             stderr: StderrCapture::default(),
             progress: broadcast::channel(64).0,
             tools_changed: watch::channel(0).0,
+            #[cfg(test)]
+            callbacks: None,
         }
     }
 }
 
 impl ClientHandler for McpClientHandler {
+    #[cfg(test)]
+    async fn ping(&self, context: RequestContext<RoleClient>) -> Result<(), ErrorData> {
+        match &self.callbacks {
+            Some(callbacks) => callbacks.ping(context).await,
+            None => ().ping(context).await,
+        }
+    }
+
     fn get_info(&self) -> ClientInfo {
         let mut info = ClientInfo::default();
         info.capabilities.roots = Some(Default::default());
@@ -83,6 +98,10 @@ impl ClientHandler for McpClientHandler {
         params: ProgressNotificationParam,
         _context: NotificationContext<RoleClient>,
     ) {
+        #[cfg(test)]
+        if let Some(callbacks) = &self.callbacks {
+            callbacks.progress(params.progress);
+        }
         // A stalled frontend must never block protocol response processing.
         let _ = self.progress.send(params);
     }

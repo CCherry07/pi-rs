@@ -5,6 +5,7 @@ mod tool_result_patch_tests;
 pub use context::*;
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -53,6 +54,8 @@ pub struct JsGenerationManifest {
     #[serde(default)]
     pub provider_registrations: Vec<JsProviderRegistration>,
     #[serde(default)]
+    pub mcp_server_registrations: Vec<JsMcpServerRegistration>,
+    #[serde(default)]
     pub session_plugins: Vec<JsSessionPluginManifest>,
     #[serde(default)]
     pub diagnostics: Vec<JsExtensionDiagnostic>,
@@ -65,6 +68,70 @@ pub struct JsProviderRegistration {
     pub path: String,
     pub name: String,
     pub config: Value,
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsMcpServerRegistration {
+    pub plugin_id: String,
+    pub path: String,
+    pub name: String,
+    pub config: Value,
+}
+
+impl fmt::Debug for JsMcpServerRegistration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("JsMcpServerRegistration")
+            .field("plugin_id", &self.plugin_id)
+            .field("path", &self.path)
+            .field("name", &self.name)
+            .field("config", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum JsMcpServerMutation {
+    Register {
+        extension_path: String,
+        name: String,
+        config: Value,
+    },
+    Unregister {
+        extension_path: String,
+        name: String,
+    },
+}
+
+impl fmt::Debug for JsMcpServerMutation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Register {
+                extension_path,
+                name,
+                ..
+            } => formatter
+                .debug_struct("Register")
+                .field("extension_path", extension_path)
+                .field("name", name)
+                .field("config", &"<redacted>")
+                .finish(),
+            Self::Unregister {
+                extension_path,
+                name,
+            } => formatter
+                .debug_struct("Unregister")
+                .field("extension_path", extension_path)
+                .field("name", name)
+                .finish(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +167,10 @@ pub struct JsGenerationRequest {
     pub workspace: Option<pi_core::WorkspaceSpec>,
     #[serde(default)]
     pub flag_values: std::collections::BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_server_mutations: Vec<JsMcpServerMutation>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mcp_servers_changed: bool,
 }
 
 const fn default_output_pad() -> u8 {
@@ -108,6 +179,10 @@ const fn default_output_pad() -> u8 {
 
 const fn default_show_images() -> bool {
     true
+}
+
+const fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -291,6 +366,8 @@ mod wire_tests {
                     "fixture".to_string(),
                     json!(true),
                 )]),
+                mcp_server_mutations: Vec::new(),
+                mcp_servers_changed: false,
             },
         })
         .unwrap();
@@ -302,8 +379,26 @@ mod wire_tests {
         assert_eq!(request["mode"], "print");
         assert_eq!(request["cwd"], "/workspace");
         assert_eq!(request["flagValues"]["fixture"], true);
+        assert!(request.get("mcpServerMutations").is_none());
+        assert!(request.get("mcpServersChanged").is_none());
         assert!(request.get("explicitPaths").is_none());
         assert!(request.get("discoverExtensions").is_none());
+    }
+
+    #[test]
+    fn mcp_mutation_wire_uses_extension_path_and_redacts_debug_config() {
+        let mutation = super::JsMcpServerMutation::Register {
+            extension_path: "/extensions/example.ts".to_string(),
+            name: "docs".to_string(),
+            config: json!({"headers":{"Authorization":"secret-marker"}}),
+        };
+        let wire = serde_json::to_value(&mutation).unwrap();
+        assert_eq!(wire["type"], "register");
+        assert_eq!(wire["extensionPath"], "/extensions/example.ts");
+        assert_eq!(wire["name"], "docs");
+        let debug = format!("{mutation:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("secret-marker"));
     }
 
     #[test]
@@ -666,6 +761,7 @@ pub struct JsPluginGeneration {
     plugins: Vec<Arc<dyn Plugin>>,
     provider_plugins: Vec<Arc<dyn ProviderPlugin>>,
     provider_registrations: Vec<JsProviderRegistration>,
+    mcp_server_registrations: Vec<JsMcpServerRegistration>,
     diagnostics: Vec<JsExtensionDiagnostic>,
 }
 
@@ -687,6 +783,7 @@ impl JsPluginGeneration {
             agent_plugins,
             provider_plugins,
             provider_registrations,
+            mcp_server_registrations,
             session_plugins,
             diagnostics,
         } = manifest;
@@ -699,6 +796,7 @@ impl JsPluginGeneration {
             &agent_plugins,
             &provider_plugins,
             &provider_registrations,
+            &mcp_server_registrations,
             &session_plugins,
         )?;
         let context_batch = Arc::new(JsContextHooks {
@@ -922,6 +1020,7 @@ impl JsPluginGeneration {
             plugins: agent_plugins,
             provider_plugins,
             provider_registrations,
+            mcp_server_registrations,
             diagnostics,
         })
     }
@@ -936,6 +1035,10 @@ impl JsPluginGeneration {
 
     pub fn provider_registrations(&self) -> &[JsProviderRegistration] {
         &self.provider_registrations
+    }
+
+    pub fn mcp_server_registrations(&self) -> &[JsMcpServerRegistration] {
+        &self.mcp_server_registrations
     }
 
     pub fn diagnostics(&self) -> &[JsExtensionDiagnostic] {
@@ -1089,6 +1192,7 @@ fn validate_manifest(
     agent_plugins: &[JsAgentPluginManifest],
     provider_plugins: &[JsProviderPluginManifest],
     provider_registrations: &[JsProviderRegistration],
+    mcp_server_registrations: &[JsMcpServerRegistration],
     session_plugins: &[JsSessionPluginManifest],
 ) -> Result<(), JsPluginError> {
     if generation_id.trim().is_empty() {
@@ -1145,6 +1249,44 @@ fn validate_manifest(
             return Err(JsPluginError::InvalidManifest(format!(
                 "provider registration {}/{} config must be an object",
                 registration.plugin_id, registration.name
+            )));
+        }
+    }
+    let mut mcp_names = HashSet::new();
+    for registration in mcp_server_registrations {
+        if registration.plugin_id.trim().is_empty() {
+            return Err(JsPluginError::InvalidManifest(
+                "MCP server registration pluginId must not be empty".to_string(),
+            ));
+        }
+        if !agent_ids.contains(registration.plugin_id.as_str()) {
+            return Err(JsPluginError::InvalidManifest(format!(
+                "MCP server registration {} has no matching agent plugin owner",
+                registration.plugin_id
+            )));
+        }
+        if registration.path.trim().is_empty() {
+            return Err(JsPluginError::InvalidManifest(format!(
+                "MCP server registration {} path must not be empty",
+                registration.plugin_id
+            )));
+        }
+        if registration.name.trim().is_empty() {
+            return Err(JsPluginError::InvalidManifest(format!(
+                "MCP server registration {} name must not be empty",
+                registration.plugin_id
+            )));
+        }
+        if !registration.config.is_object() {
+            return Err(JsPluginError::InvalidManifest(format!(
+                "MCP server registration {}/{} config must be an object",
+                registration.plugin_id, registration.name
+            )));
+        }
+        if !mcp_names.insert(registration.name.as_str()) {
+            return Err(JsPluginError::InvalidManifest(format!(
+                "duplicate MCP server registration: {}",
+                registration.name
             )));
         }
     }

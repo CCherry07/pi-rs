@@ -58,7 +58,7 @@ pub enum ExtensionContextQuery {
 }
 
 /// JavaScript-only fire-and-forget operation decoded at the NAPI boundary.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
@@ -116,6 +116,15 @@ pub enum ExtensionContextNotification {
         config: Value,
     },
     UnregisterProvider {
+        name: String,
+    },
+    RegisterMcpServer {
+        extension_path: String,
+        name: String,
+        config: Value,
+    },
+    UnregisterMcpServer {
+        extension_path: String,
         name: String,
     },
 }
@@ -312,6 +321,15 @@ pub fn execute_context_notification(
         ExtensionContextNotification::UnregisterProvider { name } => {
             access.unregister_provider(name)
         }
+        ExtensionContextNotification::RegisterMcpServer {
+            extension_path,
+            name,
+            config,
+        } => access.register_mcp_server(extension_path, name, config),
+        ExtensionContextNotification::UnregisterMcpServer {
+            extension_path,
+            name,
+        } => access.unregister_mcp_server(extension_path, name),
     }
 }
 
@@ -524,6 +542,20 @@ mod tests {
                 "type": "uiNotify",
                 "message": "Extension notice",
                 "level": "warning",
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(ExtensionContextNotification::RegisterMcpServer {
+                extension_path: "/extensions/example.ts".to_string(),
+                name: "docs".to_string(),
+                config: json!({"command":"fixture"}),
+            })
+            .unwrap(),
+            json!({
+                "type": "registerMcpServer",
+                "extensionPath": "/extensions/example.ts",
+                "name": "docs",
+                "config": {"command":"fixture"},
             })
         );
     }

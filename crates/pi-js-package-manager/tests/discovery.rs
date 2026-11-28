@@ -28,6 +28,7 @@ fn request(
         project_trusted,
         explicit_sources,
         discover_extensions,
+        offline: false,
     }
 }
 

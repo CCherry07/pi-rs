@@ -259,11 +259,16 @@ async fn reserved_eval_artifacts_are_neither_copied_nor_reported_as_source_chang
         std::fs::write(workspace.join("src/source.rs"), "source after").unwrap();
     });
     let case = CodingEvalCase::new(
-        EvalCase::new("workspace/reserved-eval-artifacts", "ignore evaluation artifacts")
-            .fixture(EvalFixture::Directory(fixture.clone()))
-            .step(EvalStep::PromptTemplate("workspace={{workspace}}".to_string()))
-            .grader(ExactOutputGrader::new("Paris"))
-            .active_tools(Vec::<String>::new()),
+        EvalCase::new(
+            "workspace/reserved-eval-artifacts",
+            "ignore evaluation artifacts",
+        )
+        .fixture(EvalFixture::Directory(fixture.clone()))
+        .step(EvalStep::PromptTemplate(
+            "workspace={{workspace}}".to_string(),
+        ))
+        .grader(ExactOutputGrader::new("Paris"))
+        .active_tools(Vec::<String>::new()),
     );
     let run = product
         .harness
@@ -274,7 +279,10 @@ async fn reserved_eval_artifacts_are_neither_copied_nor_reported_as_source_chang
     assert!(run.passed, "{run:#?}");
     let capture = product.capture.lock().unwrap();
     assert_eq!(capture.requests.len(), 1);
-    assert!(capture.workspace_probe.is_none(), "workspace probe did not run");
+    assert!(
+        capture.workspace_probe.is_none(),
+        "workspace probe did not run"
+    );
     let observed = &run.observation.workspace_changes;
     assert_eq!(observed.len(), 1, "{observed:#?}");
     assert_eq!(observed[0].path, "src/source.rs");
@@ -285,7 +293,10 @@ async fn reserved_eval_artifacts_are_neither_copied_nor_reported_as_source_chang
     assert!(observed[0].after_sha256.is_some());
     assert_ne!(observed[0].before_sha256, observed[0].after_sha256);
     for (relative, contents) in SOURCES {
-        assert_eq!(std::fs::read_to_string(fixture.join(relative)).unwrap(), contents);
+        assert_eq!(
+            std::fs::read_to_string(fixture.join(relative)).unwrap(),
+            contents
+        );
     }
     for relative in ARTIFACTS {
         assert_eq!(

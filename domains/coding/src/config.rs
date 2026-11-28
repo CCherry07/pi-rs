@@ -28,6 +28,10 @@ pub struct Config {
     pub native_plugins: Vec<PathBuf>,
     pub extensions: Vec<String>,
     pub discover_extensions: bool,
+    /// CLI-level ceiling that keeps every registered tool inactive for this run.
+    pub disable_tools: bool,
+    /// Skip startup operations that may access the network.
+    pub offline: bool,
     /// Explicit skill files/directories, retained independently of discovered settings on reload.
     pub explicit_skill_paths: Vec<PathBuf>,
     /// ACP clients supply their own transient MCP servers instead of local files.
@@ -73,6 +77,8 @@ impl Config {
             native_plugins: Vec::new(),
             extensions: Vec::new(),
             discover_extensions: true,
+            disable_tools: false,
+            offline: false,
             explicit_skill_paths: Vec::new(),
             load_mcp_config: true,
             extension_flag_values: BTreeMap::new(),
@@ -104,6 +110,7 @@ impl Config {
             project_trusted,
             explicit_sources: self.extensions.clone(),
             discover_extensions: self.discover_extensions,
+            offline: self.offline,
         }
     }
 

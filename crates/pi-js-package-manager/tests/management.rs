@@ -16,6 +16,7 @@ fn request(root: &TempDir, trusted: bool) -> ResolveRequest {
         project_trusted: trusted,
         explicit_sources: Vec::new(),
         discover_extensions: true,
+        offline: false,
     }
 }
 

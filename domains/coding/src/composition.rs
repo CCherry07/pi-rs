@@ -277,21 +277,25 @@ impl GenerationComponents<'_> {
                 ),
                 thinking_budgets: settings_thinking_budgets(&config.runtime_settings),
                 block_images: config.runtime_settings.images.block_images,
-                active_tools: BUILTIN_TOOL_NAMES
-                    .into_iter()
-                    .filter(|tool| match *tool {
-                        "memory" | "session_search" => memory_enabled,
-                        "spawn_agent" | "send_message" | "followup_task" | "wait_agent"
-                        | "interrupt_agent" | "list_agents" => features.subagents,
-                        "schedule" => features.schedule,
-                        "read" | "bash" | "edit" | "write" => true,
-                        "hashline_edit" => features.hashline,
-                        _ => false,
-                    })
-                    .map(str::to_string)
-                    .collect(),
+                active_tools: if config.disable_tools {
+                    Vec::new()
+                } else {
+                    BUILTIN_TOOL_NAMES
+                        .into_iter()
+                        .filter(|tool| match *tool {
+                            "memory" | "session_search" => memory_enabled,
+                            "spawn_agent" | "send_message" | "followup_task" | "wait_agent"
+                            | "interrupt_agent" | "list_agents" => features.subagents,
+                            "schedule" => features.schedule,
+                            "read" | "bash" | "edit" | "write" => true,
+                            "hashline_edit" => features.hashline,
+                            _ => false,
+                        })
+                        .map(str::to_string)
+                        .collect()
+                },
                 cwd: config.cwd.clone(),
-                max_tool_iterations: Some(100),
+                max_tool_iterations: None,
                 steering_mode: settings_queue_mode(config.runtime_settings.steering_mode),
                 follow_up_mode: settings_queue_mode(config.runtime_settings.follow_up_mode),
                 ..AgentOptions::default()
@@ -308,16 +312,24 @@ impl GenerationComponents<'_> {
             .into_iter()
             .map(|spec| spec.name)
             .collect::<HashSet<_>>();
-        let mut active_tools = config
-            .runtime_settings
-            .default_tools
-            .as_ref()
-            .map_or_else(|| runtime.active_tools(), |configured| configured.clone());
+        let mut active_tools = if config.disable_tools {
+            Vec::new()
+        } else {
+            config
+                .runtime_settings
+                .default_tools
+                .as_ref()
+                .map_or_else(|| runtime.active_tools(), |configured| configured.clone())
+        };
         active_tools.retain(|tool| registered_tools.contains(tool));
         let mut seen = active_tools.iter().cloned().collect::<HashSet<_>>();
-        for spec in runtime.default_tool_specs() {
-            if !BUILTIN_TOOL_NAMES.contains(&spec.name.as_str()) && seen.insert(spec.name.clone()) {
-                active_tools.push(spec.name);
+        if !config.disable_tools {
+            for spec in runtime.default_tool_specs() {
+                if !BUILTIN_TOOL_NAMES.contains(&spec.name.as_str())
+                    && seen.insert(spec.name.clone())
+                {
+                    active_tools.push(spec.name);
+                }
             }
         }
         runtime.set_active_tools(active_tools)?;

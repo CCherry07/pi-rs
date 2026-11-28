@@ -181,6 +181,31 @@ async fn headers_resolve_at_connection_and_oauth_secret_waits_for_explicit_auth(
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn caller_header_case_variants_resolve_individually_and_fold_in_source_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = parse_config(
+        r#"{"mcpServers":{"fixture":{"url":"https://example.invalid/mcp","headers":{"x-order":"!printf a >> calls; printf second","X-ORDER":"!printf b >> calls; printf first"}}}}"#,
+    )
+    .unwrap()
+    .pop()
+    .unwrap();
+
+    let resolved = config
+        .into_connection_definition()
+        .unwrap()
+        .resolve_for_connect(context(dir.path()), true, AbortHandle::new().1)
+        .await
+        .unwrap();
+    let McpTransport::Http { headers, .. } = resolved.transport else {
+        panic!("HTTP")
+    };
+    assert_eq!(headers.len(), 1);
+    assert_eq!(headers["x-order"], "second, first");
+    assert_eq!(std::fs::read(dir.path().join("calls")).unwrap(), b"ab");
+}
+
 #[tokio::test]
 async fn static_authorization_and_disabled_entries_do_not_resolve_oauth_helpers() {
     let dir = tempfile::tempdir().unwrap();

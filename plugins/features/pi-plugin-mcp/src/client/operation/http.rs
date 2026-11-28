@@ -12,6 +12,27 @@ use std::{collections::HashMap, sync::Arc};
 #[derive(Clone, Default)]
 pub(crate) struct DispatchHttpClient(PiHttpClient);
 
+impl crate::http_client::HttpClient for DispatchHttpClient {
+    async fn post(
+        &self,
+        request: crate::http_client::PostRequest,
+    ) -> Result<crate::http_client::PostResponse, crate::http_client::HttpError> {
+        if let Some(control) = RequestControl::from_message(&request.message) {
+            control
+                .check_dispatch()
+                .map_err(|error| error.into_http())?;
+        }
+        request.execute(&self.0, request.token.clone()).await
+    }
+
+    async fn open_stream(
+        &self,
+        request: crate::http_client::StreamRequest,
+    ) -> Result<crate::http_client::StreamResponse, crate::http_client::HttpError> {
+        request.execute(&self.0, request.token.clone()).await
+    }
+}
+
 impl StreamableHttpClient for DispatchHttpClient {
     type Error = PiHttpClientError;
 

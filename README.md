@@ -95,6 +95,18 @@ npm install --prefix packages/pi
 ./scripts/pi-dev
 ```
 
+Install launchers that keep `pi` and `pi-rs` on the artifacts built from this checkout:
+
+```bash
+./scripts/install-local-pi.sh
+
+# Build an optimized native binding before installing the launchers
+./scripts/install-local-pi.sh --release
+```
+
+The command rebuilds the TypeScript launcher and host-native NAPI binding, installs `pi-rs` in
+`~/.local/bin`, and points `pi` at that launcher. Set `INSTALL_DIR` to use another bin directory.
+
 The examples below use the installed `pi` command. From a source checkout, replace `pi` with
 `./scripts/pi-dev`.
 

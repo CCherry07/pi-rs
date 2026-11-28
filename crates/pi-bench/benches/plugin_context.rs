@@ -91,6 +91,7 @@ fn js_plugins(count: usize, dispatcher: Arc<EncodeOnlyDispatcher>) -> Vec<Arc<dy
                 .collect(),
             provider_plugins: Vec::new(),
             provider_registrations: Vec::new(),
+            mcp_server_registrations: Vec::new(),
             session_plugins: Vec::new(),
             diagnostics: Vec::new(),
         },

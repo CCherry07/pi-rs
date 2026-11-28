@@ -15,11 +15,11 @@ struct ReuseKey {
     config: [u8; 32],
     options: McpConnectionOptions,
     isolation: [u8; 32],
+    attempt_timeout: Duration,
 }
 
 #[derive(Clone)]
 enum ConnectionSource {
-    #[cfg(test)]
     Explicit(McpServerConfig),
     Local {
         definition: McpConnectionDefinition,
@@ -36,9 +36,8 @@ pub(crate) struct ConnectionInput {
 }
 
 impl ConnectionInput {
-    // Transport-only callers still use their existing client API; this constructor exercises
-    // the supervisor independently of local-library policy at its owning test seam.
-    #[cfg(test)]
+    // Explicit callers supply already-resolved transport configuration. They use the same
+    // exact-slot replacement owner without acquiring local-library discovery or policy.
     pub(crate) fn new(
         mut config: McpServerConfig,
         options: McpConnectionOptions,
@@ -61,6 +60,7 @@ impl ConnectionInput {
                 config: Sha256::digest(bytes).into(),
                 options: options.clone(),
                 isolation,
+                attempt_timeout: Duration::from_secs(30),
             },
             options,
             auth,
@@ -76,7 +76,7 @@ impl ConnectionInput {
     ) -> Result<Self, McpError> {
         // No shell commands or secret-field expansion when constructing/reusing an attempt.
         // URL/path expansion and validation happen inside that attempt's single lifetime.
-        let bytes = serde_json::to_vec(&(&definition.config, &values.cwd, values.allow_commands))
+        let bytes = serde_json::to_vec(&(&definition, &values.cwd, values.allow_commands))
             .map_err(|_| fingerprint_error(&definition.config.name))?;
         let mut digest = Sha256::new();
         digest.update(bytes);
@@ -95,15 +95,20 @@ impl ConnectionInput {
                 config: digest.finalize().into(),
                 options: options.clone(),
                 isolation,
+                attempt_timeout: Duration::from_secs(30),
             },
             options,
             auth,
         })
     }
 
+    pub(super) fn with_attempt_timeout(mut self, timeout: Duration) -> Self {
+        self.key.attempt_timeout = timeout;
+        self
+    }
+
     fn config(&self) -> &McpServerConfig {
         match &self.source {
-            #[cfg(test)]
             ConnectionSource::Explicit(config) => config,
             ConnectionSource::Local { definition, .. } => &definition.config,
         }
@@ -129,9 +134,8 @@ impl ConnectionInput {
     ) -> Result<(Arc<McpConnection>, Vec<rmcp::model::Tool>), McpError> {
         let name = self.name().to_owned();
         let timeout_name = name.clone();
-        tokio::time::timeout(Duration::from_secs(30), async move {
+        tokio::time::timeout(self.key.attempt_timeout, async move {
             let config = match self.source {
-                #[cfg(test)]
                 ConnectionSource::Explicit(config) => config,
                 ConnectionSource::Local { definition, values } => definition
                     .resolve_for_connect(

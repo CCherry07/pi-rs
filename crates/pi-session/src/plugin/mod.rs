@@ -14,6 +14,6 @@ mod models;
 mod session;
 mod ui;
 pub use context::{
-    PiPluginContext, PluginContextBinding, PluginProviderMutation, PluginProviderMutationAccess,
-    PluginUiBridge,
+    PiPluginContext, PluginContextBinding, PluginMcpMutation, PluginMcpMutationAccess,
+    PluginProviderMutation, PluginProviderMutationAccess, PluginUiBridge,
 };

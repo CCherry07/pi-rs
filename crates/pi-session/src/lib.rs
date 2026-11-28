@@ -54,8 +54,8 @@ pub use management::{
 };
 pub use pi_plugin::{ForkPosition, NoticeLevel};
 pub use plugin::{
-    PiPluginContext, PluginContextBinding, PluginProviderMutation, PluginProviderMutationAccess,
-    PluginUiBridge,
+    PiPluginContext, PluginContextBinding, PluginMcpMutation, PluginMcpMutationAccess,
+    PluginProviderMutation, PluginProviderMutationAccess, PluginUiBridge,
 };
 pub use plugin::{
     PluginError, SessionBeforeCompactEvent, SessionBeforeCompactResult, SessionBeforeForkEvent,

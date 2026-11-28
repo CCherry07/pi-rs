@@ -165,6 +165,106 @@ test("RPC model discovery flushes batched query responses before stdin EOF", { t
     "model discovery must leave no resume entry");
 });
 
+test("RPC disable flags preserve explicit runtime MCP registration across Node/NAPI reload", { timeout: 15_000 }, async t => {
+  const f = await fixture(t);
+  const extension = join(f.root, "runtime-mcp.ts");
+  await writeFile(extension, `export default function (pi) {
+    pi.on("mcp_servers_change", (event, ctx) => {
+      ctx.ui.notify("mcp servers: " + event.servers.map(server => server.name).join(","));
+    });
+    pi.registerCommand("runtime-mcp-add", {
+      handler: () => pi.registerMcpServer("late", { command: "unused", enabled: false })
+    });
+    pi.registerCommand("runtime-mcp-remove", {
+      handler: () => pi.unregisterMcpServer("late")
+    });
+  }`);
+  const rpc = f.start(["--no-session", "--no-mcp", "--extension", extension]);
+
+  async function waitForMcp(present: boolean) {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const commands = (await rpc.request("get_commands")).commands
+        .map((command: RecordValue) => command.name);
+      if (commands.includes("mcp") === present) return;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.fail(`MCP command did not become ${present ? "available" : "unavailable"}: ${rpc.diagnostics()}`);
+  }
+
+  assert.deepEqual(await rpc.request("prompt", { message: "/runtime-mcp-add" }), { disposition: "handled" });
+  await rpc.wait(record => record.method === "notify" && record.message === "mcp servers: late");
+  await waitForMcp(true);
+  assert.deepEqual(await rpc.request("prompt", { message: "/runtime-mcp-remove" }), { disposition: "handled" });
+  await rpc.wait(record => record.method === "notify" && record.message === "mcp servers: ");
+  await waitForMcp(false);
+  await rpc.close();
+});
+
+test("RPC EOF aborts an active replacement-generation MCP observer", { timeout: 15_000 }, async t => {
+  const f = await fixture(t);
+  const extension = join(f.root, "runtime-mcp-close.ts");
+  await writeFile(extension, `export default function (pi) {
+    pi.on("mcp_servers_change", async (_event, ctx) => {
+      ctx.ui.notify("blocking MCP observer started");
+      await new Promise(resolve => {
+        if (ctx.signal.aborted) resolve();
+        else ctx.signal.addEventListener("abort", resolve, { once: true });
+      });
+      try { ctx.ui.notify("blocking MCP observer escaped retirement"); } catch {}
+    });
+    pi.registerCommand("runtime-mcp-block", {
+      handler: () => pi.registerMcpServer("late", { command: "unused", enabled: false })
+    });
+  }`);
+  const rpc = f.start(["--no-session", "--extension", extension]);
+
+  assert.deepEqual(await rpc.request("prompt", { message: "/runtime-mcp-block" }), { disposition: "handled" });
+  await rpc.wait(record => record.method === "notify" && record.message === "blocking MCP observer started");
+  await rpc.close();
+  assert.equal(
+    rpc.records.some(record => record.message === "blocking MCP observer escaped retirement"),
+    false,
+  );
+});
+
+test("RPC new_session waits for an active replacement MCP observer then publishes a fresh scope", { timeout: 15_000 }, async t => {
+  const f = await fixture(t);
+  const extension = join(f.root, "runtime-mcp-new-session.ts");
+  await writeFile(extension, `export default function (pi) {
+    pi.on("mcp_servers_change", async (_event, ctx) => {
+      ctx.ui.notify("replacement MCP observer started");
+      await ctx.ui.confirm("replacement MCP observer", "Allow replacement to finish?");
+      ctx.ui.notify("replacement MCP observer released");
+    });
+    pi.registerCommand("runtime-mcp-interleave", {
+      handler: () => pi.registerMcpServer("late", { command: "unused", enabled: false })
+    });
+  }`);
+  const rpc = f.start(["--no-session", "--extension", extension]);
+
+  rpc.send({ id: "mcp-reload", type: "prompt", message: "/runtime-mcp-interleave" });
+  const question = await rpc.wait(record => record.method === "confirm"
+    && record.title === "replacement MCP observer");
+  rpc.send({ id: "fresh-session", type: "new_session" });
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(rpc.records.some(record => record.type === "response" && record.id === "fresh-session"), false,
+    "new_session must wait behind the replacement lifecycle gate");
+
+  rpc.send({ type: "extension_ui_response", id: question.id, confirmed: true });
+  const released = await rpc.wait(record => record.method === "notify"
+    && record.message === "replacement MCP observer released");
+  const reload = await rpc.wait(record => record.type === "response" && record.id === "mcp-reload");
+  const fresh = await rpc.wait(record => record.type === "response" && record.id === "fresh-session");
+  assert.equal(reload.success, true, JSON.stringify(reload));
+  assert.equal(fresh.success, true, JSON.stringify(fresh));
+  assert.ok(rpc.records.indexOf(released) < rpc.records.indexOf(fresh),
+    "the queued replacement must publish only after the active observer settles");
+  const commands = (await rpc.request("get_commands")).commands.map((command: RecordValue) => command.name);
+  assert.equal(commands.includes("mcp"), false,
+    "a fresh session scope must not inherit the previous session's runtime MCP overlay");
+  await rpc.close();
+});
+
 test("RPC snapshot queries survive stdin EOF while an extension command is pending", { timeout: 10_000 }, async t => {
   const f = await fixture(t);
   const extension = join(f.root, "pending-command.ts");

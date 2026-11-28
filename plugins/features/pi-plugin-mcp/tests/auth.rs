@@ -373,6 +373,10 @@ impl McpProviderTokenResolver for RotatingResolver {
 async fn provider_auth_is_resolved_for_each_http_request_and_static_headers_survive() {
     let authorizations = Arc::new(Mutex::new(Vec::new()));
     let static_headers = Arc::new(Mutex::new(Vec::new()));
+    let get_observed = Arc::new(tokio::sync::Notify::new());
+    let get_seen = get_observed.clone();
+    let get_authorizations = authorizations.clone();
+    let get_static_headers = static_headers.clone();
     let route = axum::routing::post({
         let authorizations = authorizations.clone();
         let static_headers = static_headers.clone();
@@ -420,6 +424,25 @@ async fn provider_auth_is_resolved_for_each_http_request_and_static_headers_surv
             }
         }
     });
+    // Frozen legacy opens the common GET after initialized even without a session ID.
+    // Count it as a real authenticated request rather than comparing POSTs alone.
+    let route = route.get(move |headers: axum::http::HeaderMap| {
+        let authorizations = get_authorizations.clone();
+        let static_headers = get_static_headers.clone();
+        let observed = get_seen.clone();
+        async move {
+            authorizations
+                .lock()
+                .unwrap()
+                .push(headers["authorization"].to_str().unwrap().to_owned());
+            static_headers
+                .lock()
+                .unwrap()
+                .push(headers["x-static"].to_str().unwrap().to_owned());
+            observed.notify_one();
+            axum::http::StatusCode::METHOD_NOT_ALLOWED
+        }
+    });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/mcp", listener.local_addr().unwrap());
     let task = tokio::spawn(async move {
@@ -438,10 +461,14 @@ async fn provider_auth_is_resolved_for_each_http_request_and_static_headers_surv
     )
     .await
     .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), get_observed.notified())
+        .await
+        .expect("stateless common GET must be dispatched");
     pool.shutdown().await.unwrap();
     task.abort();
 
     let seen = authorizations.lock().unwrap();
+    assert_eq!(seen.len(), 5, "four setup POSTs plus one common GET");
     assert!(seen.len() >= 3, "expected handshake requests, saw {seen:?}");
     assert!(seen.iter().all(|value| value.starts_with("Bearer token-")));
     assert!(seen.windows(2).all(|values| values[0] != values[1]));

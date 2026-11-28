@@ -6,6 +6,20 @@ const hostModeSchema = z.enum(['tui', 'print', 'json', 'rpc'])
 const invocationKindSchema = z.enum(['tool', 'toolPrepareArguments', 'command', 'agentHook', 'providerHook', 'sessionHook', 'userBash'])
 export const toolExecutionModeSchema = z.enum(['parallel', 'sequential'])
 
+const mcpServerMutationSchema = z.discriminatedUnion('type', [
+  z.strictObject({
+    type: z.literal('register'),
+    extensionPath: z.string(),
+    name: z.string(),
+    config: jsonObjectSchema,
+  }),
+  z.strictObject({
+    type: z.literal('unregister'),
+    extensionPath: z.string(),
+    name: z.string(),
+  }),
+])
+
 const generationRequestSchema = z.strictObject({
   projectTrusted: z.boolean(),
   agentDir: z.string().default(getAgentDir()),
@@ -16,6 +30,8 @@ const generationRequestSchema = z.strictObject({
   cwd: z.string().default(process.cwd()),
   workspace: z.unknown().optional(),
   flagValues: z.record(z.string(), z.union([z.boolean(), z.string()])).default({}),
+  mcpServerMutations: z.array(mcpServerMutationSchema).default([]),
+  mcpServersChanged: z.boolean().default(false),
 })
 
 const invocationSchema = z.strictObject({
@@ -184,6 +200,13 @@ const providerRegistrationManifestSchema = z.strictObject({
   config: jsonObjectSchema,
 })
 
+const mcpServerRegistrationManifestSchema = z.strictObject({
+  pluginId: z.string(),
+  path: z.string(),
+  name: z.string(),
+  config: jsonObjectSchema,
+})
+
 const generationManifestSchema = z.strictObject({
   generationId: z.string(),
   dynamicHooks: z.boolean().default(false),
@@ -202,6 +225,7 @@ const generationManifestSchema = z.strictObject({
     }),
   ),
   providerRegistrations: z.array(providerRegistrationManifestSchema).default([]),
+  mcpServerRegistrations: z.array(mcpServerRegistrationManifestSchema).default([]),
   sessionPlugins: z.array(
     z.strictObject({
       id: z.string(),
@@ -235,6 +259,7 @@ export type CommandManifest = z.infer<typeof commandManifestSchema>
 export type AgentPluginManifest = z.infer<typeof generationManifestSchema>['agentPlugins'][number]
 export type ProviderPluginManifest = z.infer<typeof generationManifestSchema>['providerPlugins'][number]
 export type ProviderRegistrationManifest = z.infer<typeof providerRegistrationManifestSchema>
+export type McpServerRegistrationManifest = z.infer<typeof mcpServerRegistrationManifestSchema>
 export type SessionPluginManifest = z.infer<typeof generationManifestSchema>['sessionPlugins'][number]
 export type ExtensionDiagnostic = z.infer<typeof generationManifestSchema>['diagnostics'][number]
 export type GenerationManifest = z.infer<typeof generationManifestSchema>

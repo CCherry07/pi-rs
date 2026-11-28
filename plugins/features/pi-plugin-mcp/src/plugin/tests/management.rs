@@ -81,6 +81,70 @@ async fn project_toggles_preserve_global_definition_and_failed_reload_context() 
     }
 }
 
+#[tokio::test]
+async fn extension_manager_is_runtime_only_and_uses_registration_source() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("extensions/owned.ts");
+    let library = McpLibrary::new(directory.path(), None, false)
+        .with_configured_servers(false)
+        .with_extension_servers([crate::McpExtensionServerDefinition::new(
+            "extension-owned",
+            json!({"url":"https://mcp.example.test/rpc","oauth":{}}),
+            &source,
+        )])
+        .unwrap();
+    let row = McpServerRow {
+        name: "extension-owned".into(),
+        scope: McpScope::Extension,
+        defining_scope: McpScope::Extension,
+        supports_oauth: true,
+        auth_provider: None,
+        transport: "http".into(),
+        enabled: true,
+        exposure: McpExposure::Codemode,
+    };
+    let command = McpCommand {
+        library: library.clone(),
+        rows: vec![row.clone()],
+        pool: McpToolSet::connect_with_policies(vec![]).await.unwrap(),
+    };
+
+    assert_eq!(
+        library
+            .server_source(&row.name, row.defining_scope)
+            .unwrap(),
+        source
+    );
+    let actions = command
+        .manager_actions(&row)
+        .into_iter()
+        .map(|(action, _)| action)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actions,
+        [
+            Action::Inspect,
+            Action::Tools,
+            Action::SignOut,
+            Action::Reconnect,
+        ]
+    );
+    assert!(!directory.path().join("mcp.json").exists());
+
+    let disabled = McpServerRow {
+        enabled: false,
+        ..row
+    };
+    assert_eq!(
+        command
+            .manager_actions(&disabled)
+            .into_iter()
+            .map(|(action, _)| action)
+            .collect::<Vec<_>>(),
+        [Action::Inspect]
+    );
+}
+
 struct NoUi;
 impl ModelsContextAccess for NoUi {}
 impl UiContextAccess for NoUi {

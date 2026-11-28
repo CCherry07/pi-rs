@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use async_trait::async_trait;
-use pi_core::ModelSelection;
+use pi_core::{AbortHandle, AbortSignal, ModelSelection};
 use pi_plugin::Plugin;
 use pi_runtime::{PiRuntime, PiRuntimeBuilder};
 use tokio::sync::watch;
@@ -351,6 +351,43 @@ pub(super) struct SessionSlotState {
     pub(super) epoch: AtomicU64,
     submission_abort_epoch: Arc<AtomicU64>,
     pub(super) closed: AtomicBool,
+    replacement: std::sync::Mutex<ReplacementCancellationState>,
+}
+
+#[derive(Default)]
+struct ReplacementCancellationState {
+    closing: bool,
+    sequence: u64,
+    active: Option<(u64, AbortHandle)>,
+}
+
+pub(super) struct ReplacementCancellation {
+    state: Arc<SessionSlotState>,
+    sequence: u64,
+    signal: AbortSignal,
+}
+
+impl ReplacementCancellation {
+    pub(super) fn signal(&self) -> &AbortSignal {
+        &self.signal
+    }
+}
+
+impl Drop for ReplacementCancellation {
+    fn drop(&mut self) {
+        let mut replacement = self
+            .state
+            .replacement
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if replacement
+            .active
+            .as_ref()
+            .is_some_and(|(sequence, _)| *sequence == self.sequence)
+        {
+            replacement.active = None;
+        }
+    }
 }
 
 struct CloseObservation<'a>(&'a SessionSlot);
@@ -543,6 +580,40 @@ impl SessionSlot {
             .runtime_scope
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(super) fn begin_managed_replacement(
+        &self,
+    ) -> Result<ReplacementCancellation, SessionError> {
+        let mut replacement = self
+            .state
+            .replacement
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if replacement.closing || self.state.closed.load(Ordering::Acquire) {
+            return Err(SessionError::Closed);
+        }
+        replacement.sequence = replacement.sequence.saturating_add(1);
+        let sequence = replacement.sequence;
+        let (abort, signal) = AbortHandle::new();
+        replacement.active = Some((sequence, abort));
+        Ok(ReplacementCancellation {
+            state: Arc::clone(&self.state),
+            sequence,
+            signal,
+        })
+    }
+
+    pub(super) fn request_close(&self) {
+        let mut replacement = self
+            .state
+            .replacement
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        replacement.closing = true;
+        if let Some((_, abort)) = &replacement.active {
+            abort.abort();
+        }
     }
 
     fn publish(&self, next: Arc<AgentSession>, runtime_scope: LiveRuntimeScopeId) {

@@ -14,6 +14,7 @@ mod credential_watch;
 mod diagnostics;
 mod directory;
 mod http_client;
+mod http_transport;
 mod library;
 mod login;
 mod naming;
@@ -40,8 +41,9 @@ pub use client::{
 };
 pub use credential_watch::McpCredentialWatch;
 pub use library::{
-    McpDocument, McpInspection, McpLibrary, McpScope, McpServerDefinition, McpServerReadiness,
-    McpServerReport, McpServerRow, McpServerState, PreparedMcpGeneration,
+    McpDocument, McpExtensionServerDefinition, McpInspection, McpLibrary, McpScope,
+    McpServerDefinition, McpServerReadiness, McpServerReport, McpServerRow, McpServerState,
+    PreparedMcpGeneration,
 };
 pub use login::{McpOAuthHost, McpOAuthLoginRequest, McpOAuthPrompt};
 pub use policy::McpExposure;

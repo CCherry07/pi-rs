@@ -24,11 +24,25 @@ use crate::{
 /// Maximum supported MCP document size, also used to bound callers' disk reads.
 pub const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
+#[derive(Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(transparent)]
+struct OrderedHttpHeaders(Vec<(String, String)>);
+
+impl std::fmt::Debug for OrderedHttpHeaders {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OrderedHttpHeaders")
+            .field("len", &self.0.len())
+            .finish_non_exhaustive()
+    }
+}
+
 /// A validated document entry whose environment references are still unresolved.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct McpConfigEntry {
     name: String,
     transport: Option<McpTransport>,
+    ordered_http_headers: Option<OrderedHttpHeaders>,
     enabled: bool,
     policy: McpServerPolicy,
     oauth: Option<McpOAuthConfig>,
@@ -38,9 +52,10 @@ pub struct McpConfigEntry {
 
 /// Unresolved transport/auth data selected after the caller's policy and trust checks.
 /// Safe to retain across generation preparation: no generation-owned policy or code.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct McpConnectionDefinition {
     pub(crate) config: McpServerConfig,
+    ordered_http_headers: Option<OrderedHttpHeaders>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -146,6 +161,7 @@ impl McpConfigEntry {
                 oauth: self.oauth,
                 auth: self.auth,
             },
+            ordered_http_headers: self.ordered_http_headers,
         })
     }
 
@@ -212,19 +228,47 @@ impl McpConnectionDefinition {
                 .map_err(|_| "MCP transport environment reference is unavailable".into())
         };
         // Resolve only transport fields here; values must be resolved exactly once below.
-        let mut config =
+        let mut resolved =
             self.resolve_fields_with(context, home.as_deref(), &lookup, |value| Ok(value.into()))?;
-        let fields = match &mut config.transport {
-            McpTransport::Stdio { env, .. } => env,
-            McpTransport::Http { headers, .. } => headers,
-        };
-        for value in fields.values_mut() {
-            *value =
-                values::resolve(value, context.default_cwd, allow_commands, signal.clone()).await?;
+        let ResolvedConnectionFields {
+            config,
+            ordered_http_headers,
+        } = &mut resolved;
+        match &mut config.transport {
+            McpTransport::Stdio { env, .. } => {
+                for value in env.values_mut() {
+                    *value =
+                        values::resolve(value, context.default_cwd, allow_commands, signal.clone())
+                            .await?;
+                }
+            }
+            McpTransport::Http { headers, .. } => {
+                if let Some(ordered) = ordered_http_headers {
+                    for (_, value) in &mut ordered.0 {
+                        *value = values::resolve(
+                            value,
+                            context.default_cwd,
+                            allow_commands,
+                            signal.clone(),
+                        )
+                        .await?;
+                    }
+                } else {
+                    for value in headers.values_mut() {
+                        *value = values::resolve(
+                            value,
+                            context.default_cwd,
+                            allow_commands,
+                            signal.clone(),
+                        )
+                        .await?;
+                    }
+                }
+            }
         }
         // OAuth settings remain unresolved: a usable token must not need its client secret.
         // Local auth resolves it only for an actual sign-in or refresh operation.
-        Ok(config)
+        Ok(resolved.finish())
     }
 
     fn resolve_with(
@@ -233,9 +277,11 @@ impl McpConnectionDefinition {
         home: Option<&Path>,
         lookup: impl Fn(&str) -> Result<String, String>,
     ) -> Result<McpServerConfig, String> {
-        self.resolve_fields_with(context, home, &lookup, |value| {
-            values::expand(value, &lookup)
-        })
+        Ok(self
+            .resolve_fields_with(context, home, &lookup, |value| {
+                values::expand(value, &lookup)
+            })?
+            .finish())
     }
 
     fn resolve_fields_with(
@@ -244,13 +290,17 @@ impl McpConnectionDefinition {
         home: Option<&Path>,
         lookup: &impl Fn(&str) -> Result<String, String>,
         value: impl Fn(&str) -> Result<String, String>,
-    ) -> Result<McpServerConfig, String> {
+    ) -> Result<ResolvedConnectionFields, String> {
+        let McpConnectionDefinition {
+            config,
+            mut ordered_http_headers,
+        } = self;
         let McpServerConfig {
             name,
             mut transport,
             mut oauth,
             auth,
-        } = self.config;
+        } = config;
         let use_oauth = auth.is_none()
             && matches!(&transport, McpTransport::Http { headers, .. } if !headers.keys().any(|name| name.eq_ignore_ascii_case("authorization")));
         if use_oauth
@@ -293,18 +343,59 @@ impl McpConnectionDefinition {
             }
             McpTransport::Http { url, headers } => {
                 *url = expand_with(url, lookup)?;
-                for field in headers.values_mut() {
-                    *field = value(field)?;
+                if let Some(ordered) = &mut ordered_http_headers {
+                    for (_, field) in &mut ordered.0 {
+                        *field = value(field)?;
+                    }
+                } else {
+                    for field in headers.values_mut() {
+                        *field = value(field)?;
+                    }
                 }
             }
         }
-        Ok(McpServerConfig {
-            name,
-            transport,
-            oauth,
-            auth,
+        Ok(ResolvedConnectionFields {
+            config: McpServerConfig {
+                name,
+                transport,
+                oauth,
+                auth,
+            },
+            ordered_http_headers,
         })
     }
+}
+
+struct ResolvedConnectionFields {
+    config: McpServerConfig,
+    ordered_http_headers: Option<OrderedHttpHeaders>,
+}
+
+impl ResolvedConnectionFields {
+    fn finish(mut self) -> McpServerConfig {
+        if let (McpTransport::Http { headers, .. }, Some(ordered)) =
+            (&mut self.config.transport, self.ordered_http_headers)
+        {
+            *headers = fold_http_headers(ordered.0);
+        }
+        self.config
+    }
+}
+
+fn fold_http_headers(entries: Vec<(String, String)>) -> BTreeMap<String, String> {
+    let mut folded: Vec<(String, String)> = Vec::with_capacity(entries.len());
+    for (name, value) in entries {
+        if let Some((_, existing)) = folded
+            .iter_mut()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(&name))
+        {
+            existing.push_str(", ");
+            existing.push_str(&value);
+        } else {
+            folded.push((name, value));
+        }
+    }
+    folded.into_iter().collect()
 }
 
 /// Parses an `mcpServers` document and unresolved policy-only overrides.
@@ -490,6 +581,7 @@ fn parse_entry(
     });
     let mut oauth = None;
     let mut auth = None;
+    let mut ordered_http_headers = None;
     let transport = if !has_transport {
         if oauth_value.is_some() || auth_value.is_some() {
             return Err(format!(
@@ -513,7 +605,30 @@ fn parse_entry(
                 "MCP server {name}: legacy SSE is not supported; use a Streamable HTTP endpoint"
             ));
         }
-        let transport: McpTransport = serde_json::from_value(Value::Object(config)).map_err(|_| format!("MCP server {name}: invalid transport fields (stdio command/args/env/cwd or http url/headers)"))?;
+        let invalid_transport = || {
+            format!(
+                "MCP server {name}: invalid transport fields (stdio command/args/env/cwd or http url/headers)"
+            )
+        };
+        if config.get("type") == Some(&json!("http")) {
+            // The workspace's preserve_order map still has the caller record order here.
+            // Keep it private until every late-bound value is resolved, then fold case variants.
+            ordered_http_headers = Some(OrderedHttpHeaders(match config.get("headers") {
+                None => Vec::new(),
+                Some(Value::Object(headers)) => headers
+                    .iter()
+                    .map(|(name, value)| {
+                        value
+                            .as_str()
+                            .map(|value| (name.clone(), value.to_owned()))
+                            .ok_or_else(&invalid_transport)
+                    })
+                    .collect::<Result<_, _>>()?,
+                Some(_) => return Err(invalid_transport()),
+            }));
+        }
+        let transport: McpTransport =
+            serde_json::from_value(Value::Object(config)).map_err(|_| invalid_transport())?;
         match &transport {
             McpTransport::Stdio { command, .. } if command.trim().is_empty() => {
                 return Err(format!("MCP server {name}: command is empty"));
@@ -572,6 +687,7 @@ fn parse_entry(
     Ok(McpConfigEntry {
         name: name.into(),
         transport,
+        ordered_http_headers,
         enabled: enabled.unwrap_or(true),
         policy,
         oauth,
@@ -823,7 +939,13 @@ mod tests {
             root: Some(PathBuf::from("/different-root")),
             log_path: Some(PathBuf::from("/different-log")),
         };
+        let entry_debug = format!("{selected:?}");
         let definition = selected.into_connection_definition().unwrap();
+        let definition_debug = format!("{definition:?}");
+        for diagnostic in [entry_debug, definition_debug] {
+            assert!(!diagnostic.contains("MCP_DEFINITION_SECRET"));
+            assert!(!diagnostic.contains("printf"));
+        }
         assert_eq!(
             definition,
             other_policy.into_connection_definition().unwrap()
@@ -1118,12 +1240,32 @@ mod tests {
             json!({"url": "https://example.com/#secret"}),
             json!({"url": "https://example.com", "headers": {"Invalid Header": "secret"}}),
             json!({"url": "https://example.com", "headers": {"Authorization": "secret\n"}}),
-            json!({"url": "https://example.com", "headers": {"Mcp-Session-Id": "secret"}}),
             json!({"enabled": false, "type": "http", "url": "secret"}),
         ] {
             let error =
                 parse_config(&json!({"mcpServers": {"server": config}}).to_string()).unwrap_err();
             assert!(!error.contains("secret"), "{error}");
+        }
+    }
+
+    #[test]
+    fn parse_config_preserves_caller_transport_headers() {
+        for name in [
+            "Host",
+            "Accept",
+            "Content-Type",
+            "Mcp-Session-Id",
+            "Mcp-Protocol-Version",
+            "Last-Event-Id",
+        ] {
+            let remote = entry(json!({
+                "url": "https://example.com",
+                "headers": {name: "${UNRESOLVED}"}
+            }));
+            let Some(McpTransport::Http { headers, .. }) = remote.transport() else {
+                panic!("expected HTTP transport");
+            };
+            assert_eq!(headers[name], "${UNRESOLVED}");
         }
     }
 

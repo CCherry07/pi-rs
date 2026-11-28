@@ -2,10 +2,61 @@ use super::*;
 use serde_json::{Value, json};
 use std::sync::atomic::Ordering;
 mod authority;
+mod authorization;
+mod explicit;
 mod fixture;
 mod mixed;
+mod repair_bootstrap;
+mod repair_controls;
+mod repair_messages;
+mod shared_repair;
 mod sse;
 use fixture::{Fixture, Reply, entered};
+
+struct RepairServer(tokio::task::JoinHandle<()>);
+impl Drop for RepairServer {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn repair_tools() -> Value {
+    json!([
+        {"name":"echo","description":"repair echo","inputSchema":{"type":"object"}},
+        {"name":"held","description":"admitted old call","inputSchema":{"type":"object"}}
+    ])
+}
+
+async fn explicit_with_callbacks(
+    uri: String,
+    callbacks: crate::client_handler::testing::Callbacks,
+) -> McpToolSet {
+    let mut config = McpServerConfig::http("fixture", uri);
+    let McpTransport::Http { headers, .. } = &mut config.transport else {
+        unreachable!()
+    };
+    headers.insert("Authorization".into(), "Bearer fake-repair-token".into());
+    let policy = McpServerPolicy::direct();
+    let options = McpConnectionOptions {
+        test_callbacks: Some(callbacks),
+        ..McpConnectionOptions::from(&policy).supervised()
+    };
+    let auth = McpClientAuth::default();
+    let input = crate::supervisor::ConnectionInput::new(
+        config.clone(),
+        options.clone(),
+        auth.clone(),
+        [0; 32],
+    )
+    .unwrap();
+    let (connection, tools) = connect_inventory(config, options, auth).await.unwrap();
+    let owner =
+        crate::supervisor::OwnedConnectionSlot::ready(input, connection.clone(), tools.clone());
+    McpToolSet::from_connections(vec![(connection, tools, policy)], vec![])
+        .unwrap()
+        .with_explicit_connections(BTreeMap::from([("fixture".into(), owner)]))
+        .unwrap()
+}
 
 fn context() -> ToolContext {
     let (_, signal) = pi_core::AbortHandle::new();
@@ -43,6 +94,16 @@ async fn resources(pool: &McpToolSet, name: &str) -> Result<ToolResult, ToolErro
     };
     tool.execute(context(), "resource-recovery".into(), params, updates)
         .await
+}
+
+async fn wait_for_deletes(fixture: &Fixture, count: usize) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while fixture.state.deleted.lock().unwrap().len() < count {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("session cleanup deadline");
 }
 
 #[tokio::test]
@@ -88,7 +149,7 @@ async fn repeated_expiry_exhausts_without_eager_third_setup_then_next_call_opens
     assert!(
         matches!(&error,
             McpRequestError::Service(rmcp::service::ServiceError::TransportSend(error))
-                if matches!(error.error.downcast_ref::<crate::http_client::HttpError>(),
+                if matches!(crate::http_client::transport_error(error.error.as_ref()),
                     Some(crate::http_client::HttpError::SessionExpired))
         ),
         "original typed session-expiry outcome: {error:?}"
@@ -100,10 +161,21 @@ async fn repeated_expiry_exhausts_without_eager_third_setup_then_next_call_opens
     assert_eq!(fixture.starts(), 2);
     assert_eq!(fixture.calls(), 2);
     assert_eq!(fixture.executed(), 0);
+    wait_for_deletes(&fixture, 2).await;
+    assert_eq!(
+        *fixture.state.deleted.lock().unwrap(),
+        ["session-1", "session-2"],
+        "both definitively expired attempts must retire without opening a third setup"
+    );
     assert!(invoke(&pool, "echo", context()).await.is_ok());
     assert_eq!(fixture.starts(), 3);
     assert_eq!(fixture.calls(), 3);
     owner.close().await.unwrap();
+    wait_for_deletes(&fixture, 3).await;
+    assert_eq!(
+        *fixture.state.deleted.lock().unwrap(),
+        ["session-1", "session-2", "session-3"]
+    );
 }
 
 #[tokio::test]
@@ -239,6 +311,10 @@ async fn expired_replacement_preserves_unrelated_held_json_and_open_sse() {
         !json.is_finished() && !sse.is_finished(),
         "replacement must not abort old admitted work"
     );
+    assert!(
+        fixture.state.deleted.lock().unwrap().is_empty(),
+        "the expired session must remain alive while its admitted work is draining"
+    );
     fixture.state.held_release.add_permits(2);
     assert!(
         tokio::time::timeout(Duration::from_secs(5), json)
@@ -254,7 +330,19 @@ async fn expired_replacement_preserves_unrelated_held_json_and_open_sse() {
             .unwrap()
             .is_ok()
     );
+    wait_for_deletes(&fixture, 1).await;
+    assert_eq!(
+        *fixture.state.deleted.lock().unwrap(),
+        ["session-1"],
+        "the drained expired transport must clean up its own identity only"
+    );
     owner.close().await.unwrap();
+    wait_for_deletes(&fixture, 2).await;
+    assert_eq!(
+        *fixture.state.deleted.lock().unwrap(),
+        ["session-1", "session-2"],
+        "generation close must clean up the replacement identity after the old one"
+    );
 }
 
 #[tokio::test]

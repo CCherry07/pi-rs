@@ -14,9 +14,10 @@ use pi_plugin_manager::install::{
 use pi_plugin_manager::loader::{NativePluginLoader, NativePluginLoaderOptions};
 use pi_plugin_subagents::SubagentRuntime;
 use pi_session::{
-    PiPluginContext, PluginContextBinding, PluginProviderMutationAccess, PluginUiBridge,
-    PreparedSessionGeneration, SessionError, SessionGenerationActivation, SessionGenerationFactory,
-    SessionGenerationRequest, SessionRuntimeInventory, validate_initial_model_scope,
+    PiPluginContext, PluginContextBinding, PluginMcpMutationAccess, PluginProviderMutationAccess,
+    PluginUiBridge, PreparedSessionGeneration, SessionError, SessionGenerationActivation,
+    SessionGenerationFactory, SessionGenerationRequest, SessionRuntimeInventory,
+    validate_initial_model_scope,
 };
 use pi_settings::{SettingsContext, SettingsManager};
 
@@ -26,6 +27,7 @@ use crate::composition::{
     GenerationComponents, RuntimeBuildOutcome, additional_active_tools, prepare_memory,
 };
 use crate::configuration::{apply_settings, initial_model_request, session_options};
+use crate::dynamic_mcp::{DynamicMcpCandidate, DynamicMcpPreparation, DynamicMcpRegistry};
 use crate::dynamic_providers::{
     DynamicProviderCandidate, DynamicProviderOverlay, DynamicProviderPreparation,
 };
@@ -49,6 +51,7 @@ pub struct ProductSessionFactory {
     session_bindings: Vec<SessionBinding>,
     presentation_mode: PresentationMode,
     dynamic_providers: DynamicProviderOverlay,
+    dynamic_mcp: DynamicMcpRegistry,
     subagents: SubagentRuntime,
 }
 
@@ -59,6 +62,8 @@ struct PreparedProductActivation {
     dynamic_providers: DynamicProviderOverlay,
     dynamic_provider_candidate: Option<DynamicProviderCandidate>,
     dynamic_provider_preparation: DynamicProviderPreparation,
+    dynamic_mcp_candidate: Option<DynamicMcpCandidate>,
+    dynamic_mcp_preparation: DynamicMcpPreparation,
     package_reconciliations: Vec<PreparedPluginReconcile>,
 }
 
@@ -68,6 +73,8 @@ impl SessionGenerationActivation for PreparedProductActivation {
             dynamic_providers,
             dynamic_provider_candidate,
             mut dynamic_provider_preparation,
+            dynamic_mcp_candidate,
+            dynamic_mcp_preparation,
             package_reconciliations,
         } = *self;
         for reconciliation in package_reconciliations {
@@ -77,6 +84,10 @@ impl SessionGenerationActivation for PreparedProductActivation {
             dynamic_providers.commit(candidate);
         }
         dynamic_provider_preparation.finish();
+        if let Some(candidate) = dynamic_mcp_candidate {
+            candidate.commit();
+        }
+        dynamic_mcp_preparation.finish();
     }
 
     fn rollback(self: Box<Self>, error: SessionError) -> SessionError {
@@ -84,10 +95,15 @@ impl SessionGenerationActivation for PreparedProductActivation {
             dynamic_providers,
             dynamic_provider_candidate,
             dynamic_provider_preparation: _dynamic_provider_preparation,
+            dynamic_mcp_candidate,
+            dynamic_mcp_preparation: _dynamic_mcp_preparation,
             package_reconciliations,
         } = *self;
         if let Some(candidate) = &dynamic_provider_candidate {
             dynamic_providers.reject(candidate);
+        }
+        if let Some(candidate) = dynamic_mcp_candidate {
+            candidate.reject();
         }
         let mut rollback_errors = Vec::new();
         for reconciliation in package_reconciliations.into_iter().rev() {
@@ -126,6 +142,7 @@ impl ProductSessionFactory {
             session_bindings: Vec::new(),
             presentation_mode: PresentationMode::Print,
             dynamic_providers: DynamicProviderOverlay::default(),
+            dynamic_mcp: DynamicMcpRegistry::default(),
             subagents: SubagentRuntime::default(),
         }
     }
@@ -201,6 +218,7 @@ impl SessionGenerationFactory for ProductSessionFactory {
         }
         let reloading = reason == pi_session::SessionStartReason::Reload;
         let dynamic_provider_preparation = self.dynamic_providers.begin_preparation();
+        let dynamic_mcp_preparation = self.dynamic_mcp.begin_preparation(runtime_scope);
         let mut config = self.config.clone();
         config.cwd = cwd;
         config.workspace = Some(workspace);
@@ -234,89 +252,6 @@ impl SessionGenerationFactory for ProductSessionFactory {
                     .to_string(),
             ));
         }
-        let selection_binding = crate::mcp::McpToolSelectionBinding::default();
-        let (local_mcp, mcp_freshness, mcp_selection) = if config.load_mcp_config {
-            let selected = match restored_configuration
-                .as_ref()
-                .map(|state| &state.active_tools)
-            {
-                Some(pi_session::RestoredToolSelection::Selected(names)) => names.clone(),
-                _ => Vec::new(),
-            };
-            let candidates = restored_configuration
-                .as_ref()
-                .map(|state| state.historical_selected_tool_names.clone())
-                .unwrap_or_default();
-            let permitted = |names: Vec<String>| {
-                names
-                    .into_iter()
-                    .filter(|name| generation_overlay.allows_tool(name))
-                    .collect()
-            };
-            let mut library = pi_plugin_mcp::McpLibrary::new(
-                &config.agent_dir,
-                Some(&config.cwd),
-                project_trusted,
-            )
-            .with_tool_search_registration(false)
-            .with_command_values(true)
-            .with_client_auth(self.mcp_auth.clone())
-            .with_preserved_tool_selection(permitted(selected))
-            .with_tool_selection_candidates(permitted(candidates))
-            .with_tool_selection_reader(selection_binding.reader());
-            if let Some(host) = &self.mcp_oauth_host {
-                library = library.with_oauth_host(host.clone());
-            }
-            let credentials = crate::mcp::McpCredentialSnapshot::capture(
-                &config.agent_dir,
-                library
-                    .supervised_credential_watch()
-                    .map_err(SessionError::Runtime)?,
-            );
-            let prepared = library
-                .prepare_supervised_generation(
-                    self.mcp_sessions.owner(runtime_scope),
-                    credentials.provider_revisions(),
-                )
-                .await
-                .map_err(SessionError::Runtime)?;
-            let mut selection: std::collections::BTreeMap<_, _> = prepared
-                .temporarily_unavailable_tools
-                .into_iter()
-                .map(|name| {
-                    (
-                        name,
-                        pi_session::ToolSelectionAvailability::TemporarilyUnavailable,
-                    )
-                })
-                .collect();
-            selection.extend(prepared.unresolved_tool_selection.into_iter().map(|name| {
-                (
-                    name,
-                    pi_session::ToolSelectionAvailability::UnresolvedUntilInventory,
-                )
-            }));
-            let readiness = prepared.readiness_watch.ok_or_else(|| {
-                SessionError::Runtime("MCP preparation omitted its readiness owner".into())
-            })?;
-            self.mcp_sessions
-                .stage(runtime_scope, readiness.downgrade());
-            let freshness = credentials.with_readiness(readiness);
-            (Some(prepared.plugin), Some(freshness), selection)
-        } else {
-            (None, None, std::collections::BTreeMap::new())
-        };
-        let memory = prepare_memory(&config, project_trusted).map_err(SessionError::Runtime)?;
-        let package_reconciliations =
-            prepare_native_packages(&config.cwd, &config.agent_dir, project_trusted).await?;
-        let mut native_options = NativePluginLoaderOptions::new(&config.cwd, &config.agent_dir);
-        native_options.project_trusted = project_trusted;
-        native_options.explicit_paths = config.native_plugins.clone();
-        let native_plugins = NativePluginLoader::new(native_options)
-            .discover()
-            .map_err(|error| SessionError::Runtime(error.to_string()))?;
-        let configured_native_plugins =
-            configured_native_plugin_ids(&package_reconciliations, &native_plugins);
         let js_resolution = js_packages
             .resolve()
             .await
@@ -327,8 +262,184 @@ impl SessionGenerationFactory for ProductSessionFactory {
         config
             .settings_prompt_paths
             .extend(js_resolution.prompt_paths.iter().cloned());
+        // Extension-owned MCP registrations are generation contributions, so JavaScript loading
+        // must finish before the candidate MCP inventory is prepared. Runtime mutations are replayed
+        // into the newly loaded extension registry before its manifest crosses the native boundary.
+        let extension_paths = js_resolution
+            .extension_paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>();
+        let dynamic_mcp_candidate = self
+            .js_plugin_host
+            .as_ref()
+            .map(|_| self.dynamic_mcp.candidate(runtime_scope, &extension_paths));
+        let prepared_js = if let Some(host) = &self.js_plugin_host {
+            let extension_labels = javascript_inventory_labels(&js_resolution.extension_identities);
+            let manifest = host
+                .prepare_generation(JsGenerationRequest {
+                    project_trusted,
+                    agent_dir: config.agent_dir.display().to_string(),
+                    extension_paths: extension_paths.clone(),
+                    output_pad: config.runtime_settings.output_pad,
+                    show_images: config.runtime_settings.terminal.show_images,
+                    mode: self.presentation_mode,
+                    cwd: config.cwd.display().to_string(),
+                    workspace: config
+                        .workspace
+                        .as_ref()
+                        .map(|workspace| workspace.spec().clone()),
+                    flag_values: config.extension_flag_values.clone(),
+                    mcp_server_mutations: dynamic_mcp_candidate
+                        .as_ref()
+                        .map(|candidate| candidate.mutations().to_vec())
+                        .unwrap_or_default(),
+                    mcp_servers_changed: dynamic_mcp_candidate
+                        .as_ref()
+                        .is_some_and(DynamicMcpCandidate::has_changes),
+                })
+                .await
+                .map_err(|error| SessionError::Runtime(error.to_string()))?;
+            Some((manifest, extension_labels))
+        } else {
+            None
+        };
+        let extension_mcp_servers = prepared_js
+            .as_ref()
+            .map(|(manifest, _)| {
+                manifest
+                    .mcp_server_registrations
+                    .iter()
+                    .map(|registration| {
+                        pi_plugin_mcp::McpExtensionServerDefinition::new(
+                            registration.name.clone(),
+                            registration.config.clone(),
+                            registration.path.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        // Materialize the JavaScript generation now so every later preparation failure drops its
+        // lease and retires the host generation instead of leaking callbacks.
+        let mut js_extensions = Vec::new();
+        let mut dynamic_provider_candidate = None;
+        let js_generation = if let Some((manifest, extension_labels)) = prepared_js {
+            let host = self
+                .js_plugin_host
+                .as_ref()
+                .expect("prepared JavaScript manifest has a host");
+            let generation = JsPluginGeneration::prepare_with_host(manifest, Arc::clone(host))
+                .map_err(|error| SessionError::Runtime(error.to_string()))?;
+            let candidate = self
+                .dynamic_providers
+                .candidate(generation.provider_registrations())
+                .map_err(SessionError::Runtime)?;
+            js_extensions = extension_labels;
+            dynamic_provider_candidate = Some(candidate);
+            Some(generation)
+        } else {
+            None
+        };
+        let register_mcp_management = config.load_mcp_config || !extension_mcp_servers.is_empty();
+        let selection_binding = crate::mcp::McpToolSelectionBinding::default();
+        // A JavaScript host keeps an empty lifecycle-only MCP candidate so removing the last
+        // extension registration retires its previous connection on generation activation.
+        let (local_mcp, mcp_freshness, mcp_selection) =
+            if config.load_mcp_config || self.js_plugin_host.is_some() {
+                let selected = match restored_configuration
+                    .as_ref()
+                    .map(|state| &state.active_tools)
+                {
+                    Some(pi_session::RestoredToolSelection::Selected(names)) => names.clone(),
+                    _ => Vec::new(),
+                };
+                let candidates = restored_configuration
+                    .as_ref()
+                    .map(|state| state.historical_selected_tool_names.clone())
+                    .unwrap_or_default();
+                let permitted = |names: Vec<String>| {
+                    names
+                        .into_iter()
+                        .filter(|name| generation_overlay.allows_tool(name))
+                        .collect()
+                };
+                let mut library = pi_plugin_mcp::McpLibrary::new(
+                    &config.agent_dir,
+                    Some(&config.cwd),
+                    project_trusted,
+                )
+                .with_tool_search_registration(false)
+                .with_command_values(true)
+                .with_configured_servers(config.load_mcp_config)
+                .with_management_registration(register_mcp_management)
+                .with_client_auth(self.mcp_auth.clone())
+                .with_preserved_tool_selection(permitted(selected))
+                .with_tool_selection_candidates(permitted(candidates))
+                .with_tool_selection_reader(selection_binding.reader());
+                library = library
+                    .with_extension_servers(extension_mcp_servers)
+                    .map_err(SessionError::Runtime)?;
+                if let Some(host) = &self.mcp_oauth_host {
+                    library = library.with_oauth_host(host.clone());
+                }
+                let credentials = crate::mcp::McpCredentialSnapshot::capture(
+                    &config.agent_dir,
+                    library
+                        .supervised_credential_watch()
+                        .map_err(SessionError::Runtime)?,
+                );
+                let prepared = library
+                    .prepare_supervised_generation(
+                        self.mcp_sessions.owner(runtime_scope),
+                        credentials.provider_revisions(),
+                    )
+                    .await
+                    .map_err(SessionError::Runtime)?;
+                let mut selection: std::collections::BTreeMap<_, _> = prepared
+                    .temporarily_unavailable_tools
+                    .into_iter()
+                    .map(|name| {
+                        (
+                            name,
+                            pi_session::ToolSelectionAvailability::TemporarilyUnavailable,
+                        )
+                    })
+                    .collect();
+                selection.extend(prepared.unresolved_tool_selection.into_iter().map(|name| {
+                    (
+                        name,
+                        pi_session::ToolSelectionAvailability::UnresolvedUntilInventory,
+                    )
+                }));
+                let readiness = prepared.readiness_watch.ok_or_else(|| {
+                    SessionError::Runtime("MCP preparation omitted its readiness owner".into())
+                })?;
+                self.mcp_sessions
+                    .stage(runtime_scope, readiness.downgrade());
+                let freshness = credentials.with_readiness(readiness);
+                (Some(prepared.plugin), Some(freshness), selection)
+            } else {
+                (None, None, std::collections::BTreeMap::new())
+            };
+        let memory = prepare_memory(&config, project_trusted).map_err(SessionError::Runtime)?;
+        let package_reconciliations = if config.offline {
+            Vec::new()
+        } else {
+            prepare_native_packages(&config.cwd, &config.agent_dir, project_trusted).await?
+        };
+        let mut native_options = NativePluginLoaderOptions::new(&config.cwd, &config.agent_dir);
+        native_options.project_trusted = project_trusted;
+        native_options.explicit_paths = config.native_plugins.clone();
+        let native_plugins = NativePluginLoader::new(native_options)
+            .discover()
+            .map_err(|error| SessionError::Runtime(error.to_string()))?;
+        let configured_native_plugins =
+            configured_native_plugin_ids(&package_reconciliations, &native_plugins);
         let mutation_access: Arc<dyn PluginProviderMutationAccess> =
             Arc::new(self.dynamic_providers.clone());
+        let mcp_mutation_access: Arc<dyn PluginMcpMutationAccess> =
+            self.dynamic_mcp.scoped_access(runtime_scope);
         let plugin_context = PiPluginContext::new(
             self.presentation_mode,
             project_trusted,
@@ -341,56 +452,14 @@ impl SessionGenerationFactory for ProductSessionFactory {
                 .clone()
                 .unwrap_or_default(),
         )
-        .with_provider_mutations(mutation_access);
+        .with_provider_mutations(mutation_access)
+        .with_mcp_mutations(mcp_mutation_access);
         let plugin_context = match &self.plugin_ui_bridge {
             Some(bridge) => plugin_context.with_ui_bridge(Arc::clone(bridge)),
             None => plugin_context,
         };
         let plugin_context = Arc::new(plugin_context);
         let context_access: Arc<dyn PluginContext> = plugin_context.clone();
-        let mut js_extensions = Vec::new();
-        let mut dynamic_provider_candidate = None;
-        let js_generation = if let Some(host) = &self.js_plugin_host {
-            let extension_labels = javascript_inventory_labels(&js_resolution.extension_identities);
-            let extension_paths = js_resolution.extension_paths;
-            let manifest = host
-                .prepare_generation(JsGenerationRequest {
-                    project_trusted,
-                    agent_dir: config.agent_dir.display().to_string(),
-                    extension_paths: extension_paths
-                        .iter()
-                        .map(|path| path.display().to_string())
-                        .collect(),
-                    output_pad: config.runtime_settings.output_pad,
-                    show_images: config.runtime_settings.terminal.show_images,
-                    mode: self.presentation_mode,
-                    cwd: config.cwd.display().to_string(),
-                    workspace: config
-                        .workspace
-                        .as_ref()
-                        .map(|workspace| workspace.spec().clone()),
-                    flag_values: config.extension_flag_values.clone(),
-                })
-                .await
-                .map_err(|error| SessionError::Runtime(error.to_string()))?;
-            let candidate = self
-                .dynamic_providers
-                .candidate(&manifest.provider_registrations)
-                .map_err(SessionError::Runtime)?;
-            let generation = match JsPluginGeneration::prepare_with_host(manifest, Arc::clone(host))
-            {
-                Ok(generation) => generation,
-                Err(error) => {
-                    self.dynamic_providers.reject(&candidate);
-                    return Err(SessionError::Runtime(error.to_string()));
-                }
-            };
-            js_extensions = extension_labels;
-            dynamic_provider_candidate = Some(candidate);
-            Some(generation)
-        } else {
-            None
-        };
         let components = GenerationComponents {
             features: FeaturesPlugin::new(
                 self.settings.clone(),
@@ -468,6 +537,8 @@ impl SessionGenerationFactory for ProductSessionFactory {
             dynamic_providers: self.dynamic_providers.clone(),
             dynamic_provider_candidate,
             dynamic_provider_preparation,
+            dynamic_mcp_candidate,
+            dynamic_mcp_preparation,
             package_reconciliations,
         };
         let bindings = self.session_bindings.clone();
@@ -518,6 +589,7 @@ mod tests {
 
     use super::*;
     use crate::test_support::app_config;
+    use axum::response::IntoResponse;
     use pi_core::ProviderId;
     use pi_session::{MultiSessionManager, SessionGenerationOverlay};
 
@@ -527,6 +599,7 @@ mod tests {
         requests: Mutex<Vec<JsGenerationRequest>>,
         retired: Mutex<Vec<String>>,
         provider_registrations: Mutex<Vec<pi_js_plugin::JsProviderRegistration>>,
+        mcp_server_registrations: Mutex<Vec<pi_js_plugin::JsMcpServerRegistration>>,
     }
 
     #[async_trait]
@@ -550,6 +623,33 @@ mod tests {
             &self,
             request: JsGenerationRequest,
         ) -> Result<pi_js_plugin::JsGenerationManifest, pi_js_plugin::JsCallbackError> {
+            let mut mcp_server_registrations =
+                self.mcp_server_registrations.lock().unwrap().clone();
+            for mutation in &request.mcp_server_mutations {
+                match mutation {
+                    pi_js_plugin::JsMcpServerMutation::Register {
+                        extension_path,
+                        name,
+                        config,
+                    } => {
+                        mcp_server_registrations.retain(|registration| {
+                            registration.name != *name || registration.path != *extension_path
+                        });
+                        mcp_server_registrations.push(pi_js_plugin::JsMcpServerRegistration {
+                            plugin_id: "reload-fixture".to_string(),
+                            path: extension_path.clone(),
+                            name: name.clone(),
+                            config: config.clone(),
+                        });
+                    }
+                    pi_js_plugin::JsMcpServerMutation::Unregister {
+                        extension_path,
+                        name,
+                    } => mcp_server_registrations.retain(|registration| {
+                        registration.name != *name || registration.path != *extension_path
+                    }),
+                }
+            }
             self.requests.lock().unwrap().push(request);
             let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
             Ok(pi_js_plugin::JsGenerationManifest {
@@ -566,6 +666,7 @@ mod tests {
                 }],
                 provider_plugins: Vec::new(),
                 provider_registrations: self.provider_registrations.lock().unwrap().clone(),
+                mcp_server_registrations,
                 session_plugins: Vec::new(),
                 diagnostics: Vec::new(),
             })
@@ -602,6 +703,41 @@ command = "fixture-command"
         config.load_mcp_config = false;
         config.trust_override = Some(true);
         config
+    }
+
+    fn has_mcp_manager(session: &pi_session::PiSession) -> bool {
+        session
+            .current()
+            .catalog()
+            .command_specs()
+            .iter()
+            .any(|command| command.name == "mcp")
+    }
+
+    async fn register_disabled_runtime_mcp(
+        session: &pi_session::PiSession,
+        extension: &Path,
+        name: &str,
+    ) {
+        let context = session
+            .current()
+            .plugin_context(pi_plugin::PluginContextScope::Base);
+        pi_js_plugin::execute_context_notification(
+            &context,
+            pi_js_plugin::ExtensionContextNotification::RegisterMcpServer {
+                extension_path: extension.display().to_string(),
+                name: name.to_string(),
+                config: serde_json::json!({"command":"unused", "enabled":false}),
+            },
+        )
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !has_mcp_manager(session) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("runtime registration did not publish an MCP generation");
     }
 
     #[tokio::test]
@@ -969,6 +1105,455 @@ command = "fixture-command"
                 .provider_configs()
                 .any(|(provider, _)| provider.as_str() == "activation-provider")
         );
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_extension_mcp_retires_the_prepared_javascript_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let agent_dir = directory.path().join("agent");
+        let project = directory.path().join("project");
+        let extension = directory.path().join("extension.ts");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(&extension, "export default function () {}\n").unwrap();
+
+        let host = Arc::new(RecordingJsHost::default());
+        host.mcp_server_registrations
+            .lock()
+            .unwrap()
+            .push(pi_js_plugin::JsMcpServerRegistration {
+                plugin_id: "reload-fixture".to_string(),
+                path: extension.display().to_string(),
+                name: "invalid-extension".to_string(),
+                config: serde_json::json!({"url":"not-an-http-url"}),
+            });
+        let mut config = native_only_config(&project, &agent_dir);
+        config.discover_extensions = false;
+        config.extensions.push(extension.display().to_string());
+        let (trust, _) = ProjectTrustService::new(
+            &agent_dir,
+            Some(true),
+            false,
+            pi_settings::DefaultProjectTrust::Ask,
+        )
+        .unwrap();
+        let factory = ProductSessionFactory::new(config, trust, SettingsManager::new(&agent_dir))
+            .with_plugin_context(PresentationMode::Tui, PluginContextBinding::new())
+            .with_js_plugin_host(host.clone());
+        let manager = MultiSessionManager::new(factory);
+        let error = manager
+            .create_session(pi_session::CreateSessionOptions::new(
+                &project,
+                agent_dir.join("invalid-extension-mcp.jsonl"),
+            ))
+            .await
+            .err()
+            .expect("invalid extension MCP must reject generation preparation");
+
+        assert!(
+            error
+                .to_string()
+                .contains("expected an absolute http(s) URL"),
+            "{error}"
+        );
+        assert_eq!(*host.retired.lock().unwrap(), ["js-1"]);
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn extension_mcp_is_generation_local_and_survives_configured_mcp_disable() {
+        let cleaned_up = Arc::new(tokio::sync::Notify::new());
+        let cleanup_signal = cleaned_up.clone();
+        let app = axum::Router::new().route(
+            "/mcp",
+            axum::routing::post(
+                |axum::Json(request): axum::Json<serde_json::Value>| async move {
+                    if request["id"].is_null() {
+                        return axum::http::StatusCode::ACCEPTED.into_response();
+                    }
+                    let result = match request["method"].as_str() {
+                        Some("initialize") => serde_json::json!({
+                            "protocolVersion":"2025-03-26",
+                            "capabilities":{"tools":{}},
+                            "serverInfo":{"name":"extension-fixture","version":"1"}
+                        }),
+                        Some("tools/list") => serde_json::json!({"tools":[{
+                            "name":"echo",
+                            "description":"Echo extension input",
+                            "inputSchema":{"type":"object"}
+                        }]}),
+                        _ => {
+                            return axum::Json(serde_json::json!({
+                                "jsonrpc":"2.0",
+                                "id":request["id"],
+                                "error":{"code":-32601,"message":"unsupported"}
+                            }))
+                            .into_response();
+                        }
+                    };
+                    let initialize = request["method"] == "initialize";
+                    let mut response = axum::Json(serde_json::json!({
+                        "jsonrpc":"2.0",
+                        "id":request["id"],
+                        "result":result
+                    }))
+                    .into_response();
+                    if initialize {
+                        response.headers_mut().insert(
+                            "mcp-session-id",
+                            axum::http::HeaderValue::from_static("extension-session"),
+                        );
+                    }
+                    response
+                },
+            )
+            .delete(move || async move {
+                cleanup_signal.notify_one();
+                axum::http::StatusCode::OK
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let directory = tempfile::tempdir().unwrap();
+        let agent_dir = directory.path().join("agent");
+        let project = directory.path().join("project");
+        let extension = directory.path().join("extension.ts");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(&extension, "export default function () {}\n").unwrap();
+        // This malformed configured file proves --no-mcp-style loading is not re-enabled merely
+        // because an explicit extension contributes a generation-local MCP server.
+        std::fs::write(agent_dir.join("mcp.json"), "malformed").unwrap();
+
+        let host = Arc::new(RecordingJsHost::default());
+        host.mcp_server_registrations
+            .lock()
+            .unwrap()
+            .push(pi_js_plugin::JsMcpServerRegistration {
+                plugin_id: "reload-fixture".to_string(),
+                path: extension.display().to_string(),
+                name: "extension-fixture".to_string(),
+                config: serde_json::json!({"url":url, "exposure":"direct"}),
+            });
+        let mut config = native_only_config(&project, &agent_dir);
+        config.discover_extensions = false;
+        config.extensions.push(extension.display().to_string());
+        let (trust, _) = ProjectTrustService::new(
+            &agent_dir,
+            Some(true),
+            false,
+            pi_settings::DefaultProjectTrust::Ask,
+        )
+        .unwrap();
+        let factory = ProductSessionFactory::new(config, trust, SettingsManager::new(&agent_dir))
+            .with_plugin_context(PresentationMode::Tui, PluginContextBinding::new())
+            .with_js_plugin_host(host.clone());
+        let manager = MultiSessionManager::new(factory);
+        let session = manager
+            .create_session(pi_session::CreateSessionOptions::new(
+                &project,
+                agent_dir.join("extension-mcp.jsonl"),
+            ))
+            .await
+            .unwrap();
+
+        assert!(
+            session
+                .current()
+                .catalog()
+                .command_specs()
+                .iter()
+                .any(|command| command.name == "mcp")
+        );
+        assert!(
+            session
+                .current()
+                .catalog()
+                .tool_specs()
+                .iter()
+                .any(|tool| tool.name == "mcp__extension_fixture__echo"),
+            "extension MCP tools must be executable generation contributions"
+        );
+
+        host.mcp_server_registrations.lock().unwrap().clear();
+        session.reload().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), cleaned_up.notified())
+            .await
+            .expect("removed extension MCP connection was not cleaned up");
+        assert!(
+            session
+                .current()
+                .catalog()
+                .command_specs()
+                .iter()
+                .all(|command| command.name != "mcp"),
+            "removing the extension registration must remove its generation-local manager"
+        );
+        manager.shutdown().await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn runtime_extension_mcp_mutations_publish_through_whole_generation_reload() {
+        let directory = tempfile::tempdir().unwrap();
+        let agent_dir = directory.path().join("agent");
+        let project = directory.path().join("project");
+        let extension = directory.path().join("extension.ts");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(&extension, "export default function () {}\n").unwrap();
+
+        let host = Arc::new(RecordingJsHost::default());
+        let mut config = native_only_config(&project, &agent_dir);
+        config.discover_extensions = false;
+        config.extensions.push(extension.display().to_string());
+        let (trust, _) = ProjectTrustService::new(
+            &agent_dir,
+            Some(true),
+            false,
+            pi_settings::DefaultProjectTrust::Ask,
+        )
+        .unwrap();
+        let factory = ProductSessionFactory::new(config, trust, SettingsManager::new(&agent_dir))
+            .with_plugin_context(PresentationMode::Tui, PluginContextBinding::new())
+            .with_js_plugin_host(host.clone());
+        let manager = MultiSessionManager::new(factory);
+        let session = manager
+            .create_session(pi_session::CreateSessionOptions::new(
+                &project,
+                agent_dir.join("runtime-extension-mcp.jsonl"),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            session
+                .current()
+                .catalog()
+                .command_specs()
+                .iter()
+                .all(|command| command.name != "mcp")
+        );
+
+        let context = session
+            .current()
+            .plugin_context(pi_plugin::PluginContextScope::Base);
+        pi_js_plugin::execute_context_notification(
+            &context,
+            pi_js_plugin::ExtensionContextNotification::RegisterMcpServer {
+                extension_path: extension.display().to_string(),
+                name: "late".to_string(),
+                config: serde_json::json!({"command":"unused", "enabled":false}),
+            },
+        )
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if session
+                    .current()
+                    .catalog()
+                    .command_specs()
+                    .iter()
+                    .any(|command| command.name == "mcp")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("runtime registration did not publish an MCP generation");
+
+        session.reload().await.unwrap();
+        assert!(
+            session
+                .current()
+                .catalog()
+                .command_specs()
+                .iter()
+                .any(|command| command.name == "mcp"),
+            "runtime registration must survive an ordinary reload in the same live scope"
+        );
+        let sibling = manager
+            .create_session(pi_session::CreateSessionOptions::new(
+                &project,
+                agent_dir.join("runtime-extension-mcp-sibling.jsonl"),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            !has_mcp_manager(&sibling),
+            "runtime registration must remain local to its live session scope"
+        );
+
+        register_disabled_runtime_mcp(&sibling, &extension, "fresh-transitions").await;
+        sibling
+            .new_session(&project, agent_dir.join("runtime-extension-mcp-new.jsonl"))
+            .await
+            .unwrap();
+        assert!(
+            !has_mcp_manager(&sibling),
+            "new-session replacement must not import the prior live scope's runtime MCP overlay"
+        );
+
+        let resume_path = agent_dir.join("runtime-extension-mcp-resume.jsonl");
+        let resume_store = pi_session::SessionStore::create(
+            &resume_path,
+            pi_session::SessionHeader::new("resume-target", &project),
+        )
+        .unwrap();
+        let fork_point = resume_store
+            .append_message(pi_core::Message::User(pi_core::UserMessage::text(
+                "resume and fork boundary",
+                1,
+            )))
+            .unwrap();
+        register_disabled_runtime_mcp(&sibling, &extension, "fresh-transitions").await;
+        sibling.resume_session(&resume_path).await.unwrap();
+        assert!(
+            !has_mcp_manager(&sibling),
+            "resume replacement must not import the prior live scope's runtime MCP overlay"
+        );
+
+        register_disabled_runtime_mcp(&sibling, &extension, "fresh-transitions").await;
+        sibling
+            .fork_session(fork_point, pi_session::ForkPosition::At)
+            .await
+            .unwrap();
+        assert!(
+            !has_mcp_manager(&sibling),
+            "fork replacement must not import the prior live scope's runtime MCP overlay"
+        );
+
+        let context = session
+            .current()
+            .plugin_context(pi_plugin::PluginContextScope::Base);
+        pi_js_plugin::execute_context_notification(
+            &context,
+            pi_js_plugin::ExtensionContextNotification::UnregisterMcpServer {
+                extension_path: extension.display().to_string(),
+                name: "late".to_string(),
+            },
+        )
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if session
+                    .current()
+                    .catalog()
+                    .command_specs()
+                    .iter()
+                    .all(|command| command.name != "mcp")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("runtime removal did not publish an MCP generation");
+
+        {
+            let requests = host.requests.lock().unwrap();
+            assert!(requests.iter().any(|request| request.mcp_servers_changed
+                && matches!(
+                    request.mcp_server_mutations.as_slice(),
+                    [pi_js_plugin::JsMcpServerMutation::Register { name, .. }] if name == "late"
+                )));
+            assert!(requests.iter().any(|request| !request.mcp_servers_changed
+                && matches!(
+                    request.mcp_server_mutations.as_slice(),
+                    [pi_js_plugin::JsMcpServerMutation::Register { name, .. }] if name == "late"
+                )));
+            assert!(requests.iter().any(|request| request.mcp_servers_changed
+                && matches!(
+                    request.mcp_server_mutations.as_slice(),
+                    [pi_js_plugin::JsMcpServerMutation::Unregister { name, .. }] if name == "late"
+                )));
+        }
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_runtime_extension_mcp_mutation_preserves_generation_and_is_not_replayed() {
+        let directory = tempfile::tempdir().unwrap();
+        let agent_dir = directory.path().join("agent");
+        let project = directory.path().join("project");
+        let extension = directory.path().join("extension.ts");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(&extension, "export default function () {}\n").unwrap();
+
+        let host = Arc::new(RecordingJsHost::default());
+        let mut config = native_only_config(&project, &agent_dir);
+        config.discover_extensions = false;
+        config.extensions.push(extension.display().to_string());
+        let (trust, _) = ProjectTrustService::new(
+            &agent_dir,
+            Some(true),
+            false,
+            pi_settings::DefaultProjectTrust::Ask,
+        )
+        .unwrap();
+        let factory = ProductSessionFactory::new(config, trust, SettingsManager::new(&agent_dir))
+            .with_plugin_context(PresentationMode::Tui, PluginContextBinding::new())
+            .with_js_plugin_host(host.clone());
+        let manager = MultiSessionManager::new(factory);
+        let session = manager
+            .create_session(pi_session::CreateSessionOptions::new(
+                &project,
+                agent_dir.join("invalid-runtime-extension-mcp.jsonl"),
+            ))
+            .await
+            .unwrap();
+        let original = session.current();
+        let context = original.plugin_context(pi_plugin::PluginContextScope::Base);
+        pi_js_plugin::execute_context_notification(
+            &context,
+            pi_js_plugin::ExtensionContextNotification::RegisterMcpServer {
+                extension_path: extension.display().to_string(),
+                name: "invalid".to_string(),
+                config: serde_json::json!({"url":"not-an-absolute-url"}),
+            },
+        )
+        .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if host
+                    .retired
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|generation| generation == "js-2")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("invalid runtime MCP candidate was not retired");
+        assert!(Arc::ptr_eq(&original, &session.current()));
+        assert!(
+            session
+                .current()
+                .catalog()
+                .command_specs()
+                .iter()
+                .all(|command| command.name != "mcp")
+        );
+
+        session.reload().await.unwrap();
+        {
+            let requests = host.requests.lock().unwrap();
+            assert!(
+                requests
+                    .last()
+                    .is_some_and(|request| request.mcp_server_mutations.is_empty())
+            );
+        }
         manager.shutdown().await.unwrap();
     }
 

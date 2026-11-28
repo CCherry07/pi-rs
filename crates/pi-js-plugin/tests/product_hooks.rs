@@ -73,6 +73,7 @@ fn driver(hooks: &[&str], dispatcher: Arc<Dispatcher>) -> PluginDriver {
             agent_plugins: Vec::new(),
             provider_plugins: Vec::new(),
             provider_registrations: Vec::new(),
+            mcp_server_registrations: Vec::new(),
             session_plugins: vec![JsSessionPluginManifest {
                 id: "extension".into(),
                 hooks: hooks

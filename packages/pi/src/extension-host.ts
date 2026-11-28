@@ -11,6 +11,7 @@ import { ExtensionUI } from './extension-ui.js'
 import { GenerationHookRegistry } from './generation-hook-registry.js'
 import { createExtensionContext } from './extension-context.js'
 import { ExtensionRuntime, type ExecOptions } from './extension-runtime.js'
+import { McpServerRegistry, type McpServerConfig, type RegisteredMcpServer } from './mcp-servers.js'
 import {
   RegistrationPlanner,
   type UnplannedAgentPluginManifest,
@@ -300,6 +301,7 @@ interface GenerationState {
   registeredFlags: Map<string, 'boolean' | 'string'>
   initializing: boolean
   providerRegistrations: ProviderRegistrationManifest[]
+  mcpServers: McpServerRegistry
   streams: Map<string, AssistantStreamState>
   nextCallbackId: number
   hooks: GenerationHookRegistry
@@ -355,6 +357,9 @@ interface ExtensionApi {
   getThinkingLevel(): string
   setThinkingLevel(level: string): void
   unregisterProvider(name: string): void
+  registerMcpServer(name: string, config: McpServerConfig): void
+  unregisterMcpServer(name: string): void
+  getMcpServers(): RegisteredMcpServer[]
   getFlag(name: string): boolean | string | undefined
   events: ExtensionEventBus
 }
@@ -762,6 +767,7 @@ export class ExtensionHost {
       registeredFlags: new Map(),
       initializing: true,
       providerRegistrations: [],
+      mcpServers: new McpServerRegistry(),
       streams: new Map(),
       nextCallbackId: 0,
       hooks: new GenerationHookRegistry(extensions.map(extension => extension.id)),
@@ -783,7 +789,15 @@ export class ExtensionHost {
           providerHooks: [],
           sessionHooks: [],
         }
-        const api = this.#createExtensionApi(generationId, id, path, contribution, diagnostics, commandSourceInfo(path, request))
+        const api = this.#createExtensionApi(
+          generationId,
+          id,
+          path,
+          contribution,
+          diagnostics,
+          commandSourceInfo(path, request),
+          request.mcpServersChanged,
+        )
         const jiti = createJiti(import.meta.url, {
           alias: compatibilityResolver.aliases,
           virtualModules: compatibilityResolver.virtualModules,
@@ -810,6 +824,18 @@ export class ExtensionHost {
         throw new Error(`Unknown JavaScript extension flag${unknownFlags.length === 1 ? '' : 's'}: ${unknownFlags.map(name => `--${name}`).join(', ')}`)
       }
 
+      for (const mutation of request.mcpServerMutations) {
+        const owner = extensions.find(extension => extension.path === mutation.extensionPath)
+        if (!owner) {
+          throw new Error(`stale MCP server mutation for extension ${mutation.extensionPath}`)
+        }
+        if (mutation.type === 'register') {
+          state.mcpServers.register(owner.id, owner.path, mutation.name, mutation.config)
+        } else {
+          state.mcpServers.unregister(mutation.name, owner.path)
+        }
+      }
+
       state.initializing = false
 
       return {
@@ -818,6 +844,7 @@ export class ExtensionHost {
         agentPlugins: state.registrations.plan(agentPlugins),
         providerPlugins,
         providerRegistrations: state.providerRegistrations,
+        mcpServerRegistrations: state.mcpServers.list(),
         sessionPlugins,
         diagnostics,
       }
@@ -834,6 +861,7 @@ export class ExtensionHost {
     contribution: Contribution,
     diagnostics: ExtensionDiagnostic[],
     sourceInfo: CommandManifest['sourceInfo'],
+    mcpServersChanged: boolean,
   ): ExtensionApi {
     const state = this.#requireGeneration(generationId)
     const registeredFlags = new Set<string>()
@@ -905,7 +933,12 @@ export class ExtensionHost {
         this.#requireGeneration(generationId)
         const registeredHandler = parseExternal(callableSchema, value, `pi.on(\"${event}\") handler (${path})`)
         const handler: HookHandler = (eventValue, context) => callDynamic(registeredHandler, undefined, [eventValue, context])
-        const target = AGENT_HOOKS.has(event) ? contribution.agentHooks : PROVIDER_HOOKS.has(event) ? contribution.providerHooks : SESSION_HOOKS.has(event) ? contribution.sessionHooks : undefined
+        const mcpServersChange = event === 'mcp_servers_change'
+        // Late MCP mutations publish a whole replacement generation. Deliver its complete registry
+        // only after activation; ordinary reloads must not synthesize a change event.
+        if (mcpServersChange && !mcpServersChanged) return () => undefined
+        const nativeEvent = mcpServersChange ? 'session_start' : event
+        const target = AGENT_HOOKS.has(nativeEvent) ? contribution.agentHooks : PROVIDER_HOOKS.has(nativeEvent) ? contribution.providerHooks : SESSION_HOOKS.has(nativeEvent) ? contribution.sessionHooks : undefined
         if (!target) {
           if (KNOWN_HOOKS.has(event)) {
             inactive(`pi.on(\"${event}\")`)
@@ -916,7 +949,9 @@ export class ExtensionHost {
         const callbackId = this.#nextCallbackId(state, pluginId, `hook-${event}`)
         this.#registerCallback(state, callbackId, async (invocation, signal, nativeContext) => {
           const payload = parseExternal(hookInvocationPayloadSchema, invocation.payload, `JavaScript hook ${event} invocation payload`)
-          const eventValue = payload.event
+          const eventValue = mcpServersChange
+            ? { type: 'mcp_servers_change', servers: state.mcpServers.publicList() }
+            : payload.event
           const chainedSystemPrompt = event === 'before_agent_start' && typeof eventValue.systemPrompt === 'string'
             ? eventValue.systemPrompt
             : undefined
@@ -1002,8 +1037,8 @@ export class ExtensionHost {
           if (event === 'user_bash') return this.#prepareUserBashResult(state, pluginId, result)
           return result ?? null
         })
-        target.push({ name: event, callbackId })
-        return state.hooks.subscribe(pluginId, event, callbackId)
+        target.push({ name: nativeEvent, callbackId })
+        return state.hooks.subscribe(pluginId, nativeEvent, callbackId)
       },
       registerCommand: (name, value) => {
         if (!name) throw new Error(`registerCommand requires a name and handler (${path})`)
@@ -1161,6 +1196,36 @@ export class ExtensionHost {
           state.runtime.notify({ type: 'unregisterProvider', name })
         }
       },
+      registerMcpServer: (name, config) => {
+        const previous = state.mcpServers.get(name, path)
+        state.mcpServers.register(pluginId, path, name, config)
+        if (state.initializing) return
+        const registered = state.mcpServers.get(name, path)
+        if (!registered) throw new Error(`MCP server ${JSON.stringify(name)} was not registered (${path})`)
+        try {
+          state.runtime.notify({
+            type: 'registerMcpServer',
+            extensionPath: path,
+            name: registered.name,
+            config: registered.config,
+          })
+        } catch (error) {
+          if (previous) state.mcpServers.register(previous.pluginId, previous.path, previous.name, previous.config)
+          else state.mcpServers.unregister(name, path)
+          throw error
+        }
+      },
+      unregisterMcpServer: name => {
+        const previous = state.mcpServers.get(name, path)
+        if (!state.mcpServers.unregister(name, path) || state.initializing) return
+        try {
+          state.runtime.notify({ type: 'unregisterMcpServer', extensionPath: path, name })
+        } catch (error) {
+          if (previous) state.mcpServers.register(previous.pluginId, previous.path, previous.name, previous.config)
+          throw error
+        }
+      },
+      getMcpServers: () => state.mcpServers.publicList(),
       getFlag: name => registeredFlags.has(name) ? state.flagValues.get(name) : undefined,
       events: state.events,
     }

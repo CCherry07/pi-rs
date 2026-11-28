@@ -41,8 +41,25 @@ impl McpCommand {
 
     pub(super) fn manager_actions(&self, row: &McpServerRow) -> Vec<(Action, String)> {
         let mut actions = vec![(Action::Inspect, "Inspect".into())];
+        let extension_owned = row.scope == McpScope::Extension;
         let project_override =
             row.scope == McpScope::Global && self.library.path(McpScope::Project).is_ok();
+        if extension_owned {
+            if !row.enabled {
+                return actions;
+            }
+            if self.server_state(row) == McpServerState::NeedsAuth && row.supports_oauth {
+                actions.push((Action::SignIn, "Sign in".into()));
+            }
+            if self.server_state(row) == McpServerState::Connected {
+                actions.push((Action::Tools, "Tools".into()));
+                if row.supports_oauth {
+                    actions.push((Action::SignOut, "Sign out".into()));
+                }
+            }
+            actions.push((Action::Reconnect, "Reconnect".into()));
+            return actions;
+        }
         if !row.enabled {
             actions.push((Action::Enable(row.scope), "Enable".into()));
             if project_override {
@@ -219,7 +236,7 @@ impl McpCommand {
                     Action::Inspect => {
                         let source = self
                             .library
-                            .path(row.defining_scope)
+                            .server_source(&row.name, row.defining_scope)
                             .map_err(CommandError::Execution)?;
                         let override_note = if row.scope != row.defining_scope {
                             format!(

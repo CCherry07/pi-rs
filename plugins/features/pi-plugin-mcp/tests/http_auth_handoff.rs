@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -35,7 +36,7 @@ struct Trace {
 }
 
 struct StateData {
-    replay_ok: bool,
+    replay_ok: AtomicBool,
     trace: Mutex<Trace>,
 }
 
@@ -66,7 +67,7 @@ impl Fixture {
             "token_endpoint_auth_methods_supported": ["client_secret_post"]
         });
         let state = Arc::new(StateData {
-            replay_ok,
+            replay_ok: AtomicBool::new(replay_ok),
             trace: Mutex::new(Trace::default()),
         });
         let router = Router::new()
@@ -99,7 +100,13 @@ impl Fixture {
                 },
             )
             .unwrap();
-        Self { url, metadata_url, store, state, task }
+        Self {
+            url,
+            metadata_url,
+            store,
+            state,
+            task,
+        }
     }
 
     async fn connect(&self) -> McpToolSet {
@@ -135,7 +142,10 @@ async fn refresh(
 }
 
 fn response(request: &Value, result: Value, status: StatusCode) -> Response {
-    (status, Json(json!({"jsonrpc":"2.0", "id":request["id"], "result":result})))
+    (
+        status,
+        Json(json!({"jsonrpc":"2.0", "id":request["id"], "result":result})),
+    )
         .into_response()
 }
 
@@ -152,23 +162,35 @@ async fn mcp(
         "server/discover" => Json(json!({
             "jsonrpc":"2.0", "id":request["id"],
             "error":{"code":-32601,"message":"Use initialize"}
-        })).into_response(),
+        }))
+        .into_response(),
         "initialize" => {
             trace.initializes += 1;
-            let mut response = response(&request, json!({
-                "protocolVersion":"2025-03-26",
-                "capabilities":{"tools":{},"resources":{}},
-                "serverInfo":{"name":"explicit-fixture","version":"1"}
-            }), StatusCode::OK);
-            response.headers_mut().insert("mcp-session-id", HeaderValue::from_static("explicit-session"));
+            let mut response = response(
+                &request,
+                json!({
+                    "protocolVersion":"2025-03-26",
+                    "capabilities":{"tools":{},"resources":{}},
+                    "serverInfo":{"name":"explicit-fixture","version":"1"}
+                }),
+                StatusCode::OK,
+            );
+            response.headers_mut().insert(
+                "mcp-session-id",
+                HeaderValue::from_static("explicit-session"),
+            );
             response
         }
         "tools/list" => {
             trace.lists += 1;
-            response(&request, json!({"tools":[{
-                "name":"echo", "description":"Frozen explicit callable",
-                "inputSchema":{"type":"object","properties":{"value":{"type":"string"}}}
-            }]}), StatusCode::OK)
+            response(
+                &request,
+                json!({"tools":[{
+                    "name":"echo", "description":"Frozen explicit callable",
+                    "inputSchema":{"type":"object","properties":{"value":{"type":"string"}}}
+                }]}),
+                StatusCode::OK,
+            )
         }
         "tools/call" => {
             trace.calls.push(Call {
@@ -176,20 +198,32 @@ async fn mcp(
                 authorization: headers["authorization"].to_str().unwrap().to_string(),
                 session: headers["mcp-session-id"].to_str().unwrap().to_string(),
             });
-            if trace.calls.len() == 1 || !state.replay_ok {
+            if trace.calls.len() == 1 || !state.replay_ok.load(Ordering::Acquire) {
                 // Status must win over a syntactically successful RPC body, without a challenge.
-                return response(&request, json!({"content":[{
-                    "type":"text","text":"spoofed success on HTTP 401"
-                }]}), StatusCode::UNAUTHORIZED);
+                return response(
+                    &request,
+                    json!({"content":[{
+                        "type":"text","text":"spoofed success on HTTP 401"
+                    }]}),
+                    StatusCode::UNAUTHORIZED,
+                );
             }
             trace.executions += 1;
-            response(&request, json!({"content":[{"type":"text","text":"executed once"}]}), StatusCode::OK)
+            response(
+                &request,
+                json!({"content":[{"type":"text","text":"executed once"}]}),
+                StatusCode::OK,
+            )
         }
         "resources/read" => {
             trace.resource_reads += 1;
-            response(&request, json!({"contents":[{
-                "uri":"fixture://doc","text":"spoofed success on HTTP 503"
-            }]}), StatusCode::SERVICE_UNAVAILABLE)
+            response(
+                &request,
+                json!({"contents":[{
+                    "uri":"fixture://doc","text":"spoofed success on HTTP 503"
+                }]}),
+                StatusCode::SERVICE_UNAVAILABLE,
+            )
         }
         method => panic!("unexpected method {method}"),
     }
@@ -215,6 +249,63 @@ async fn execute(
 }
 
 #[tokio::test]
+async fn explicit_terminal_auth_does_not_inherit_supervised_needs_auth_state() {
+    let fixture = Fixture::new(false).await;
+    let pool = fixture.connect().await;
+    let frozen = pool.tools();
+    let (_, registry) = RegistriesBuilder::new()
+        .register_plugins(vec![pool.plugin()])
+        .unwrap();
+    assert!(matches!(
+        execute(
+            &registry,
+            "mcp__explicit__echo",
+            json!({"value":"rejected"})
+        )
+        .await,
+        Err(ToolError::Execution(_))
+    ));
+    {
+        let trace = fixture.state.trace.lock().unwrap();
+        assert_eq!(trace.calls.len(), 2);
+        assert_eq!(trace.calls[0].request, trace.calls[1].request);
+        assert_eq!(trace.refresh_forms.len(), 1);
+        assert_eq!(trace.executions, 0);
+    }
+
+    // A separate logical call, not another replay of the rejected operation. The low-level
+    // explicit API has no Coding needs-auth lifecycle to fence it or create a new session.
+    fixture.state.replay_ok.store(true, Ordering::Release);
+    let result = execute(
+        &registry,
+        "mcp__explicit__echo",
+        json!({"value":"independent"}),
+    )
+    .await
+    .expect("explicit auth failure must not retire the existing service");
+    assert_eq!(
+        result.content,
+        vec![ContentBlock::Text(TextContent::new("executed once"))]
+    );
+    assert_eq!(pool.tools(), frozen);
+    pool.shutdown().await.unwrap();
+    let trace = fixture.state.trace.lock().unwrap();
+    assert_eq!((trace.initializes, trace.lists), (1, 1));
+    assert_eq!(trace.calls.len(), 3);
+    assert_ne!(trace.calls[2].request["id"], trace.calls[0].request["id"]);
+    assert_eq!(
+        trace.calls[2].request["params"]["arguments"],
+        json!({"value":"independent"})
+    );
+    for call in &trace.calls {
+        assert_eq!(call.authorization, "Bearer unchanged-access");
+        assert_eq!(call.session, "explicit-session");
+    }
+    assert_eq!(trace.refresh_forms.len(), 1);
+    assert_eq!(trace.executions, 1);
+}
+
+#[tokio::test]
 async fn explicit_oauth_replays_an_unchanged_token_once_without_supervised_resource_recovery() {
     // Separate scenarios, never a retry of a failed test or logical invocation.
     for replay_ok in [true, false] {
@@ -225,16 +316,26 @@ async fn explicit_oauth_replays_an_unchanged_token_once_without_supervised_resou
             .register_plugins(vec![pool.plugin()])
             .unwrap();
         assert!(registry.command_specs().is_empty());
-        let result = execute(&registry, "mcp__explicit__echo", json!({"value":"original"})).await;
+        let result = execute(
+            &registry,
+            "mcp__explicit__echo",
+            json!({"value":"original"}),
+        )
+        .await;
         if replay_ok {
             assert_eq!(
                 result.unwrap().content,
                 vec![ContentBlock::Text(TextContent::new("executed once"))]
             );
-            // Explicit mode retains SDK session-expiry handling, not supervised resource retry.
+            // Explicit pools share fresh-service expiry recovery, not supervised resource retry.
             // Use 503, not session-attached 404, to distinguish that ownership boundary.
             assert!(matches!(
-                execute(&registry, "read_mcp_resource", json!({"server":"explicit","uri":"fixture://doc"})).await,
+                execute(
+                    &registry,
+                    "read_mcp_resource",
+                    json!({"server":"explicit","uri":"fixture://doc"})
+                )
+                .await,
                 Err(ToolError::Execution(_))
             ));
         } else {
@@ -250,7 +351,10 @@ async fn explicit_oauth_replays_an_unchanged_token_once_without_supervised_resou
             for call in &trace.calls {
                 assert_eq!(call.authorization, "Bearer unchanged-access");
                 assert_eq!(call.session, "explicit-session");
-                assert_eq!(call.request["params"]["arguments"], json!({"value":"original"}));
+                assert_eq!(
+                    call.request["params"]["arguments"],
+                    json!({"value":"original"})
+                );
             }
             assert_eq!(trace.executions, usize::from(replay_ok));
             assert_eq!(trace.resource_reads, usize::from(replay_ok));

@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use pi_js_plugin::{
     JsAgentPluginManifest, JsCallbackDispatcher, JsCallbackError, JsGenerationManifest,
-    JsHookManifest, JsInvocation, JsPluginGeneration, JsProviderPluginManifest,
-    JsProviderRegistration,
+    JsHookManifest, JsInvocation, JsMcpServerRegistration, JsPluginGeneration,
+    JsProviderPluginManifest, JsProviderRegistration,
 };
 use pi_plugin::AgentHook;
 use serde_json::Value;
@@ -36,6 +36,7 @@ fn legacy_callback_lists_merge_without_reordering_either_hook_family() {
             .collect(),
         provider_plugins: Vec::new(),
         provider_registrations: Vec::new(),
+        mcp_server_registrations: Vec::new(),
         diagnostics: Vec::new(),
     };
     let generation = JsPluginGeneration::prepare(
@@ -75,6 +76,7 @@ fn configured_provider_registrations_are_validated_and_retained() {
                 name: "proxy".to_string(),
                 config: serde_json::json!({"baseUrl": "https://proxy.example/v1"}),
             }],
+            mcp_server_registrations: Vec::new(),
             session_plugins: Vec::new(),
             diagnostics: Vec::new(),
         },
@@ -83,6 +85,72 @@ fn configured_provider_registrations_are_validated_and_retained() {
     .unwrap();
 
     assert_eq!(generation.provider_registrations()[0].name, "proxy");
+}
+
+#[test]
+fn configured_mcp_server_registrations_are_validated_and_retained() {
+    let generation = JsPluginGeneration::prepare(
+        JsGenerationManifest {
+            generation_id: "js-mcp-registration".to_string(),
+            dynamic_hooks: false,
+            agent_plugins: vec![JsAgentPluginManifest {
+                id: "js:0:mcp.ts".to_string(),
+                tools: Vec::new(),
+                commands: Vec::new(),
+                hooks: Vec::new(),
+            }],
+            provider_plugins: Vec::new(),
+            provider_registrations: Vec::new(),
+            mcp_server_registrations: vec![JsMcpServerRegistration {
+                plugin_id: "js:0:mcp.ts".to_string(),
+                path: "/mcp.ts".to_string(),
+                name: "docs".to_string(),
+                config: serde_json::json!({
+                    "url": "https://example.com/mcp",
+                    "headers": {"Authorization": "secret-token"}
+                }),
+            }],
+            session_plugins: Vec::new(),
+            diagnostics: Vec::new(),
+        },
+        Arc::new(RetiringDispatcher::default()),
+    )
+    .unwrap();
+
+    assert_eq!(generation.mcp_server_registrations()[0].name, "docs");
+    let debug = format!("{:?}", generation.mcp_server_registrations()[0]);
+    assert!(!debug.contains("secret-token"), "{debug}");
+    assert!(debug.contains("<redacted>"), "{debug}");
+}
+
+#[test]
+fn mcp_server_registration_requires_a_manifest_plugin_owner() {
+    let dispatcher = Arc::new(RetiringDispatcher::default());
+    let result = JsPluginGeneration::prepare(
+        JsGenerationManifest {
+            generation_id: "js-orphan-mcp-registration".to_string(),
+            dynamic_hooks: false,
+            agent_plugins: Vec::new(),
+            provider_plugins: Vec::new(),
+            provider_registrations: Vec::new(),
+            mcp_server_registrations: vec![JsMcpServerRegistration {
+                plugin_id: "missing-owner".to_string(),
+                path: "/mcp.ts".to_string(),
+                name: "docs".to_string(),
+                config: serde_json::json!({"command":"fixture"}),
+            }],
+            session_plugins: Vec::new(),
+            diagnostics: Vec::new(),
+        },
+        dispatcher.clone(),
+    );
+
+    let error = result.err().expect("orphan MCP registration was accepted");
+    assert!(error.to_string().contains("no matching agent plugin owner"));
+    assert_eq!(
+        *dispatcher.retired.lock().unwrap(),
+        ["js-orphan-mcp-registration"]
+    );
 }
 
 #[test]
@@ -100,6 +168,7 @@ fn malformed_provider_registration_retires_the_candidate_generation() {
                 name: "proxy".to_string(),
                 config: serde_json::json!("not-an-object"),
             }],
+            mcp_server_registrations: Vec::new(),
             session_plugins: Vec::new(),
             diagnostics: Vec::new(),
         },
@@ -154,6 +223,7 @@ fn agent_hook_interests_are_derived_from_the_validated_manifest() {
             }])],
             provider_plugins: Vec::new(),
             provider_registrations: Vec::new(),
+            mcp_server_registrations: Vec::new(),
             session_plugins: Vec::new(),
             diagnostics: Vec::new(),
         },
@@ -199,6 +269,7 @@ fn observer_batching_keeps_mutating_hooks_on_their_owning_plugin() {
             ],
             provider_plugins: Vec::new(),
             provider_registrations: Vec::new(),
+            mcp_server_registrations: Vec::new(),
             session_plugins: Vec::new(),
             diagnostics: Vec::new(),
         },
@@ -236,6 +307,7 @@ fn unsupported_hooks_fail_the_candidate_and_retire_its_host_generation() {
             }])],
             provider_plugins: Vec::new(),
             provider_registrations: Vec::new(),
+            mcp_server_registrations: Vec::new(),
             session_plugins: Vec::new(),
             diagnostics: Vec::new(),
         },
@@ -269,6 +341,7 @@ fn callback_ids_are_unique_across_the_three_lifecycle_manifests() {
                 }],
             }],
             provider_registrations: Vec::new(),
+            mcp_server_registrations: Vec::new(),
             session_plugins: Vec::new(),
             diagnostics: Vec::new(),
         },

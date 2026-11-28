@@ -124,6 +124,37 @@ struct ActivationFactory {
     rolled_back: Arc<AtomicBool>,
 }
 
+struct DropFlag(Arc<AtomicBool>);
+
+impl Drop for DropFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+#[derive(Clone)]
+struct BlockingReloadFactory {
+    inner: TestFactory,
+    started: Arc<tokio::sync::Notify>,
+    dropped: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl SessionGenerationFactory for BlockingReloadFactory {
+    async fn prepare_generation(
+        &self,
+        request: SessionGenerationRequest,
+    ) -> Result<PreparedSessionGeneration, SessionError> {
+        if request.reason == SessionStartReason::Reload {
+            let _drop = DropFlag(Arc::clone(&self.dropped));
+            self.started.notify_one();
+            std::future::pending::<()>().await;
+            unreachable!("cancelled reload preparation must never complete")
+        }
+        self.inner.prepare_generation(request).await
+    }
+}
+
 #[async_trait]
 impl SessionGenerationFactory for ActivationFactory {
     async fn prepare_generation(
@@ -745,6 +776,181 @@ async fn session_plugin_load_failure_keeps_whole_generation_active() {
         ["prepare:Startup", "start:Startup", "prepare:Reload"]
     );
     manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn close_session_cancels_an_unpublished_reload_without_closing_the_manager() {
+    let directory = tempfile::tempdir().unwrap();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let factory = BlockingReloadFactory {
+        inner: TestFactory::new(),
+        started: Arc::clone(&started),
+        dropped: Arc::clone(&dropped),
+    };
+    let manager = MultiSessionManager::new(factory);
+    let session = manager
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("first.jsonl"),
+        ))
+        .await
+        .unwrap();
+    let reload = tokio::spawn({
+        let session = session.clone();
+        async move { session.reload().await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(1), started.notified())
+        .await
+        .expect("reload preparation started");
+
+    let (first_close, duplicate_close) =
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            tokio::join!(
+                manager.close_session(&session),
+                manager.close_session(&session)
+            )
+        })
+        .await
+        .expect("duplicate closes must not wait forever behind reload");
+    assert!(
+        (first_close.is_ok()
+            && matches!(
+                duplicate_close,
+                Err(MultiSessionManagerError::UnknownSession)
+            ))
+            || (duplicate_close.is_ok()
+                && matches!(first_close, Err(MultiSessionManagerError::UnknownSession)))
+    );
+    assert!(dropped.load(Ordering::Acquire));
+    assert!(matches!(
+        reload.await.unwrap(),
+        Err(MultiSessionManagerError::Session(SessionError::Closed))
+    ));
+    assert!(session.current().is_closed());
+    assert!(manager.sessions().is_empty());
+
+    let second = manager
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("second.jsonl"),
+        ))
+        .await
+        .expect("per-session close must leave the manager open");
+    manager.close_session(&second).await.unwrap();
+}
+
+#[tokio::test]
+async fn owner_close_cancels_unpublished_descendant_reload_before_lifecycle_gate() {
+    let directory = tempfile::tempdir().unwrap();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let factory = BlockingReloadFactory {
+        inner: TestFactory::new(),
+        started: Arc::clone(&started),
+        dropped: Arc::clone(&dropped),
+    };
+    let manager = MultiSessionManager::new(factory);
+    let owner = manager
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("owner.jsonl"),
+        ))
+        .await
+        .unwrap();
+    let child = manager
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("child.jsonl"),
+        ))
+        .await
+        .unwrap();
+    let grandchild = manager
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("grandchild.jsonl"),
+        ))
+        .await
+        .unwrap();
+    manager
+        .inner
+        .isolated_sessions
+        .restore(owner.registration_id().to_owned(), child.clone());
+    manager
+        .inner
+        .isolated_sessions
+        .restore(child.registration_id().to_owned(), grandchild.clone());
+    let reload = tokio::spawn({
+        let grandchild = grandchild.clone();
+        async move { grandchild.reload().await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(1), started.notified())
+        .await
+        .expect("grandchild reload preparation started");
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        manager.close_session(&owner),
+    )
+    .await
+    .expect("owner close must not wait forever behind a descendant reload")
+    .unwrap();
+    assert!(dropped.load(Ordering::Acquire));
+    assert!(matches!(
+        reload.await.unwrap(),
+        Err(MultiSessionManagerError::Session(SessionError::Closed))
+    ));
+    assert!(owner.current().is_closed());
+    assert!(child.current().is_closed());
+    assert!(grandchild.current().is_closed());
+    assert!(manager.sessions().is_empty());
+
+    let sibling = manager
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("sibling.jsonl"),
+        ))
+        .await
+        .expect("tree close must leave the manager open");
+    manager.close_session(&sibling).await.unwrap();
+}
+
+#[tokio::test]
+async fn manager_shutdown_cancels_an_unpublished_reload_before_waiting_for_the_lifecycle_gate() {
+    let directory = tempfile::tempdir().unwrap();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let factory = BlockingReloadFactory {
+        inner: TestFactory::new(),
+        started: Arc::clone(&started),
+        dropped: Arc::clone(&dropped),
+    };
+    let manager = MultiSessionManager::new(factory);
+    let session = manager
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("session.jsonl"),
+        ))
+        .await
+        .unwrap();
+    let reload = tokio::spawn({
+        let session = session.clone();
+        async move { session.reload().await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(1), started.notified())
+        .await
+        .expect("reload preparation started");
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), manager.shutdown())
+        .await
+        .expect("shutdown must not wait forever behind reload")
+        .unwrap();
+    assert!(dropped.load(Ordering::Acquire));
+    assert!(matches!(
+        reload.await.unwrap(),
+        Err(MultiSessionManagerError::Closed)
+    ));
+    assert!(session.current().is_closed());
 }
 
 #[tokio::test]

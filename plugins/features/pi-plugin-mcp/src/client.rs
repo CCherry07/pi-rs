@@ -10,6 +10,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::http_transport::HttpTransportConfig as StreamableHttpClientTransportConfig;
+use crate::http_transport::PiHttpTransport as StreamableHttpClientTransport;
 use async_trait::async_trait;
 use pi_core::{
     ContentBlock, PluginId, TextContent, ToolCallId, ToolExecutionMode, ToolResult, ToolSpec,
@@ -27,8 +29,7 @@ use rmcp::service::{
     ClientInitializeError, ClientLifecycleMode, ClientServiceExt, RunningService,
     RunningServiceCancellationToken,
 };
-use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
+use rmcp::transport::TokioChildProcess;
 use rmcp::{Peer, RoleClient};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -358,6 +359,8 @@ pub(crate) struct McpConnectionOptions {
     root: Option<PathBuf>,
     log_path: Option<PathBuf>,
     mode: ConnectionMode,
+    #[cfg(test)]
+    test_callbacks: Option<crate::client_handler::testing::Callbacks>,
 }
 
 impl McpConnectionOptions {
@@ -373,6 +376,8 @@ impl From<&McpServerPolicy> for McpConnectionOptions {
             root: policy.root.clone(),
             log_path: policy.log_path.clone(),
             mode: ConnectionMode::Explicit,
+            #[cfg(test)]
+            test_callbacks: None,
         }
     }
 }
@@ -381,6 +386,7 @@ impl From<&McpServerPolicy> for McpConnectionOptions {
 /// The metadata is captured once after the handshake, not a live registry.
 pub(crate) struct McpConnection {
     name: String,
+    provider_auth: Option<String>,
     metadata: Option<Arc<rmcp::model::ServerPeerInfo>>,
     discovery_revision: u64,
     discovery: discovery::DiscoveryControl,
@@ -468,7 +474,7 @@ pub(crate) struct ConnectedServer {
     pub(crate) name: String,
     policy: McpServerPolicy,
     connection: Arc<McpConnection>,
-    supervision: Option<request::SupervisedConnection>,
+    binding: Option<request::ConnectionBinding>,
 }
 
 impl ConnectedServer {
@@ -477,7 +483,7 @@ impl ConnectedServer {
             name: connection.name().to_string(),
             policy,
             connection,
-            supervision: None,
+            binding: None,
         })
     }
 }
@@ -616,9 +622,18 @@ impl McpToolSet {
         )?;
         let mut builder = McpToolSetBuilder::default();
         let mut authorization_required = Vec::new();
+        let mut owners = BTreeMap::new();
 
         for (config, policy) in configs {
-            let options = McpConnectionOptions::from(&policy);
+            // Explicit pools use the same bounded exact-slot replacement mechanism,
+            // but own their slots directly instead of borrowing a generation lease.
+            let options = McpConnectionOptions::from(&policy).supervised();
+            let input = crate::supervisor::ConnectionInput::new(
+                config.clone(),
+                options.clone(),
+                auth.clone(),
+                [0; 32],
+            )?;
             let discovered = connect_inventory(config, options, auth.clone()).await;
             let (connection, remote_tools) = match discovered {
                 Ok(discovered) => discovered,
@@ -628,9 +643,19 @@ impl McpToolSet {
                 }
                 Err(error) => return Err(error),
             };
+            owners.insert(
+                connection.name().to_owned(),
+                crate::supervisor::OwnedConnectionSlot::ready(
+                    input,
+                    connection.clone(),
+                    remote_tools.clone(),
+                ),
+            );
             builder.add_connection(connection, remote_tools, policy)?;
         }
-        Ok(builder.finish(authorization_required))
+        builder
+            .finish(authorization_required)
+            .with_explicit_connections(owners)
     }
 
     /// Projects raw connections into a new immutable generation without reconnecting.
@@ -779,13 +804,18 @@ impl McpToolSet {
             .servers
             .iter()
             .find(|server| server.name == name)
-            .filter(|server| server.connection.is_closed())
-            .map(|server| {
-                server
-                    .connection
-                    .handler
-                    .stderr
-                    .message("Connection closed")
+            .and_then(|server| {
+                if let Some(binding) = &server.binding {
+                    binding.diagnostic()
+                } else {
+                    server.connection.is_closed().then(|| {
+                        server
+                            .connection
+                            .handler
+                            .stderr
+                            .message("Connection closed")
+                    })
+                }
             })
     }
 
@@ -853,7 +883,15 @@ impl McpToolSet {
     pub async fn shutdown(&self) -> Result<(), McpError> {
         let mut first_error = None;
         for server in &self.inner.servers {
-            if let Err(error) = server.connection.close().await {
+            let result = match server
+                .binding
+                .as_ref()
+                .and_then(request::ConnectionBinding::owned)
+            {
+                Some(owner) => owner.close().await,
+                None => server.connection.close().await,
+            };
+            if let Err(error) = result {
                 first_error.get_or_insert(error);
             }
         }
@@ -889,6 +927,10 @@ async fn connect_server(
         auth,
     } = config;
     let mut handler = McpClientHandler::new(options.root.as_deref());
+    #[cfg(test)]
+    {
+        handler.callbacks = options.test_callbacks.clone();
+    }
     let redactor = crate::diagnostics::Redactor::new(&transport, oauth.as_ref());
     handler.stderr = crate::diagnostics::StderrCapture::new(redactor.clone());
     handler.log = options
@@ -930,7 +972,14 @@ async fn connect_server(
         }
         Err(error) => return Err(error),
     };
-    let connection = connected_transport(name, handler, service);
+    let provider = auth
+        .as_ref()
+        .filter(|_| {
+            matches!(&transport, McpTransport::Http { headers, .. }
+            if !headers.keys().any(|name| name.eq_ignore_ascii_case("authorization")))
+        })
+        .map(|auth| auth.provider.clone());
+    let connection = connected_transport(name, provider, handler, service);
     connection.subscribe_tools().await;
     Ok(connection)
 }
@@ -958,8 +1007,18 @@ async fn connect_once(
                 let headers = http_headers(name, headers)?;
                 let has_static_authorization = headers.contains_key(&http::header::AUTHORIZATION);
                 let transport_config = StreamableHttpClientTransportConfig::with_uri(url.clone())
-                    .custom_headers(headers)
-                    .reinit_on_expired_session(mode == ConnectionMode::Explicit);
+                    .custom_headers(headers);
+                #[cfg(test)]
+                let transport_config = {
+                    let mut config = transport_config;
+                    if let Some(callbacks) = &handler.callbacks {
+                        config.channel_buffer_capacity = 1;
+                        if let Some(timeout) = callbacks.control_timeout {
+                            config.control_request_timeout = timeout;
+                        }
+                    }
+                    config
+                };
                 if let Some(provider_auth) = provider_auth.filter(|_| !has_static_authorization) {
                     let resolver = client_auth.provider_tokens.clone().ok_or_else(|| {
                         McpError::Initialize {
@@ -1042,9 +1101,8 @@ fn handshake_diagnostic(
     } else {
         McpError::Initialize {
             server: name.to_string(),
-            message: stderr.message(
-                "handshake failed; check endpoint, credentials and server availability",
-            ),
+            message: stderr
+                .message("handshake failed; check endpoint, credentials and server availability"),
         }
     }
 }
@@ -1057,32 +1115,36 @@ fn handshake_auth_challenge(error: &ClientInitializeError) -> Option<Option<&str
             handshake_auth_challenge(fallback)
         }
         ClientInitializeError::TransportError { error, .. } => {
-            match error.error.downcast_ref::<HttpError>()? {
-                HttpError::Client(error) => {
-                    let rejection = error.auth_rejection()?;
-                    (rejection.requires_sign_in()
-                        || (rejection.status() == http::StatusCode::UNAUTHORIZED
-                            && rejection.has_auth_provider()))
-                        .then_some(rejection.challenge())
-                }
-                HttpError::Auth(rmcp::transport::auth::AuthError::AuthorizationRequired) => {
-                    Some(None)
-                }
-                _ => None,
-            }
+            auth_challenge(crate::http_client::transport_error(error.error.as_ref())?)
         }
+        _ => None,
+    }
+}
+
+fn auth_challenge(error: &HttpError) -> Option<Option<&str>> {
+    match error {
+        HttpError::Client(error) => {
+            let rejection = error.auth_rejection()?;
+            (rejection.requires_sign_in()
+                || (rejection.status() == http::StatusCode::UNAUTHORIZED
+                    && rejection.has_auth_provider()))
+            .then_some(rejection.challenge())
+        }
+        HttpError::Auth(rmcp::transport::auth::AuthError::AuthorizationRequired) => Some(None),
         _ => None,
     }
 }
 
 fn connected_transport(
     name: String,
+    provider_auth: Option<String>,
     handler: McpClientHandler,
     service: RunningService<RoleClient, McpClientHandler>,
 ) -> Arc<McpConnection> {
     let discovery_revision = *handler.tools_changed.borrow();
     Arc::new(McpConnection {
         name,
+        provider_auth,
         metadata: service.peer().peer_info(),
         discovery_revision,
         discovery: discovery::DiscoveryControl::default(),
@@ -1103,7 +1165,7 @@ fn connected_server(
     handler: McpClientHandler,
     service: RunningService<RoleClient, McpClientHandler>,
 ) -> Arc<ConnectedServer> {
-    ConnectedServer::new(connected_transport(name, handler, service), policy)
+    ConnectedServer::new(connected_transport(name, None, handler, service), policy)
 }
 
 pub fn validate_configs(configs: &[McpServerConfig]) -> Result<(), McpError> {
@@ -1244,18 +1306,28 @@ fn http_headers(
 ) -> Result<HashMap<http::HeaderName, http::HeaderValue>, McpError> {
     let invalid = || McpError::InvalidHttp {
         server: name.into(),
-        message: "invalid or duplicate header",
+        message: "invalid header",
     };
-    let mut result = HashMap::new();
+    let mut combined: HashMap<http::HeaderName, String> = HashMap::new();
+    // HeaderName normalizes ASCII case. Preserve the caller map's representable order while
+    // matching the web Headers append/fold behavior used before transport-owned setters.
     for (key, value) in headers {
         let key: http::HeaderName = key.parse().map_err(|_| invalid())?;
-        let mut value: http::HeaderValue = value.parse().map_err(|_| invalid())?;
-        value.set_sensitive(true);
-        if result.insert(key, value).is_some() {
-            return Err(invalid());
+        if let Some(existing) = combined.get_mut(&key) {
+            existing.push_str(", ");
+            existing.push_str(value);
+        } else {
+            combined.insert(key, value.clone());
         }
     }
-    Ok(result)
+    combined
+        .into_iter()
+        .map(|(key, value)| {
+            let mut value: http::HeaderValue = value.parse().map_err(|_| invalid())?;
+            value.set_sensitive(true);
+            Ok((key, value))
+        })
+        .collect()
 }
 
 struct McpToolPlugin {
@@ -1446,6 +1518,10 @@ pub(crate) enum McpRequestError {
     Control(operation::OperationError),
     Timeout(Duration),
     Disconnected(String),
+    AuthorizationRequired {
+        required: McpAuthorizationRequired,
+        source: Box<Self>,
+    },
     Service(rmcp::service::ServiceError),
 }
 
@@ -1467,6 +1543,9 @@ impl McpRequestError {
             )),
             Self::Disconnected(message) => {
                 ToolError::Execution(format!("MCP server {server}: {message}"))
+            }
+            Self::AuthorizationRequired { required, .. } => {
+                ToolError::Execution(required.to_string())
             }
             Self::Service(_) => {
                 ToolError::Execution(format!("MCP request failed for server {server}"))
@@ -1776,7 +1855,7 @@ mod tests {
         });
         let handler = McpClientHandler::new(None);
         let service = handler.clone().serve(client_io).await.unwrap();
-        let connection = connected_transport("shared".into(), handler, service);
+        let connection = connected_transport("shared".into(), None, handler, service);
         let short = ConnectedServer::new(
             Arc::clone(&connection),
             McpServerPolicy {
@@ -1891,19 +1970,55 @@ mod tests {
                 vec![ContentBlock::Text(TextContent::new("http echo"))]
             );
             pool.shutdown().await.unwrap();
-            let error = McpToolSet::connect(vec![McpServerConfig::http(
-                "remote",
-                format!("{url}?secret=do-not-log"),
-            )])
-            .await
-            .unwrap_err()
-            .to_string();
-            assert!(!error.contains("do-not-log"));
-            assert!(error.contains("handshake failed"));
+            for static_authorization in [false, true] {
+                let mut rejected =
+                    McpServerConfig::http("remote", format!("{url}?secret=do-not-log"));
+                if static_authorization {
+                    rejected = rejected.headers(BTreeMap::from([(
+                        "Authorization".into(),
+                        "Bearer rejected-secret".into(),
+                    )]));
+                }
+                let error = McpToolSet::connect(vec![rejected]).await.unwrap_err();
+                let diagnostic = format!("{error} {error:?}");
+                assert!(!diagnostic.contains("do-not-log"));
+                assert!(!diagnostic.contains("rejected-secret"));
+                if static_authorization {
+                    assert!(
+                        matches!(&error, McpError::Initialize { message, .. }
+                        if message.contains("handshake failed")),
+                        "{diagnostic}"
+                    );
+                } else {
+                    // HTTP without static/provider headers attaches the default OAuth
+                    // coordinator even before credentials exist (legacy usesOAuth).
+                    let McpError::AuthorizationRequired(required) = error else {
+                        panic!("expected default OAuth sign-in guidance: {diagnostic}");
+                    };
+                    assert_eq!(required.server, "remote");
+                    assert_eq!(required.provider, None);
+                    assert!(!required.static_authorization);
+                    assert_eq!(required.guidance(), "use pi mcp login remote");
+                }
+            }
             cancellation.cancel();
             task.abort();
             let _ = task.await;
         }
+    }
+
+    #[test]
+    fn caller_header_case_variants_coalesce_in_map_iteration_order() {
+        let headers = BTreeMap::from([
+            ("X-Order".into(), "first".into()),
+            ("x-order".into(), "second".into()),
+        ]);
+        let headers = http_headers("test", &headers).unwrap();
+        assert_eq!(headers.len(), 1);
+        assert_eq!(
+            headers[&http::HeaderName::from_static("x-order")],
+            "first, second"
+        );
     }
 
     #[test]
@@ -1920,15 +2035,28 @@ mod tests {
         );
         assert!(validate_configs(std::slice::from_ref(&config)).is_ok());
         assert!(!format!("{config:?}").contains("secret"));
-        for key in ["Host", "Accept", "Content-Type", "Mcp-Session-Id", "Mcp-Protocol-Version", "Last-Event-Id"] {
-            assert!(validate_configs(&[config.clone().headers(BTreeMap::from([
-                (key.into(), "secret".into()),
-            ]))]).is_ok());
+        for key in [
+            "Host",
+            "Accept",
+            "Content-Type",
+            "Mcp-Session-Id",
+            "Mcp-Protocol-Version",
+            "Last-Event-Id",
+        ] {
+            assert!(
+                validate_configs(&[config
+                    .clone()
+                    .headers(BTreeMap::from([(key.into(), "secret".into()),]))])
+                .is_ok()
+            );
         }
         for (key, value) in [("bad header", "secret"), ("X-Custom", "secret\r\ninvalid")] {
-            assert!(validate_configs(&[config.clone().headers(BTreeMap::from([
-                (key.into(), value.into()),
-            ]))]).is_err());
+            assert!(
+                validate_configs(&[config
+                    .clone()
+                    .headers(BTreeMap::from([(key.into(), value.into()),]))])
+                .is_err()
+            );
         }
     }
 

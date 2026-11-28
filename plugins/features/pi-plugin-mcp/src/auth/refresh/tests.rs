@@ -154,9 +154,7 @@ impl Fixture {
     fn call(
         &self,
         id: u64,
-    ) -> tokio::task::JoinHandle<
-        Result<StreamableHttpPostResponse, HttpError>,
-    > {
+    ) -> tokio::task::JoinHandle<Result<StreamableHttpPostResponse, HttpError>> {
         let client = self.client.clone();
         let uri: Arc<str> = self.url.clone().into();
         tokio::spawn(async move {
@@ -245,7 +243,11 @@ async fn concurrent_requests_share_refresh_and_cancelling_a_waiter_does_not_canc
     assert_eq!(f.token_calls.load(Ordering::SeqCst), 1);
     assert_eq!(f.helper_runs(), b"x");
     for id in 2..10 {
-        assert_eq!(f.requests.lock().unwrap()[&id], 1, "token acquisition waits for the pending exchange");
+        assert_eq!(
+            f.requests.lock().unwrap()[&id],
+            1,
+            "token acquisition waits for the pending exchange"
+        );
     }
     let stored = CredentialStore::load(&f.store.for_server("fixture", &f.url).unwrap())
         .await

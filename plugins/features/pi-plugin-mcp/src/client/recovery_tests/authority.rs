@@ -133,6 +133,108 @@ async fn explicit_closed_connection_keeps_existing_disconnect_diagnostic() {
         "explicit path diagnostic: {error}"
     );
     assert_eq!(fixture.calls(), 0);
+    assert_eq!(
+        fixture.starts(),
+        1,
+        "no lazy reconnect for a plain explicit close"
+    );
+    pool.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn ephemeral_context_uses_scoped_grants_without_parent_capabilities() {
+    let fixture = Fixture::new(false).await;
+    let (owner, _source, pool) = fixture.prepare().await;
+    let epoch = pi_plugin::PluginContextEpoch::unavailable();
+    let context = ToolContext::with_plugin_context(
+        PathBuf::from("/tmp"),
+        pi_core::AbortHandle::new().1,
+        epoch.context(),
+    )
+    .with_run_id("ephemeral-run".into());
+    assert!(matches!(
+        context.session.tools(),
+        Err(pi_plugin::PluginContextError::Unbound)
+    ));
+    let name = pool
+        .inner
+        .tools
+        .iter()
+        .find(|tool| tool.remote_name == "echo")
+        .unwrap()
+        .spec()
+        .name;
+    let (_, registry) = pi_plugin::RegistriesBuilder::new()
+        .register_plugins(vec![pool.plugin()])
+        .unwrap();
+    let denied = registry.scope_tool_execution(&[], "ephemeral deny");
+    // The descriptor remains identical, but never grants preparation or execution.
+    let denied = denied.tool(&name).unwrap();
+    assert!(denied.prepare_arguments(&context, json!({})).await.is_err());
+    let (updates, _) = ToolUpdateSink::channel();
+    assert!(
+        denied
+            .execute(context.clone(), "denied".into(), json!({}), updates)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("denied tool")
+    );
+    assert_eq!(fixture.calls(), 0);
+    assert_eq!(fixture.starts(), 1);
+
+    fixture.replies(&[Reply::Status(404)]);
+    let allowed = registry.scope_tool_execution(std::slice::from_ref(&name), "ephemeral allow");
+    let allowed = allowed.tool(&name).unwrap();
+    let (updates, _) = ToolUpdateSink::channel();
+    let result = allowed
+        .execute(context.clone(), "allowed".into(), json!({}), updates)
+        .await;
+    assert!(
+        result.is_ok(),
+        "live unbound capability is not retired: {result:?}"
+    );
+    assert_eq!(fixture.starts(), 2);
+    assert_eq!(fixture.calls(), 2);
+    assert_eq!(fixture.executed(), 1);
+
+    // The exception for an unbound capability must not swallow actual epoch retirement.
+    epoch.retire();
+    let (updates, _) = ToolUpdateSink::channel();
+    let error = allowed
+        .execute(context, "retired".into(), json!({}), updates)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("retired"));
+    assert_eq!(fixture.calls(), 2);
+    assert_eq!(fixture.starts(), 2);
+    owner.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn ephemeral_context_cannot_bypass_retired_generation_or_missing_host_inventory() {
+    let fixture = Fixture::new(false).await;
+    let (owner, source, pool) = fixture.prepare().await;
+    let (_next_source, next_pool) = fixture.publish(&owner).await;
+    drop(source);
+    let context = context().with_run_id("ephemeral-run".into());
+    let error = invoke(&pool, "echo", context.clone()).await.unwrap_err();
+    assert!(error.to_string().contains("retired"));
+    assert_eq!(fixture.calls(), 0);
+    let empty = pi_plugin::PluginContextEpoch::new(Arc::new(Catalog(vec![])));
+    let missing = ToolContext::with_plugin_context(
+        PathBuf::from("/tmp"),
+        pi_core::AbortHandle::new().1,
+        empty.context(),
+    )
+    .with_run_id("host-run".into());
+    let error = invoke(&next_pool, "echo", missing).await.unwrap_err();
+    assert!(error.to_string().contains("inventory changed"));
+    assert_eq!(fixture.calls(), 0);
+    assert!(invoke(&next_pool, "echo", context).await.is_ok());
+    assert_eq!(fixture.calls(), 1);
+    assert_eq!(fixture.starts(), 1);
+    owner.close().await.unwrap();
 }
 
 #[tokio::test]

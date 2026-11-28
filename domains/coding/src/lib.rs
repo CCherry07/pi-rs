@@ -5,6 +5,7 @@ mod builtin_providers;
 mod composition;
 mod configuration;
 mod credentials;
+mod dynamic_mcp;
 mod dynamic_providers;
 mod features;
 mod generation;

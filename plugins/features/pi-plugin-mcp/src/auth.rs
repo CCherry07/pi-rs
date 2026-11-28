@@ -942,7 +942,9 @@ impl ProviderAuthClient {
             )
         })?;
         *self.last_token.lock().map_err(|_| {
-            StreamableHttpError::UnexpectedServerResponse("provider token state is unavailable".into())
+            StreamableHttpError::UnexpectedServerResponse(
+                "provider token state is unavailable".into(),
+            )
         })? = token.clone();
         Ok(token)
     }
@@ -950,9 +952,30 @@ impl ProviderAuthClient {
 
 fn provider_response<T>(result: Result<T, HttpError>) -> Result<T, HttpError> {
     result.map_err(|error| match error {
-        StreamableHttpError::Client(error) => StreamableHttpError::Client(error.with_auth_provider()),
+        StreamableHttpError::Client(error) => {
+            StreamableHttpError::Client(error.with_auth_provider())
+        }
         error => error,
     })
+}
+
+impl crate::http_client::HttpClient for ProviderAuthClient {
+    async fn post(
+        &self,
+        request: crate::http_client::PostRequest,
+    ) -> Result<crate::http_client::PostResponse, HttpError> {
+        let token = self.token_for_message(&request.message).await?;
+        provider_response(request.execute(&self.inner, token).await)
+    }
+
+    async fn open_stream(
+        &self,
+        request: crate::http_client::StreamRequest,
+    ) -> Result<crate::http_client::StreamResponse, HttpError> {
+        request.check_dispatch()?;
+        let token = self.token().await?;
+        provider_response(request.execute(&self.inner, token).await)
+    }
 }
 
 impl StreamableHttpClient for ProviderAuthClient {
@@ -967,7 +990,8 @@ impl StreamableHttpClient for ProviderAuthClient {
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
         let token = self.token_for_message(&message).await?;
-        let result = self.inner
+        let result = self
+            .inner
             .post_message(uri, message, session_id, token, custom_headers)
             .await;
         provider_response(result)
@@ -983,7 +1007,8 @@ impl StreamableHttpClient for ProviderAuthClient {
         max_sse_event_size: usize,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
         let token = self.token_for_message(&message).await?;
-        let result = self.inner
+        let result = self
+            .inner
             .post_message_with_max_sse_event_size(
                 uri,
                 message,
@@ -1009,7 +1034,10 @@ impl StreamableHttpClient for ProviderAuthClient {
             Ok(token) => token.clone(),
             Err(_) => return Ok(()),
         };
-        let _ = self.inner.delete_session(uri, session_id, token, custom_headers).await;
+        let _ = self
+            .inner
+            .delete_session(uri, session_id, token, custom_headers)
+            .await;
         Ok(())
     }
 
@@ -1021,7 +1049,8 @@ impl StreamableHttpClient for ProviderAuthClient {
         _auth_header: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>> {
-        let result = self.inner
+        let result = self
+            .inner
             .get_stream(
                 uri,
                 session_id,
@@ -1042,7 +1071,8 @@ impl StreamableHttpClient for ProviderAuthClient {
         custom_headers: HashMap<HeaderName, HeaderValue>,
         max_sse_event_size: usize,
     ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>> {
-        let result = self.inner
+        let result = self
+            .inner
             .get_stream_with_max_sse_event_size(
                 uri,
                 session_id,

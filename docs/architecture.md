@@ -1171,8 +1171,19 @@ dropping the requester detaches the unfinished operation so committed external s
 stranded without a managed session. `PiSession` uses the same rule for replacement:
 `ManagedSessionReplacement` owns the operation and its write guard through preparation, ordered
 old-session shutdown, new-session start, and watch publication, detaching that remainder only if the
-requester is dropped. Its unresolved `SessionReplacementRequest` owns manager
-policy such as active-path checks, then resolves to one
+requester is dropped. Manager shutdown is the stronger lifetime authority: it marks the manager
+closed and cancels an in-flight replacement before waiting for the lifecycle write guard. Dropping
+that unpublished candidate retires its plugin generation (including active `session_start` callbacks),
+then shutdown acquires the guard and drains the registered sessions without a reload/shutdown
+cycle. Per-session close uses the same ordering with slot-local cancellation registrations. Before
+waiting for the write guard it walks the currently registered isolated ownership tree, marks the root
+and every descendant closing, and aborts each unpublished replacement; once it owns the guard it
+walks the tree again so a child acquisition that was already in flight is still drained. This avoids
+an owner-close/descendant-reload cycle while leaving the manager and unrelated sibling trees open.
+Cancellation also covers an activated candidate blocked in `session_start` before publication: the
+candidate is retired, the old closed generation is not replaced, and tree shutdown completes under
+the same guard. Its unresolved `SessionReplacementRequest` owns manager policy such as active-path
+checks, then resolves to one
 `ResolvedSessionTransition`. The internal runtime exposes only `transition`; the manager write guard
 serializes that call through publication, while `AgentSession::begin_replacement` excludes mutations
 of the captured session. The runtime therefore needs no second transition mutex: it captures the
@@ -1476,7 +1487,16 @@ therefore has no NAPI, Node, Jiti, or terminal dependency.
 
 `runPi` returns the CLI exit code after generation cleanup. The Node executable uses
 `PiNodeHost::runWithExitCode`; the existing void Rust/Node entry points still report a nonzero
-command result as an error. `pi-coding::check_auth` owns credential readiness with exit codes
+command result as an error. For legacy JavaScript compatibility, a command or eval host running in
+offline mode temporarily normalizes both `PI_OFFLINE` and `PI_SKIP_VERSION_CHECK` and restores their
+previous values after success or failure. Those variables are process-wide rather than
+session-scoped, so the Node Adapter rejects overlap between an offline host and any other active
+`PiNodeHost` before invoking the native binding. This environment guard does not serialize online
+hosts and does not by itself establish arbitrary multi-host safety for other process globals such as
+RPC stdout routing. It is a bounded embedding constraint, not a network sandbox: `--offline`
+suppresses selected automatic
+startup network operations and is independent of configured-MCP suppression through `--no-mcp`.
+`pi-coding::check_auth` owns credential readiness with exit codes
 0/1/2 for ready/not-ready/invalid. It constructs built-in providers and the local `models.json`
 catalog without creating sessions, discovering project plugins or refreshing remote model lists.
 API-key checks do not issue a model request; stored OAuth can refresh unless `--no-refresh` is set.
@@ -2047,6 +2067,38 @@ trust decision and enforces it before project reads/writes; explicit shell autho
 trusted write view only for the requested `--local` mutation, while list/session discovery still use
 the persisted host decision. The crate has no dependency on `pi-coding`, `pi-acp`, `pi-session`, or
 terminal/frontend types. Desktop and CLI Adapters resolve project trust and call that library directly.
+
+JavaScript `registerMcpServer` contributions use the existing generation manifest rather than a
+process-global registry or a new plugin lifecycle. The Node host owns registration order,
+extension ownership and load-time replacement; Rust validates the manifest owner and reparses each
+config through `pi-plugin-mcp` before preparing the candidate. These entries retain their extension
+path as source provenance, never enter `mcp.json` management views or Pi v4 history, and are rebuilt
+on every generation. A disk-configured server with the same normalized namespace takes precedence
+and emits an override diagnostic. Reload publishes a lifecycle-only empty MCP candidate when the
+last JavaScript registration disappears, so the supervisor retires and cleans up the old connection
+without exposing an empty `/mcp` command. Runtime register/unregister calls stage source-owned,
+ordered mutations in a generation-external `DynamicMcpRegistry` and request whole-session reload.
+Its committed overlay is keyed by the non-persisted live runtime scope, survives ordinary reloads,
+does not leak to sibling sessions, and is discarded with the last scope lease. The next Node
+generation first reloads extension factories, then replays only mutations whose source path is still
+part of that generation; Rust reparses the resulting manifest before preparing MCP. Activation
+consumes the staged batch, failure rejects only the candidate-visible batch, and mutations arriving
+during preparation remain pending for a later reload. A changed candidate rebinds
+`mcp_servers_change` handlers as synthetic `session_start` callbacks, after activation, with a
+snapshot of all extension registrations. This intentionally follows the whole-generation boundary
+instead of running immediately inside the retiring JavaScript generation; normal reloads do not
+emit a false change event.
+
+Legacy Pi's MCP connector is itself a replaceable JavaScript extension, so its extension runner
+reports registered servers when no `mcp_servers_change` handler remains to connect them. The Rust
+product deliberately has no corresponding connector-less state: whenever the JavaScript host is
+present, generation assembly installs the native MCP component (including a lifecycle-only empty
+candidate), and every manifest registration is either consumed by that component or rejects the
+candidate before publication. An absent `mcp_servers_change` handler therefore means only that no
+extension observes the replacement; it does not leave a server unconnected and must not produce the
+legacy "no loaded extension connects MCP servers" warning. The configured-MCP-disabled integration
+fixture exercises this invariant by connecting an explicit extension registration without a handler.
+
 MCP does not live in `settings.json`.
 Documents use `mcpServers`, keyed by server name, with an optional `version: 1` marker. Each entry has
 `type: "stdio"` (command, args, env, cwd) or `type: "http"` (url, headers), and optional
@@ -2097,24 +2149,151 @@ limited to the typed uncorrelated discovery rejection, not arbitrary initializat
 replayed by this connection retry loop. Next-idle publication and the lifecycle supervisor remain
 separate contracts; bounded retries do not mutate a live generation.
 
+Supervised request admission keeps the original generation lease, run cancellation, transport
+epoch and frozen callable grant. Host `session.tools()` is optional inventory evidence, not
+the dispatch grant: ephemeral Agents intentionally return typed `Unbound` without access to
+parent capabilities, after their `ScopedTool` has admitted the exact callable. MCP treats that
+one value as absent inventory, not retired authority. A genuinely retired context, missing
+descriptor in an available host inventory, retired generation, or denied scoped tool still
+fails before wire dispatch or recovery. No parent capabilities or generic runtime API are added.
+On the recorded ephemeral-admission inputs, `f6266d66` passed the complete MCP package
+(328 passed, 2 live ignored), focused Coding MCP integration (46 passed, 49 outside the filter),
+strict MCP/Coding Clippy, workspace formatting and diff checks. The earlier unfiltered
+workspace depth-512 SIGABRT remains a failure; these focused results do not supersede it.
+
 The L3 checkpoint used a checksum-pinned local rmcp 3.3.0 override for typed status/Retry-After
 metadata at the non-success POST fallback; valid JSON-RPC error bodies still took the upstream
 RPC path. Historical provenance remains in Git commit
 `f54ddeb649c93b82bcefdfe445d60f5c1ce022d0`; decision #173 supersedes that delivery design.
 The later opt-in SDK prototype must not be integrated or shipped. The bounded decision #188
 transition removes the vendor/path override and restores the registry source/checksum together.
-Registry inputs are restored; compilation and validation are pending, not established by removal.
+Registry inputs were restored by that transition; removal alone established no compilation or
+behavioral result. Subsequent stock-adapter validation and remaining failures are recorded in
+`docs/mcp-post-auth-gap-matrix.md`.
 
-The approved replacement is a private `pi-plugin-mcp` HTTP framing/decoding adapter over stock
-rmcp 3.3.0 public APIs. Its private associated error travels through `StreamableHttpError::Client`,
+Decision #204 expands the private `pi-plugin-mcp` boundary to replace the stock HTTP worker,
+not wrap it. `http_transport` is the sole HTTP session/stream owner, built on rmcp 3.3.0
+public `WorkerTransport` and service contracts. rmcp retains RPC correlation, setup lifecycle,
+OAuth protocol types/exchanges and stdio. The private `http_client` remains the bounded
+HTTP framing/decoding backend. Its associated error travels through `StreamableHttpError::Client`,
 not an I/O error masquerading as an HTTP status. Diagnostics expose only finite categories/statuses;
 private getters retain classification and auth-challenge information without forwarding raw URLs,
 headers, bodies or request errors through Display/Debug/source. Non-2xx precedes RPC-body semantics
 on every HTTP entry point. JSON success bodies have a 16 MiB aggregate limit; successful controls
 ignore bodies, whereas request 202/204 is a missing-reply failure. Caller headers are followed by
 transport-owned setters, not rejected merely for using a reserved name. Exact JSON caller-header
-ordering/folding, JSON arrays, successful-response session capture, SSE syntax and fatal SSE
-overflow remain separately open; this source-only tranche is not full parity.
+ordering/folding, successful-response session capture, SSE syntax and exact byte accounting remain
+separately open; this private transport delivery is not full parity. Application/setup JSON arrays
+now use a private POST envelope rather than the SDK single-message response or a synthetic SSE
+bridge. Whole-document parsing remains bounded; real members are validated and forwarded in order,
+retaining the valid prefix before a malformed member. Setup batches acknowledge the real document
+before bounded-channel backpressure, with only the #205 genuine pre-final Ping exception. At the
+correlated reply, remaining JSON members become an SDK-owned-dispatch tail under the original
+cancellation-registration lifetime; a bad tail cannot fail an already completed call. Four loopback
+tests (`3e7db19d`) cover ordering, malformed prefix/tail, independent success and the setup Ping
+boundary. An expanded gate exposed three regressions from treating JSON document end as premature
+setup EOF. That added failure was removed: real setup errors remain available to SDK correlation
+and the existing outer fallback policy, while empty/unrelated documents retain the caller deadline.
+A fifth focused test verifies exact SDK uncorrelated-error handling for single and array documents.
+The failed expanded gate and subsequent focused results are retained in the gap matrix. Corrected
+full-input run `a3b2f94b` passed MCP **346 / 2 live ignored**, Coding MCP **47** and CLI MCP **7**,
+with all targeted static gates 0. This is affected-input evidence, not workspace or full parity.
+Explicit repair arrays and remaining tail/control races are still open. Follow-up run `005e5f7d`
+is **0/3**: repair JSON arrays and pre-result SSE notifications are unsupported, and a delayed
+SDK handler started on an old session positively sends its reply on the replacement session.
+Stock rmcp captures `control_generation` at outbound-send creation, not inbound-handler start;
+the earlier queued-control fence does not prove full callback ownership. Those failures and the
+subsequently extended inputs invalidate any current full-package green claim for that receipt.
+The person selected fresh SDK-service ownership in decision #215. Explicit pools now own an exact
+slot through the existing supervisor slot/attempt lifecycle; generation views retain their weak
+authority pins. Both use the same logical-operation budget, immutable callable grants, admitted-use
+leases and draining list. The obsolete private in-place worker repair module, flight/channel,
+saved-initialize replay, recovery configuration and transport-local replacement epoch are removed.
+Only the exact connection owner can replace the service; raw workers return definitive rejection
+unchanged. Explicit pools reconnect only after a definitive expiry recorded against that exact
+transport, not an ordinary closed service. Their fresh setup retains the 5 s recovery bound rather
+than inheriting supervised opening's 30 s budget. Regression tests move to the connection-owner
+seam, retaining bounds, prefix/Ping assertions and positive callback-wire evidence. It must not
+be patched with an ID side map, hidden recovery channel, SDK fork or cancelled admitted success. The new
+owner fixture has positively verified both old/new callback headers and an unrelated old success,
+but exposed stock setup dropping non-logging progress. A response-local, byte/item-bounded queue
+now defers those genuine notifications to the ordinary SDK dispatcher after the correlated setup
+response, ahead of its tail. Logging retains its existing SDK handshake path. This intentional
+timing boundary does not claim pre-handshake callbacks or cross-log ordering; it is not another
+RPC dispatcher, ID side map or recovery channel. Run `6b1cf999` passed the prefix/handler cases
+and all 23 transport tests but exposed one plain-close reconnect regression among 52 recovery
+tests. After its correction, `d1408dae` passed all 52 recovery tests and strict MCP Clippy. Removal
+run `774a9752` then passed 59 recovery and 19 transport tests, with all targeted static checks 0.
+Explicit shutdown now collects strong current/draining cleanup references atomically with slot
+retirement, avoiding a collection/publication race while retaining silent last-owner revision
+semantics. A new 2 s integration check requires both admitted old/current calls to retire and both
+DELETEs to complete without reopening. Expanded run `36246c6e` passed that regression but recorded
+MCP library 323 passed / 1 failed (integration targets not reached); Coding MCP 47, CLI MCP 7 and
+all targeted static checks passed. The existing disconnected-stdio status test exposed loss of
+its safe stderr tail in the new binding. Typed slot readiness now lets the client render the
+current disconnected connection's existing redacted capture, without falling back to an obsolete
+frozen transport. Run `1da73945` passed that unchanged regression and all 324 library tests, then
+17 integration tests / 2 live ignored before the explicit OAuth integration caught two resource
+503 reads instead of one; later integration targets were not reached. Coding MCP 47, CLI MCP 7
+and targeted statics passed. Sharing the exact connection owner must not confer Coding's resource
+transient-retry policy: that policy is now gated to supervised bindings, while explicit pools
+retain definitive-expiry recovery and the combined application allowance. The adjacent needs-auth
+handoff also belongs only to supervised Coding views: `fe02fd4a` passed the existing resource
+case but a new public integration proved an independent explicit call was incorrectly fenced
+after terminal auth. Both policies now use a typed supervised-slot accessor. Explicit auth still
+returns typed guidance/cause without retiring its service; its subsequent accepted logical call
+uses a new request ID on the same session, with no setup/refresh or frozen-catalog changes.
+`c3290bab` passed both integrations with the original resource/replay assertions unchanged.
+Final run `e210afe6` passed MCP 324 library + 38 integration tests (362 total, 2 live ignored),
+Coding MCP 47 (49 outside filter), CLI MCP 7 and all six targeted gate exits at 0, including
+supervised auth retirement, shared budgets, authority, callback isolation and shutdown coverage.
+This completes #215 at its tested scope, not goal #124, general candidate/control-tail coverage,
+full parity or the known failing unfiltered depth-512 workspace gate. Migrated fresh-setup errors
+are asserted as typed owner readiness, with raw HTTP/control evidence retained in lower-seam tests. Cancellation of an incomplete SDK handshake
+must produce real candidate DELETE within the bounded fixture; it does not claim synchronous
+cleanup at explicit-owner close return.
+The SDK adapter itself retains its public single-message contract. Typed SSE overflow is terminal in the sole private worker without impersonating rmcp's private marker.
+Three supplemental loopback tests (`2175dc3b`) prove common-stream task completion, complete-prefix
+preservation, release of still-open bodies and unrelated/admitted request success, including a
+cursor and `retry: 0`. They supplement, rather than rerun or replace, the earlier package evidence.
+The private byte adapter now performs nonfatal streaming UTF-8 replacement before the unchanged
+public SSE parser, matching frozen Pi's `TextDecoder` for the tested malformed-byte subcase. It
+retains at most three incomplete scalar bytes, flushes the decoder on clean EOF, preserves complete
+frame-prefix delivery and drops the source/unread suffix on typed overflow. Original raw bounds
+remain; normalized bytes also satisfy the same conservative line/event bounds so U+FFFD expansion
+cannot bypass the cap. No SDK/control/retry/authority owner changes. Focused run `3209827d` passes
+8 parser and 16 private-transport cases, including an actual SDK tool reply and independent success.
+Final affected-input run `cf83ba1f` passes MCP 328 library + 42 integration tests (2 live ignored),
+Coding MCP 47 (49 outside the filter), CLI MCP management 7 and all targeted static gates. This
+is not an unfiltered workspace pass; the previously recorded depth-512 failure remains unresolved.
+This does not establish SSE unfinished-line/event EOF dispatch, other field grammar, line-time
+ID/retry updates or exact decoded-payload accounting; those ledger rows remain open.
+Successful non-request POSTs also retain nonempty session headers in the private Accepted
+envelope, before ignoring the body. Existing ordinary-send and cleanup metadata capture consume
+them; the public SDK Accepted variant, request missing-reply failures, rejected-response handling
+and connection/generation authority remain unchanged. Focused `f2460699` passes the two capture
+regressions: actual SDK notification ACKs update subsequent POST/common-GET/DELETE headers,
+empty/absent/rejected headers cannot replace the current ID, and backend response acknowledgements
+retain metadata without parsing bodies. Final affected-input run `3b724e0f` passes MCP 330 library
++ 42 integration tests (2 live ignored), Coding MCP 47 (49 outside the filter), CLI MCP management
+7 and all targeted static gates. This is not an unfiltered workspace pass.
+The subsequent private GET envelope carries actual nonempty session headers alongside the body
+through the static/provider/OAuth clients; the public SDK still returns only its original stream.
+The existing worker captures successful GETs accepted as SSE before consuming their bodies. Each
+opening reads this transport's current ID, retaining the originating protocol context and request
+control; it does not select a new owner, publish a replacement, or change grants/auth allowances.
+Desired-red `481ee67e` observes two exact stale-header failures. Focused `e3395123` passes 24
+private transport and 11 backend tests plus targeted static gates, including genuine SDK common
+and two-stage response-resume flows with independent success, exact cleanup and no RPC replay.
+Affected-input `ef08e296` passes MCP 332 library + 42 integration tests (2 live ignored), Coding
+MCP 47 (49 outside the filter), CLI MCP management 7, workspace fmt and diff. Its aggregate result
+is **failed**: three-package all-target Clippy reports E0063 in the CLI test initializer at
+`apps/pi-cli/src/config.rs:726` (missing new `no_tools`/`offline` fields). That unrelated uncommitted
+file was not edited by this step; its current writer is unidentified and gate closure is held
+for ownership/resolution. Successful-HTTP response validation failures, repeated IDs, concurrent
+rotation/credential-wait timing, remaining resume/candidate
+races and bootstrap-Pong active/protocol propagation remain gaps; no additional state or private
+control channel is introduced.
 
 One private OAuth reaction coordinator retains rmcp AuthorizationManager/store as the wire/state
 owner. Plain 403 is terminal. Insufficient-scope 401/403 observes the challenge and requests sign-in
@@ -2123,7 +2302,28 @@ the token text is unchanged. Failed proactive refresh falls back to the current 
 Static/token-provider headers do not reactive-refresh. Host auth readiness uses the immutable effective
 dispatch source: raw 401 is actionable only with an actually attached token/OAuth provider; static
 Authorization bypasses that provider, so static/anonymous raw 401 is an ordinary safe failure.
-Raw 403 is terminal unless the coordinator emits typed step-up guidance. Explicit/ACP uses a bounded
+Raw 403 is terminal unless the coordinator emits typed step-up guidance. Terminal application
+auth uses the same typed classifier as setup. Its safe guidance wraps, rather than replaces,
+the original HTTP error. A supervised operation reports the failure through its generation's
+weak exact slot and admitted connection identity. The matching slot stops new admission and
+records NeedsAuth for the next idle generation; a late failure cannot overwrite a replacement
+or its in-progress opening. Detachment preserves unrelated admitted JSON/SSE successes and
+cleans up only after their uses drain. This is the existing Rust draining/publication guarantee,
+not frozen Pi's eager `dropClient` cancellation. Published registries and journals are not edited.
+No browser authentication or eager replacement starts from that transition.
+
+The A3 application handoff and response-stream provenance follow-up `29902372` passed the complete
+MCP package (336 passed, 2 live ignored), focused Coding MCP integration (47 passed, 49 outside the
+filter), strict MCP/Coding all-target Clippy, workspace fmt and diff checks. Coding coverage proves
+that command-only status remains unsaved; ordinary idle submission publishes the new inventory
+before the provider request and materializes the journal only with the first parent assistant
+response. Separate live sessions and retained registries remain isolated. These results do not
+supersede the failed unfiltered workspace or close the other MCP acceptance gaps.
+
+Common-stream errors are different: frozen `McpClient` reports transport errors without failing
+pending requests, and Coding installs no `onError` state transition. Its `onChallenge` cache can
+change independently. Common errors alone must not be promoted to an application failure or
+NeedsAuth; persistent challenge observation remains an open seam. Explicit/ACP uses a bounded
 local allowance; supervised application POST/resource requests retain their shared logical allowance
 and dispatch/cancellation fences. Each transport-owned common or response-stream GET opening,
 including resumption, is a fresh frozen `authorizedFetch` invocation with at most one auth callback
@@ -2131,20 +2331,80 @@ and replay; it neither consumes nor inherits the originating application allowan
 recovery must never reexecute the original RPC. This corrects the earlier cross-POST/GET budget
 assumption, not the existing application POST/resource policy. Frozen detached resumptions do not
 carry the original sender abort signal; stronger Rust request/epoch isolation is a deliberate
-guarantee requiring evidence, not an existing Pi behavior. Terminal failed-open retry eligibility
-and the SDK's 50 ms response drain remain open alongside real cancellation/common-stream/isolation
-regressions. There is no nested SDK AuthClient replay loop.
-SDK session recovery remains enabled for Explicit and disabled
-only for the existing supervised replacement owner; the adapter is not a second session worker.
+guarantee requiring evidence, not an existing Pi behavior. Two supplemental actual-slot provider-wait
+tests (`108cc549`) prove cancellation and retirement before a resumed GET dispatches: a newer view
+keeps the same connection, the suspended callback future is dropped, and independent/common-stream
+work remains usable with no late GET, reexecution, OAuth exchange or cleanup-time token lookup.
+They leave deadline and other control/tail races open. The private transport classifies failed
+GET openings before scheduling another attempt, including the initial common GET. Its default
+backoff is the frozen 1-second exponential delay, 30-second cap and five retries; SSE `retry`
+can override the delay. After a correlated response it consumes only the existing body tail,
+never reopens that response stream. Application failures before that response settle the original
+transport send with its typed error rather than synthesizing a JSON-RPC error. A private
+response-stream error wrapper preserves the underlying cause and distinguishes failure after
+POST acceptance from rejection of the application POST. In frozen Pi this boundary produces a
+local RPC stream error, so it cannot authorize application replay, session expiry or NeedsAuth.
+The Rust wrapper preserves that behavior without manufacturing a JSON-RPC result/error; cancellation
+and authority-control failures keep their original control types. Setup acknowledges
+real SSE response headers before consuming the body: rmcp setup waits for send completion before
+receiving pre-reply messages, so waiting for the final reply would deadlock the bounded receive
+channel. rmcp 3.3.0 deliberately ignores pre-initialize pings
+(`service/client.rs::expect_response`), unlike frozen Pi. Decision #205 permits one narrow
+exception: before the initialization/discovery response, or during explicit session repair, the
+private owner answers an actual Ping on that response stream with the original request ID and
+standard empty-result Pong. It uses the existing authenticated POST backend, stream session,
+active-epoch check, control deadline and enclosing task cancellation. It does not synthesize
+initialize/tool replies or intercept other requests. After the correlated setup response, even
+a Ping on the same body tail goes through the SDK handler; a custom-handler regression proves
+that boundary. Failure after setup-header acknowledgement closes the incomplete connection;
+it cannot retroactively change the completed send. Generic rmcp request-cancellation registration
+stays alive through the body lifetime. There is no nested SDK AuthClient replay loop.
+
+Explicit-client reinitialization is private to this same worker. A bounded repair request queue
+joins one epoch-specific result; the worker, not the initiating caller, owns and joins the repair
+task. Cancelling a waiter does not abandon the shared initialization; closing the transport aborts
+and joins it. Concurrent failed repair waiters receive the original error through `Arc<HttpError>`
+using the public worker error contract, preserving typed auth/status/control evidence and redaction.
+The current implementation retains the failed result for that epoch until reconnect; failed-repair
+readiness and non-Ping recovery-time peer requests remain open acceptance work.
+No hidden SDK state, fabricated initialize/tool reply or extra HTTP worker is used. Coding disables this
+repair path in favor of its existing supervised replacement owner. A private configuration exposes
+only implemented settings, not an ignored SDK retry-policy option. Modern protocol header rules
+are validated and cached per transport session; legacy negotiated versions skip those rules.
+This implementation is under validation; the frozen ledger preserves prior failures and handoff gaps.
 
 Terminal session cleanup is a narrowly scoped freshness exception matching the frozen transport.
 After closing ordinary dispatch, one best-effort DELETE may use that transport's latest **acquired**
 bearer token, with a one-second bound and static-header precedence. It does not acquire credentials,
 refresh, retry, interpret the response, persist credentials or mutate CAS/session journals. The
-private wrapper/backend must not log tokens, headers or DELETE outcomes. Stock rmcp still emits
-a success info trace containing the diagnostic-sensitive session ID; `SDK-CLEANUP-TRACE` remains
-open pending product-subscriber evidence and separately reviewed public-seam handling. Neither
-absolute SDK silence nor full cleanup parity is claimed.
+private wrapper/backend must not log tokens, headers or DELETE outcomes. Terminal cleanup also
+retains the latest acquired JSON/SSE POST session identity, including an uncommitted repair
+candidate. This is identity/version metadata only, not dispatch authority: recording it cannot
+publish the candidate or advance the active epoch. A close-during-held-Pong regression proves
+the candidate is cleaned up rather than the expired published session. Complete header capture
+on all response kinds remains separately open. The private worker
+does not use the stock HTTP worker's session-ID success trace. Evidence-only native CLI tests
+(`f616f695`, 4/4 plus targeted static checks) positively observed DELETE 204/401/500/timeout with
+exact session/auth/version, bounded exit and no sensitive stdout/stderr. The native CLI installs
+no tracing subscriber; `RUST_LOG=trace` alone does not change that. Generic SDK worker-exit
+diagnostics still exist, and this output observation does not capture caller-installed
+subscribers or prove absence of emitted tracing events. Approved #219 then added only a locked
+tracing dev-dependency and all-events, thread-local observation tests over the actual private
+worker, with a separate fixture-server runtime. Run `57bc90c0` passed all four cases and targeted
+statics: 38 setup events and 8 shutdown events (6 for timeout), including the real generic SDK
+DEBUG `worker quit` positive control, with no session/Authorization/body marker in captured
+events or span fields. Thus SDK tracing is not globally silent, but the specific stock HTTP-worker
+session-ID trace is absent from this product path. Final run `d47bf1ef` also passed the stronger
+bare-token assertion (4/4), all MCP workspace targets (324 library + 42 integration / 2 live
+ignored), and native CLI unit/cleanup/management tests (251/4/7). Unfiltered workspace tests
+still exited 101 solely at the known Coding depth-512 SIGABRT target; workspace strict Clippy,
+fmt and diff exited 0. The aborted Coding integration target supplies no refreshed MCP-case
+pass count. The lead accepted #219's existing evidence under original #183, closing
+`SDK-CLEANUP-TRACE` only for d47bf1ef's inputs and these four scenarios. The rule is private/backend
+cleanup silence about tokens/headers/body/status/error, no DELETE-outcome interpretation and no
+credential reacquisition—not global SDK silence. Safe generic events need no suppression.
+Source/public-entry/capture anchors are retained in the gap matrix's #219 section. No global
+filter/suppression, production logging change or further suite run was made for acceptance.
 Logout/new login does not rewrite an old transport's cache, so this DELETE may transmit an old token.
 The cache never passes into a replacement transport or any GET/POST/application replay; application
 dispatch still observes the ordinary freshness and cancellation fences.
@@ -2179,8 +2439,8 @@ request. Sign-out removes only the exact name-plus-URL identity.
 
 Provider authentication is a separate request-time `McpProviderTokenResolver` interface on
 `McpClientAuth`. It neither imports provider implementations nor depends on `pi-coding`; a host attaches
-the resolver to the candidate library/tool set. The token is resolved anew for every POST, GET/SSE and
-session deletion so refreshes do not require rebuilding a generation. Resolver failures and all logs are
+the resolver to the candidate library/tool set. The token is resolved anew for every POST and GET/SSE so refreshes do not require rebuilding a
+generation; terminal deletion uses only the acquired-token cache described above. Resolver failures and all logs are
 secret-free. Project MCP files cannot name a provider and therefore cannot borrow a user-level provider
 credential merely by gaining project trust. Coding and the CLI inject their shared stored-first
 credential resolver at this seam, without borrowing a model's explicit CLI key. Explicit
@@ -2388,9 +2648,9 @@ resume behavior. Explicit scripts and tool selections must migrate to the canoni
 MCP tools with `readOnlyHint: true` may run in parallel. All other tools are sequential so a
 mutation completes before subsequent calls; annotations affect scheduling, not authorization.
 
-The pinned official Rust SDK handles Streamable HTTP negotiation, JSON and SSE framing,
-legacy-initialize compatibility, session headers, reconnects, OAuth discovery/client registration and
-reactive token refresh. Standalone 2024 HTTP+SSE is explicitly rejected. Static/environment-backed
+The pinned official Rust SDK handles RPC dispatch, legacy-initialize compatibility and
+OAuth discovery/client registration/exchanges. Private MCP modules own HTTP decoding, session
+headers, stream reconnects and reactive refresh coordination as described above. Standalone 2024 HTTP+SSE is explicitly rejected. Static/environment-backed
 headers remain supported and an explicit static Authorization header bypasses managed OAuth.
 `pi-acp` advertises HTTP but not legacy SSE and converts client-supplied
 headers without local environment expansion. The CLI ACP host sets `load_mcp_config = false`,
@@ -3927,8 +4187,12 @@ accepts one validated `ResolvedSessionTransition` under the manager lifecycle wr
 next product generation, binds it to the target session log, emits old `session_shutdown`, emits
 new `session_start`, and only then publishes the new session through a Tokio watch channel.
 Cancellation before the manager lifecycle gate is acquired performs no preparation. After
-acquisition, cancellation drops only the caller's result while the guarded replacement finishes
-publication. Preparation failure leaves the current session open, while a successful replacement
+acquisition, ordinary caller cancellation drops only the caller's result while the guarded
+replacement finishes publication. Manager shutdown is different: its manager-wide signal cancels
+and rolls back an unpublished replacement before shutdown waits for that same gate, preventing an
+active replacement-generation startup hook from deadlocking process exit. Explicit per-session close
+uses a slot-local signal with the same pre-gate ordering and cannot be bypassed by a replacement that
+has just acquired the gate. Preparation failure leaves the current session open, while a successful replacement
 closes stale `AgentSession` handles so they reject later mutations. New,
 resume, reload, and fork use this transaction. Fork creates a Pi v4 branch copy before
 preparation and removes it if candidate preparation fails.

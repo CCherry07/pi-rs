@@ -116,7 +116,9 @@ async fn local_value_helpers_run_once_per_open_not_unchanged_reload_metadata_or_
         .create_session(pi_session::CreateSessionOptions::new(&project, &path))
         .await
         .unwrap();
-    super::mcp_test_support::wait_for_status(&session, "account", "needs sign-in").await;
+    // Command-produced Authorization remains static, not managed OAuth.
+    super::mcp_test_support::wait_for_status(&session, "account", "failed").await;
+    assert!(!agent.join("mcp-auth.json").exists());
     assert_eq!(fs::read(project.join("count")).unwrap(), b"x");
     session.current().catalog().command_completions();
     session.current().prompt("/mcp paths").await.unwrap();
@@ -128,7 +130,7 @@ async fn local_value_helpers_run_once_per_open_not_unchanged_reload_metadata_or_
         .prompt("/mcp reconnect account")
         .await
         .unwrap();
-    super::mcp_test_support::wait_for_status(&session, "account", "needs sign-in").await;
+    super::mcp_test_support::wait_for_status(&session, "account", "failed").await;
     assert_eq!(fs::read(project.join("count")).unwrap(), b"xx");
     // An effective local-input change, unlike an unchanged generation rebuild,
     // creates exactly one new open and therefore one helper execution.
@@ -139,7 +141,8 @@ async fn local_value_helpers_run_once_per_open_not_unchanged_reload_metadata_or_
         }}}).to_string(),
     ).unwrap();
     session.reload().await.unwrap();
-    super::mcp_test_support::wait_for_status(&session, "account", "needs sign-in").await;
+    super::mcp_test_support::wait_for_status(&session, "account", "failed").await;
+    assert!(!agent.join("mcp-auth.json").exists());
     assert_eq!(fs::read(project.join("count")).unwrap(), b"xxx");
     session.reload().await.unwrap();
     assert_eq!(fs::read(project.join("count")).unwrap(), b"xxx");

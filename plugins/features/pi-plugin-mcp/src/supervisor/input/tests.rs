@@ -78,6 +78,41 @@ fn equivalence_tracks_effective_auth_source_without_reading_credentials() {
 }
 
 #[test]
+fn local_equivalence_includes_caller_header_source_order() {
+    let directory = tempfile::tempdir().unwrap();
+    let definition = |headers: &str| {
+        let document =
+            r#"{"mcpServers":{"server":{"url":"http://127.0.0.1/mcp","headers":HEADERS}}}"#
+                .replace("HEADERS", headers);
+        crate::config::parse_document(&document)
+            .unwrap()
+            .servers
+            .remove(0)
+            .into_connection_definition()
+            .unwrap()
+    };
+    let auth = McpClientAuth::default();
+    let make = |definition| {
+        ConnectionInput::local(
+            definition,
+            LocalValues {
+                cwd: directory.path().to_owned(),
+                allow_commands: false,
+            },
+            (&crate::policy::McpServerPolicy::direct()).into(),
+            auth.clone(),
+            [0; 32],
+        )
+        .unwrap()
+    };
+    let first = definition(r#"{"X-Order":"first","x-order":"second"}"#);
+    let same = definition(r#"{"X-Order":"first","x-order":"second"}"#);
+    let reversed = definition(r#"{"x-order":"second","X-Order":"first"}"#);
+    assert!(make(first.clone()).equivalent(&make(same)));
+    assert!(!make(first).equivalent(&make(reversed)));
+}
+
+#[test]
 fn expanded_local_provider_url_is_validated_before_auth_or_transport() {
     if std::env::var_os(ENDPOINT).is_none() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

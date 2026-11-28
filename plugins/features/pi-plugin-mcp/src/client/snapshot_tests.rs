@@ -43,7 +43,10 @@ async fn connection(name: &str) -> (Arc<McpConnection>, tokio::task::JoinHandle<
     });
     let handler = McpClientHandler::new(None);
     let service = handler.clone().serve(client_io).await.unwrap();
-    (connected_transport(name.into(), handler, service), task)
+    (
+        connected_transport(name.into(), None, handler, service),
+        task,
+    )
 }
 
 fn remote(name: &str) -> McpToolSpec {

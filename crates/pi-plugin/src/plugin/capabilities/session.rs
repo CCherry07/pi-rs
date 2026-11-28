@@ -735,6 +735,23 @@ pub trait SessionContextAccess: Send + Sync {
         unbound()
     }
 
+    fn register_mcp_server(
+        &self,
+        _extension_path: String,
+        _name: String,
+        _config: Value,
+    ) -> PluginContextResult<()> {
+        unbound()
+    }
+
+    fn unregister_mcp_server(
+        &self,
+        _extension_path: String,
+        _name: String,
+    ) -> PluginContextResult<()> {
+        unbound()
+    }
+
     fn tool_reaches_tools(&self, _name: &str) -> PluginContextResult<bool> {
         Ok(false)
     }

@@ -65,7 +65,9 @@ mod generation;
 mod recovery;
 mod refresh;
 pub use generation::{McpGenerationReadiness, WeakMcpGenerationReadiness};
-pub(crate) use recovery::{ConnectionAdmission, WeakConnectionSlot};
+pub(crate) use recovery::{
+    AdmissionError, ConnectionAdmission, OwnedConnectionSlot, WeakConnectionSlot,
+};
 mod input;
 pub(crate) use input::ConnectionInput;
 
@@ -283,16 +285,34 @@ impl ConnectionSlot {
         connection
     }
 
+    fn retire_connections(&self) -> Vec<Arc<McpConnection>> {
+        let (current, mut draining) = self.cancel_connections();
+        self.changed.bump();
+        draining.extend(current);
+        draining
+    }
+
     // Last-owner cleanup is not a readiness transition of the replacement's slots.
     // Otherwise draining old pins would immediately stale a successful publication.
     fn cancel(&self) -> Option<Arc<McpConnection>> {
+        self.cancel_connections().0
+    }
+
+    fn cancel_connections(&self) -> (Option<Arc<McpConnection>>, Vec<Arc<McpConnection>>) {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.epoch += 1;
         state.retired = true;
-        for connection in state.draining.drain(..).filter_map(|weak| weak.upgrade()) {
+        // Capture strong cleanup leases while retiring under the same lock: a concurrent
+        // expiry must not move a service into draining between collection and retirement.
+        let draining = state
+            .draining
+            .drain(..)
+            .filter_map(|weak| weak.upgrade())
+            .collect::<Vec<_>>();
+        for connection in &draining {
             connection.cancel();
         }
         if let Some(abort) = state.abort.take() {
@@ -312,9 +332,9 @@ impl ConnectionSlot {
         | ConnectionReadiness::Disconnected(inventory) = old
         {
             inventory.connection.cancel();
-            Some(inventory.connection.clone())
+            (Some(inventory.connection.clone()), draining)
         } else {
-            None
+            (None, draining)
         }
     }
 }

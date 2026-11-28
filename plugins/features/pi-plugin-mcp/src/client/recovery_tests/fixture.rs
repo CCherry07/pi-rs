@@ -22,6 +22,8 @@ pub(super) enum Reply {
     Status(u16),
     StatusRpc(u16),
     Auth,
+    Scope,
+    HeldScope,
     Rpc,
     Network,
     Ok,
@@ -33,6 +35,7 @@ pub(super) struct StateData {
     pub lists: AtomicUsize,
     pub calls: Mutex<Vec<(String, String)>>,
     pub authorization: Mutex<Vec<Option<String>>>,
+    pub deleted: Mutex<Vec<String>>,
     pub hold_json_body: AtomicBool,
     pub executed: AtomicUsize,
     pub tools: Mutex<Vec<McpToolSpec>>,
@@ -74,6 +77,7 @@ impl Fixture {
             lists: AtomicUsize::new(0),
             calls: Mutex::new(Vec::new()),
             authorization: Mutex::new(Vec::new()),
+            deleted: Mutex::new(Vec::new()),
             hold_json_body: AtomicBool::new(false),
             executed: AtomicUsize::new(0),
             tools: Mutex::new(vec![
@@ -103,7 +107,10 @@ impl Fixture {
         )]));
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let metadata = json!({"issuer":origin,"authorization_endpoint":format!("{origin}/authorize"),"token_endpoint":format!("{origin}/token"),"response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token"],"token_endpoint_auth_methods_supported":["none","client_secret_post"],"code_challenge_methods_supported":["S256"]});
-        let app = Router::new().route("/mcp", post(endpoint).delete(|| async { StatusCode::NO_CONTENT }))
+        let app = Router::new().route("/mcp", post(endpoint).delete(|State(state): State<Arc<StateData>>, headers: HeaderMap| async move {
+                state.deleted.lock().unwrap().push(headers["mcp-session-id"].to_str().unwrap().to_owned());
+                StatusCode::NO_CONTENT
+            }))
             .route("/metadata", axum::routing::get(move || { let metadata = metadata.clone(); async move { Json(metadata) } }))
             .route("/token", post(|State(state): State<Arc<StateData>>| async move {
                 let number = state.token_calls.fetch_add(1, Ordering::AcqRel) + 1;
@@ -151,6 +158,33 @@ impl Fixture {
         self.auth = McpClientAuth::default().with_oauth_store(store);
         self.dir = Some(dir);
         self
+    }
+
+    pub fn provider(mut self, token: Option<&str>) -> Self {
+        struct Tokens(Option<String>);
+        #[async_trait]
+        impl crate::McpProviderTokenResolver for Tokens {
+            async fn token(&self, provider: &str) -> Result<Option<String>, String> {
+                assert_eq!(provider, "fixture-provider");
+                Ok(self.0.clone())
+            }
+        }
+        let McpTransport::Http { headers, .. } = &mut self.config.transport else {
+            unreachable!()
+        };
+        headers.clear();
+        self.config.auth = Some(McpProviderAuth {
+            provider: "fixture-provider".into(),
+        });
+        self.auth = McpClientAuth::default()
+            .with_provider_tokens(Arc::new(Tokens(token.map(str::to_owned))));
+        self
+    }
+
+    pub async fn explicit(&self) -> McpToolSet {
+        McpToolSet::connect_with_auth(vec![self.config.clone()], self.auth.clone())
+            .await
+            .unwrap()
     }
 
     pub async fn prepare(
@@ -238,6 +272,8 @@ fn reject(id: &Value, reply: Reply) -> Option<Response> {
         Reply::Auth => Some((StatusCode::UNAUTHORIZED, [("www-authenticate", "Bearer realm=\"fixture\", error=\"invalid_token\"")]).into_response()),
         Reply::Rpc => Some(Json(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32603,"message":"fixture RPC failure"}})).into_response()),
         Reply::Network => Some(Response::builder().header("content-type", "application/json").body(Body::from_stream(futures::stream::once(async { Err::<String,_>(std::io::Error::other("fixture stream closed")) }))).unwrap()),
+        Reply::Scope => Some((StatusCode::FORBIDDEN, [("www-authenticate", "Bearer error=\"insufficient_scope\", scope=\"private-scope-marker\"")]).into_response()),
+        Reply::HeldScope => unreachable!("held rejection must pass the fixture gate first"),
         Reply::Ok => None,
     }
 }
@@ -284,8 +320,11 @@ async fn endpoint(
         "tools/call" => {
             let name = message["params"]["name"].as_str().unwrap().to_owned();
             state.calls.lock().unwrap().push((session, name.clone()));
-            state.authorization.lock().unwrap().push(headers.get(http::header::AUTHORIZATION)
-                .map(|value| value.to_str().unwrap().to_owned()));
+            state.authorization.lock().unwrap().push(
+                headers
+                    .get(http::header::AUTHORIZATION)
+                    .map(|value| value.to_str().unwrap().to_owned()),
+            );
             let answer = json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":"executed"}]}});
             if name == "held-json" {
                 if state.hold_json_body.load(Ordering::Acquire) {
@@ -295,14 +334,16 @@ async fn endpoint(
                     let stream = futures::stream::once(async move {
                         first.held_entered.add_permits(1);
                         Ok::<_, Infallible>(String::from(" "))
-                    }).chain(futures::stream::once(async move {
+                    })
+                    .chain(futures::stream::once(async move {
                         entered(&last.held_release, 1).await;
                         last.executed.fetch_add(1, Ordering::AcqRel);
                         Ok::<_, Infallible>(answer.to_string())
                     }));
                     return Response::builder()
                         .header("content-type", "application/json")
-                        .body(Body::from_stream(stream)).unwrap();
+                        .body(Body::from_stream(stream))
+                        .unwrap();
                 }
                 state.held_entered.add_permits(1);
                 entered(&state.held_release, 1).await;
@@ -318,6 +359,7 @@ async fn endpoint(
                 })
                 .chain(futures::stream::once(async move {
                     entered(&gate, 1).await;
+                    state.executed.fetch_add(1, Ordering::AcqRel);
                     Ok::<_, Infallible>(format!("event: message\ndata: {answer}\n\n"))
                 }));
                 return Response::builder()
@@ -331,6 +373,11 @@ async fn endpoint(
                 .unwrap()
                 .pop_front()
                 .unwrap_or(Reply::Ok);
+            if matches!(reply, Reply::HeldScope) {
+                state.held_entered.add_permits(1);
+                entered(&state.held_release, 1).await;
+                return reject(id, Reply::Scope).unwrap();
+            }
             if let Some(response) = reject(id, reply) {
                 return response;
             }

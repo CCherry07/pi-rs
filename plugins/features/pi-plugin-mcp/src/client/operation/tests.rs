@@ -181,13 +181,28 @@ fn completion_allows_only_supersession_without_rearming_dispatch_or_recovery() {
     assert_eq!(control.check_completion(), Ok(()));
     gate.supersede();
     assert_eq!(control.check_completion(), Ok(()));
-    assert_eq!(control.check_dispatch(), Err(OperationError::TransportSuperseded));
-    assert_eq!(control.try_recover(), Err(OperationError::TransportSuperseded));
-    assert!(guard.operation().try_recover().unwrap(), "completion does not spend allowance");
+    assert_eq!(
+        control.check_dispatch(),
+        Err(OperationError::TransportSuperseded)
+    );
+    assert_eq!(
+        control.try_recover(),
+        Err(OperationError::TransportSuperseded)
+    );
+    assert!(
+        guard.operation().try_recover().unwrap(),
+        "completion does not spend allowance"
+    );
     gate.retire();
-    assert_eq!(control.check_completion(), Err(OperationError::AuthorityRetired));
+    assert_eq!(
+        control.check_completion(),
+        Err(OperationError::AuthorityRetired)
+    );
     drop(gate);
-    assert_eq!(control.check_completion(), Err(OperationError::AuthorityRetired));
+    assert_eq!(
+        control.check_completion(),
+        Err(OperationError::AuthorityRetired)
+    );
     let gate = Arc::new(DispatchGate::default());
     let control = RequestControl::new(guard.operation(), &gate);
     gate.supersede();

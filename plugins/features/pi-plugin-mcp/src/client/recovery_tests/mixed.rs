@@ -97,14 +97,26 @@ async fn oauth_expiry_preserves_an_admitted_json_body_without_replay() {
     let held_pool = pool.clone();
     let held = tokio::spawn(async move { invoke(&held_pool, "held-json", context()).await });
     entered(&fixture.state.held_entered, 1).await;
-    assert_eq!(fixture.state.authorization.lock().unwrap()[0].as_deref(), Some("Bearer initial"));
+    assert_eq!(
+        fixture.state.authorization.lock().unwrap()[0].as_deref(),
+        Some("Bearer initial")
+    );
     fixture.replies(&[Reply::Status(404)]);
     assert!(invoke(&pool, "echo", context()).await.is_ok());
     assert_eq!(fixture.starts(), 2);
-    assert!(!held.is_finished(), "ordinary expiry must drain the admitted OAuth response");
+    assert!(
+        !held.is_finished(),
+        "ordinary expiry must drain the admitted OAuth response"
+    );
     fixture.state.held_release.add_permits(1);
-    let result = tokio::time::timeout(Duration::from_secs(5), held).await.unwrap().unwrap();
-    assert!(result.is_ok(), "completed old-epoch JSON must survive supersession: {result:?}");
+    let result = tokio::time::timeout(Duration::from_secs(5), held)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        result.is_ok(),
+        "completed old-epoch JSON must survive supersession: {result:?}"
+    );
     assert_eq!(fixture.calls(), 3, "held call is never replayed");
     assert_eq!(fixture.executed(), 2);
     assert_eq!(fixture.state.token_calls.load(Ordering::Acquire), 0);
@@ -119,10 +131,19 @@ async fn oauth_authoritative_reconnect_still_cancels_an_admitted_json_body() {
     let held_pool = pool.clone();
     let held = tokio::spawn(async move { invoke(&held_pool, "held-json", context()).await });
     entered(&fixture.state.held_entered, 1).await;
-    assert_eq!(fixture.state.authorization.lock().unwrap()[0].as_deref(), Some("Bearer initial"));
+    assert_eq!(
+        fixture.state.authorization.lock().unwrap()[0].as_deref(),
+        Some("Bearer initial")
+    );
     owner.reconnect("fixture").unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(5), held).await.unwrap().unwrap();
-    assert!(result.is_err(), "authoritative retirement must not use completion allowance");
+    let result = tokio::time::timeout(Duration::from_secs(5), held)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        result.is_err(),
+        "authoritative retirement must not use completion allowance"
+    );
     assert_eq!(fixture.calls(), 1);
     assert_eq!(fixture.state.token_calls.load(Ordering::Acquire), 0);
     fixture.state.held_release.add_permits(1);

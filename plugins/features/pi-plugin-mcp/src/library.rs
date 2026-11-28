@@ -31,6 +31,8 @@ const EMPTY: &str = "{\n  \"version\": 1,\n  \"mcpServers\": {}\n}\n";
 pub enum McpScope {
     Global,
     Project,
+    /// Generation-local server registered by a JavaScript extension.
+    Extension,
 }
 
 #[derive(Clone)]
@@ -39,6 +41,7 @@ pub struct McpLibrary {
     cwd: Option<PathBuf>,
     trusted: bool,
     pub(crate) register_tool_search: bool,
+    pub(crate) register_management: bool,
     client_auth: McpClientAuth,
     oauth_host: Arc<dyn crate::McpOAuthHost>,
     allow_command_values: bool,
@@ -52,6 +55,27 @@ pub struct McpLibrary {
     tool_selection_reader: Option<selection::ToolSelectionReader>,
     selection_ambiguities: usize,
     denied_selection_count: usize,
+    include_configured_servers: bool,
+    extension_servers: Vec<Entry>,
+    extension_override_notices: Vec<String>,
+}
+
+/// One generation-local MCP server contributed by a JavaScript extension.
+#[derive(Clone)]
+pub struct McpExtensionServerDefinition {
+    pub name: String,
+    pub config: Value,
+    pub source: PathBuf,
+}
+
+impl McpExtensionServerDefinition {
+    pub fn new(name: impl Into<String>, config: Value, source: impl Into<PathBuf>) -> Self {
+        Self {
+            name: name.into(),
+            config,
+            source: source.into(),
+        }
+    }
 }
 
 /// A candidate product plugin plus immutable typed readiness diagnostics.
@@ -248,6 +272,8 @@ struct Entry {
     scope: McpScope,
     /// Scope that owns the effective policy and should receive management writes.
     management_scope: McpScope,
+    /// Extension source path. Disk-backed entries derive this from their scope.
+    source: Option<PathBuf>,
     config: McpConfigEntry,
 }
 
@@ -260,6 +286,7 @@ impl McpLibrary {
             cwd: cwd.map(Path::to_path_buf),
             trusted,
             register_tool_search: true,
+            register_management: true,
             allow_command_values: false,
             generation: None,
             server_readiness: BTreeMap::new(),
@@ -270,11 +297,68 @@ impl McpLibrary {
             tool_selection_reader: None,
             selection_ambiguities: 0,
             denied_selection_count: 0,
+            include_configured_servers: true,
+            extension_servers: Vec::new(),
+            extension_override_notices: Vec::new(),
             oauth_host: Arc::new(crate::login::ManualOAuthHost),
             client_auth: McpClientAuth::default().with_oauth_store(McpOAuthCredentialStore::new(
                 agent_dir.join("mcp-auth.json"),
             )),
         }
+    }
+
+    /// Controls whether executable generation preparation includes global/project `mcp.json`.
+    /// Management APIs remain available for explicit CLI operations.
+    pub fn with_configured_servers(mut self, enabled: bool) -> Self {
+        self.include_configured_servers = enabled;
+        self
+    }
+
+    /// Keeps an empty lifecycle-only generation from exposing `/mcp` when every source is disabled.
+    pub fn with_management_registration(mut self, enabled: bool) -> Self {
+        self.register_management = enabled;
+        self
+    }
+
+    /// Adds validated, generation-local extension registrations. Configured disk servers take
+    /// precedence over extension servers with the same normalized namespace.
+    pub fn with_extension_servers(
+        mut self,
+        servers: impl IntoIterator<Item = McpExtensionServerDefinition>,
+    ) -> Result<Self, String> {
+        let mut namespaces = BTreeMap::<String, String>::new();
+        let mut entries = Vec::new();
+        for server in servers {
+            if server.source.as_os_str().is_empty() {
+                return Err(format!(
+                    "MCP server {}: extension source path must not be empty",
+                    server.name
+                ));
+            }
+            let namespace = server.name.replace('-', "_");
+            if let Some(previous) = namespaces.insert(namespace.clone(), server.name.clone()) {
+                return Err(format!(
+                    "MCP server {}: namespace conflicts with {previous}",
+                    server.name
+                ));
+            }
+            let mut document = Map::new();
+            document.insert(server.name.clone(), server.config);
+            let mut parsed =
+                parse_document(&json!({"mcpServers": Value::Object(document)}).to_string())?
+                    .servers;
+            let config = parsed
+                .pop()
+                .ok_or_else(|| format!("MCP server {} was not parsed", server.name))?;
+            entries.push(Entry {
+                scope: McpScope::Extension,
+                management_scope: McpScope::Extension,
+                source: Some(server.source),
+                config,
+            });
+        }
+        self.extension_servers = entries;
+        Ok(self)
     }
 
     /// Installs host-owned auth dependencies without coupling MCP to a product domain.
@@ -472,7 +556,7 @@ impl McpLibrary {
             self.path(scope)?;
         }
         let entry = self
-            .entries()?
+            .generation_entries()?
             .into_iter()
             .find(|entry| entry.config.name() == name)
             .ok_or_else(|| self.unknown_server_message(name))?;
@@ -501,12 +585,89 @@ impl McpLibrary {
                 .as_ref()
                 .map(|cwd| cwd.join(".pi/mcp.json"))
                 .ok_or_else(|| "Select a project first".into()),
+            McpScope::Extension => Err(
+                "Extension MCP servers are generation-local and have no configuration file".into(),
+            ),
         }
     }
 
     fn entries(&self) -> Result<Vec<Entry>, String> {
         self.configuration_replacing(None)
             .map(|(entries, _)| entries)
+    }
+
+    fn generation_configuration(&self) -> Result<(Vec<Entry>, bool), String> {
+        let (mut configured, auto_enable_codemode) = if self.include_configured_servers {
+            self.configuration_replacing(None)?
+        } else {
+            (Vec::new(), true)
+        };
+        let configured_namespaces = configured
+            .iter()
+            .map(|entry| entry.config.name().replace('-', "_"))
+            .collect::<std::collections::HashSet<_>>();
+        configured.extend(
+            self.extension_servers
+                .iter()
+                .filter(|entry| {
+                    !configured_namespaces.contains(&entry.config.name().replace('-', "_"))
+                })
+                .cloned(),
+        );
+        Ok((configured, auto_enable_codemode))
+    }
+
+    fn generation_entries(&self) -> Result<Vec<Entry>, String> {
+        self.generation_configuration().map(|(entries, _)| entries)
+    }
+
+    fn source_path(&self, entry: &Entry) -> Result<PathBuf, String> {
+        entry
+            .source
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(|| self.path(entry.scope))
+    }
+
+    pub(crate) fn server_source(
+        &self,
+        name: &str,
+        defining_scope: McpScope,
+    ) -> Result<PathBuf, String> {
+        if defining_scope != McpScope::Extension {
+            return self.path(defining_scope);
+        }
+        self.extension_servers
+            .iter()
+            .find(|entry| entry.config.name() == name)
+            .ok_or_else(|| format!("Unknown generation-local MCP server {name:?}."))
+            .and_then(|entry| self.source_path(entry))
+    }
+
+    fn extension_override_notices(&self, entries: &[Entry]) -> Vec<String> {
+        self.extension_servers
+            .iter()
+            .filter_map(|extension| {
+                let namespace = extension.config.name().replace('-', "_");
+                let configured = entries.iter().find(|entry| {
+                    entry.scope != McpScope::Extension
+                        && entry.config.name().replace('-', "_") == namespace
+                })?;
+                let extension_source = self.source_path(extension).ok()?;
+                let configured_source = self.source_path(configured).ok()?;
+                Some(format!(
+                    "MCP server {:?} registered by {} is overridden by {:?} in {}",
+                    extension.config.name(),
+                    extension_source.display(),
+                    configured.config.name(),
+                    configured_source.display()
+                ))
+            })
+            .collect()
+    }
+
+    pub(crate) fn extension_overrides(&self) -> &[String] {
+        &self.extension_override_notices
     }
 
     /// Validate a proposed scope against the same inherited configuration used at startup.
@@ -998,7 +1159,7 @@ impl McpLibrary {
     /// preparing connections, so a login racing preparation is observed next turn.
     pub fn credential_watch(&self) -> Result<crate::McpCredentialWatch, String> {
         let configs = self
-            .entries()?
+            .generation_entries()?
             .into_iter()
             .filter(|entry| entry.config.enabled())
             .map(|entry| self.resolve_identity(entry))
@@ -1016,7 +1177,8 @@ impl McpLibrary {
     }
 
     pub async fn prepare_generation(&self) -> Result<PreparedMcpGeneration, String> {
-        let (entries, auto_enable_codemode) = self.configuration_replacing(None)?;
+        let (entries, auto_enable_codemode) = self.generation_configuration()?;
+        let extension_override_notices = self.extension_override_notices(&entries);
         let needs_codemode = entries
             .iter()
             .any(|entry| entry.config.enabled() && entry.config.policy().uses_codemode());
@@ -1045,6 +1207,7 @@ impl McpLibrary {
         library.tool_selection_reader = None;
         library.selection_ambiguities = 0;
         library.denied_selection_count = 0;
+        library.extension_override_notices = extension_override_notices;
         Ok(PreparedMcpGeneration {
             temporarily_unavailable_tools: Vec::new(),
             unresolved_tool_selection: Vec::new(),
@@ -1077,7 +1240,7 @@ impl McpLibrary {
     }
 
     fn resolve_identity(&self, entry: Entry) -> Result<McpServerConfig, String> {
-        self.path(entry.scope)?;
+        self.source_path(&entry)?;
         entry.config.resolve_identity()
     }
 
@@ -1123,7 +1286,7 @@ impl McpLibrary {
         entry: Entry,
         signal: AbortSignal,
     ) -> Result<McpServerConfig, String> {
-        let path = self.path(entry.scope)?;
+        let path = self.source_path(&entry)?;
         entry
             .config
             .resolve_for_connect(
@@ -1193,6 +1356,7 @@ fn merge_entry(
         Entry {
             scope: base.scope,
             management_scope: McpScope::Project,
+            source: base.source.clone(),
             config: config.apply_override(&base.config)?,
         }
     } else {
@@ -1214,6 +1378,7 @@ fn merge_entry(
         Entry {
             scope,
             management_scope: scope,
+            source: None,
             config,
         }
     };
@@ -1297,6 +1462,154 @@ fn io_error(error: std::io::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extension_servers_are_generation_local_and_configured_namespaces_take_precedence() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("mcp.json"),
+            r#"{"mcpServers":{"dev-radius":{"command":"configured"}}}"#,
+        )
+        .unwrap();
+        let library = McpLibrary::new(dir.path(), None, false)
+            .with_extension_servers([
+                McpExtensionServerDefinition::new(
+                    "dev_radius",
+                    json!({"command":"shadowed"}),
+                    "/extensions/shadowed.ts",
+                ),
+                McpExtensionServerDefinition::new(
+                    "docs",
+                    json!({"command":"extension"}),
+                    "/extensions/docs.ts",
+                ),
+            ])
+            .unwrap();
+
+        let (entries, _) = library.generation_configuration().unwrap();
+        let override_notices = library.extension_override_notices(&entries);
+        assert_eq!(override_notices.len(), 1);
+        assert!(override_notices[0].contains("dev_radius"));
+        assert!(override_notices[0].contains("dev-radius"));
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| (entry.config.name(), entry.scope))
+                .collect::<Vec<_>>(),
+            [
+                ("dev-radius", McpScope::Global),
+                ("docs", McpScope::Extension),
+            ]
+        );
+        assert_eq!(
+            library.entries().unwrap().len(),
+            1,
+            "management disk views must not absorb generation registrations"
+        );
+        assert_eq!(
+            library.server_source("docs", McpScope::Extension).unwrap(),
+            PathBuf::from("/extensions/docs.ts")
+        );
+
+        let extension_only = library.with_configured_servers(false);
+        let (entries, auto_enable) = extension_only.generation_configuration().unwrap();
+        assert!(auto_enable);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.config.name())
+                .collect::<Vec<_>>(),
+            ["dev_radius", "docs"]
+        );
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.scope == McpScope::Extension)
+        );
+    }
+
+    #[test]
+    fn extension_server_registration_rejects_duplicate_normalized_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = McpLibrary::new(dir.path(), None, false)
+            .with_extension_servers([
+                McpExtensionServerDefinition::new(
+                    "dev-radius",
+                    json!({"command":"one"}),
+                    "/extensions/one.ts",
+                ),
+                McpExtensionServerDefinition::new(
+                    "dev_radius",
+                    json!({"command":"two"}),
+                    "/extensions/two.ts",
+                ),
+            ])
+            .err()
+            .expect("normalized namespace collision must fail");
+        assert!(error.contains("namespace conflicts"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn extension_stdio_resolution_uses_session_cwd_not_extension_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let source = dir.path().join("extensions/owned.ts");
+        fs::create_dir_all(&project).unwrap();
+        let library = McpLibrary::new(dir.path(), Some(&project), false)
+            .with_configured_servers(false)
+            .with_extension_servers([McpExtensionServerDefinition::new(
+                "stdio-extension",
+                json!({
+                    "command":"./server",
+                    "args":["--fixture"],
+                    "env":{"MARKER":"extension"},
+                    "cwd":"relative-workdir"
+                }),
+                source,
+            )])
+            .unwrap();
+        let entry = library.generation_entries().unwrap().remove(0);
+        let config = library
+            .resolve_connection(entry, pi_core::AbortHandle::new().1)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            config.transport,
+            McpTransport::Stdio {
+                ref command,
+                ref args,
+                ref env,
+                cwd: Some(ref cwd),
+            } if command == "./server"
+                && args == &["--fixture"]
+                && env.get("MARKER").map(String::as_str) == Some("extension")
+                && cwd == &project.join("relative-workdir")
+        ));
+    }
+
+    #[test]
+    fn extension_oauth_actions_resolve_generation_entries_without_persisting_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = McpLibrary::new(dir.path(), None, false)
+            .with_configured_servers(false)
+            .with_extension_servers([McpExtensionServerDefinition::new(
+                "auth-server",
+                json!({"url":"https://mcp.example.test/rpc","oauth":{}}),
+                "/extensions/auth.ts",
+            )])
+            .unwrap();
+
+        let config = library
+            .management_oauth_config("auth-server", None)
+            .unwrap();
+        assert!(matches!(
+            config.transport,
+            McpTransport::Http { ref url, .. } if url == "https://mcp.example.test/rpc"
+        ));
+        assert!(config.oauth.is_some());
+        assert!(library.entries().unwrap().is_empty());
+    }
 
     #[test]
     fn project_replaces_whole_servers_and_can_disable_inherited_servers() {

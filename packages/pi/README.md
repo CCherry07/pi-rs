@@ -64,6 +64,10 @@ npm install --prefix packages/pi
 ```
 
 `scripts/pi-dev` incrementally builds and explicitly selects the current workspace NAPI library.
+Run `./scripts/install-local-pi.sh` from the repository root to rebuild the Node launcher and native
+binding, install `pi-rs` in `~/.local/bin`, and point the installed `pi` command at those checkout
+artifacts. Pass `--release` for an optimized native build.
+
 The standalone Rust adapter does not embed a JavaScript VM; when JavaScript extension configuration
 is active it exits with an actionable launcher error rather than silently omitting extensions. Use
 `cargo run -p pi-cli -- --no-extensions` for an intentional native-only run.

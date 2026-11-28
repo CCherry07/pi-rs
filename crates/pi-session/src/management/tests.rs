@@ -1214,6 +1214,50 @@ async fn assert_cancelled_managed_replacement_finishes(phase: ReplacementPause) 
 }
 
 #[tokio::test]
+async fn close_cancels_activated_unpublished_replacement_without_publishing_candidate() {
+    let directory = tempfile::tempdir().unwrap();
+    let gates = ReplacementGates::default();
+    let manager = MultiSessionManager::new(GatedGenerationFactory(gates.clone()));
+    let owner = manager
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("session.jsonl"),
+        ))
+        .await
+        .unwrap();
+    let original = owner.current();
+    gates.activation_committed.store(false, Ordering::Release);
+    gates.pause_at(ReplacementPause::Start);
+    let reload = tokio::spawn({
+        let owner = owner.clone();
+        async move { owner.reload().await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), gates.entered.notified())
+        .await
+        .expect("replacement did not enter session_start");
+
+    assert!(gates.activation_committed.load(Ordering::Acquire));
+    assert!(Arc::ptr_eq(&original, &owner.current()));
+    assert!(original.is_closed());
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        manager.close_session(&owner),
+    )
+    .await
+    .expect("close must cancel an activated but unpublished replacement")
+    .unwrap();
+    assert!(matches!(
+        reload.await.unwrap(),
+        Err(MultiSessionManagerError::Session(SessionError::Closed))
+    ));
+    assert!(Arc::ptr_eq(&original, &owner.current()));
+    assert!(owner.current().is_closed());
+    assert!(manager.sessions().is_empty());
+    assert_eq!(gates.shutdowns.load(Ordering::Acquire), 1);
+    gates.resume();
+}
+
+#[tokio::test]
 async fn manager_gate_serializes_replacements_before_runtime_snapshot() {
     let directory = tempfile::tempdir().unwrap();
     let gates = ReplacementGates::default();
@@ -1418,6 +1462,75 @@ async fn cancelling_isolated_acquisition_during_prepare_closes_the_unclaimed_chi
 #[tokio::test]
 async fn cancelling_isolated_acquisition_during_start_closes_the_unclaimed_child() {
     assert_cancelled_isolated_acquisition_closes_unclaimed_child(ReplacementPause::Start).await;
+}
+
+#[tokio::test]
+async fn owner_close_rewalks_tree_after_inflight_isolated_acquisition_registers() {
+    let directory = tempfile::tempdir().unwrap();
+    let gates = ReplacementGates::default();
+    let manager = MultiSessionManager::new(GatedGenerationFactory(gates.clone()));
+    let owner = manager
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("owner.jsonl"),
+        ))
+        .await
+        .unwrap();
+    // Consume the owner's registration so the next notification belongs to
+    // the child that is not visible to the pre-gate close-tree walk.
+    gates.registered.notified().await;
+    gates.activation_committed.store(false, Ordering::Release);
+    gates.pause_at(ReplacementPause::Start);
+
+    let launch = tokio::spawn({
+        let owner = owner.clone();
+        async move {
+            owner
+                .launch_isolated_session(IsolatedSessionRequest::new(CustomMessageContent::Text(
+                    "inspect".to_string(),
+                )))
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), gates.entered.notified())
+        .await
+        .expect("isolated acquisition did not enter session_start");
+    assert_eq!(manager.sessions().len(), 1);
+
+    let mut close = tokio::spawn({
+        let manager = manager.clone();
+        let owner = owner.clone();
+        async move { manager.close_session(&owner).await }
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut close)
+            .await
+            .is_err(),
+        "owner close must wait for the in-flight child acquisition"
+    );
+
+    gates.resume();
+    tokio::time::timeout(std::time::Duration::from_secs(2), launch)
+        .await
+        .expect("isolated acquisition did not finish after session_start resumed")
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), close)
+        .await
+        .expect("owner close did not rewalk the registered child under the lifecycle gate")
+        .unwrap()
+        .unwrap();
+
+    assert!(owner.current().is_closed());
+    assert!(manager.sessions().is_empty());
+    let sibling = manager
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("sibling.jsonl"),
+        ))
+        .await
+        .expect("tree close must leave the manager open");
+    manager.close_session(&sibling).await.unwrap();
 }
 
 #[tokio::test]

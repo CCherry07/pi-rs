@@ -368,7 +368,8 @@ async fn run(
     let session_path = config.session_path.clone();
     let plugin_context_binding = PluginContextBinding::new();
     // ACP owns transient per-session MCP configuration, even when its list is empty.
-    config.load_mcp_config = !matches!(cli_mode, CLIMode::Acp);
+    // Preserve the CLI's --no-mcp / --no-extensions ceiling in every other mode.
+    config.load_mcp_config &= !matches!(cli_mode, CLIMode::Acp);
     let (plugin_ui, mut plugin_surface_requests) = tui::extensions::PluginUiService::channel();
     let ui_settings = settings.load(&SettingsContext::new(&config.cwd, trust.trusted()));
     plugin_surface_requests.theme = ui_settings.effective().theme.clone();
@@ -546,6 +547,9 @@ fn split_extension_flags(
         "plugin",
         "extension",
         "no-extensions",
+        "no-mcp",
+        "no-tools",
+        "offline",
         "skill",
         "approve",
         "no-approve",
@@ -946,6 +950,13 @@ mod tests {
             "--fixture-enabled".to_string(),
         ]);
         assert_eq!(rpc, vec!["--mode", "rpc"]);
+        assert_eq!(values.get("fixture-enabled"), Some(&json!(true)));
+
+        let (no_mcp, values) = split_extension_flags(vec![
+            "--no-mcp".to_string(),
+            "--fixture-enabled".to_string(),
+        ]);
+        assert_eq!(no_mcp, vec!["--no-mcp"]);
         assert_eq!(values.get("fixture-enabled"), Some(&json!(true)));
 
         let (arguments, values) = split_extension_flags(vec![

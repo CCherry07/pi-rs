@@ -1,15 +1,18 @@
 //! Actual-slot consumers of the shared real HTTP/OAuth fixture.
 //! RUST-OWNERSHIP is deliberately stronger than frozen Pi's detached GET cancellation.
-//! ORACLE-DESIRED assertions retain the production SDK retry policy, including known gaps.
+//! ORACLE-DESIRED assertions exercise the production private HTTP transport policy.
+mod provider_wait;
 use super::*;
 use crate::auth::sse_fixture::{
     Event, FinalBody, Gate, GatePoint, GetKind, OAuthSseFixture, ResumeReply, ServerStream,
     Snapshot, SseOptions,
 };
-use crate::supervisor::{ConnectionInput, ConnectionReadiness, McpGenerationReadiness, McpSupervisor};
+use crate::supervisor::{
+    ConnectionInput, ConnectionReadiness, McpGenerationReadiness, McpSupervisor,
+};
 
 const WAIT: Duration = Duration::from_secs(5);
-// A bounded forbidden-event observation, not proof that the SDK's 50-ms drain is quiescent.
+// A bounded forbidden-event observation, not an unbounded proof of stream quiescence.
 const EXTRA_GET_WINDOW: Duration = Duration::from_millis(250);
 
 struct Runtime {
@@ -44,7 +47,10 @@ async fn publish(
 
 async fn prepare(fixture: &OAuthSseFixture) -> Runtime {
     let policy = McpServerPolicy::direct();
-    assert!(policy.timeout > WAIT, "the outer test bound must not be a request timeout");
+    assert!(
+        policy.timeout > WAIT,
+        "the outer test bound must not be a request timeout"
+    );
     let owner = McpSupervisor::new();
     let input = ConnectionInput::new(
         fixture.config(),
@@ -53,10 +59,16 @@ async fn prepare(fixture: &OAuthSseFixture) -> Runtime {
         [0; 32],
     )
     .unwrap();
-    owner.reconcile(owner.begin_candidate(), vec![input]).unwrap();
+    owner
+        .reconcile(owner.begin_candidate(), vec![input])
+        .unwrap();
     let (source, pool) = publish(fixture, &owner).await;
     observe(fixture, |snapshot| common_started(snapshot, "session-1")).await;
-    Runtime { owner, _source: source, pool }
+    Runtime {
+        owner,
+        _source: source,
+        pool,
+    }
 }
 
 struct Call {
@@ -83,10 +95,14 @@ impl Call {
         let expected = format!("Progress {number}");
         tokio::time::timeout(WAIT, async {
             loop {
-                let update = self.updates.recv().await.expect("request ended before progress");
-                if update.content.iter().any(|content| {
-                    matches!(content, ContentBlock::Text(text) if text.text == expected)
-                }) {
+                let update = self
+                    .updates
+                    .recv()
+                    .await
+                    .expect("request ended before progress");
+                if update.content.iter().any(
+                    |content| matches!(content, ContentBlock::Text(text) if text.text == expected),
+                ) {
                     break;
                 }
             }
@@ -104,18 +120,38 @@ fn call(pool: &McpToolSet, remote: &str, lane: &str) -> Call {
     let context = ToolContext::standalone(PathBuf::from("/tmp"), signal);
     let (updates, received) = ToolUpdateSink::channel();
     let task = tokio::spawn(async move {
-        let tool = pool.inner.tools.iter().find(|tool| tool.remote_name == remote).unwrap();
-        tool.execute(context, format!("call-{lane}").into(), json!({"lane":lane}), updates).await
+        let tool = pool
+            .inner
+            .tools
+            .iter()
+            .find(|tool| tool.remote_name == remote)
+            .unwrap();
+        tool.execute(
+            context,
+            format!("call-{lane}").into(),
+            json!({"lane":lane}),
+            updates,
+        )
+        .await
     });
-    Call { abort, task, updates: received }
+    Call {
+        abort,
+        task,
+        updates: received,
+    }
 }
 
 async fn entered(gate: &Gate) {
-    tokio::time::timeout(WAIT, gate.wait_entered()).await.expect("gate deadline");
+    tokio::time::timeout(WAIT, gate.wait_entered())
+        .await
+        .expect("gate deadline");
 }
 
 async fn observe(fixture: &OAuthSseFixture, predicate: impl Fn(&Snapshot) -> bool) -> Snapshot {
-    fixture.wait_for_with_timeout(WAIT, predicate).await.expect("wire observation deadline")
+    fixture
+        .wait_for_with_timeout(WAIT, predicate)
+        .await
+        .expect("wire observation deadline")
 }
 
 fn common_started(snapshot: &Snapshot, session: &str) -> bool {
@@ -125,41 +161,72 @@ fn common_started(snapshot: &Snapshot, session: &str) -> bool {
 }
 
 fn posts<'a>(snapshot: &'a Snapshot, lane: &str) -> Vec<&'a crate::auth::sse_fixture::PostRecord> {
-    snapshot.posts.iter().filter(|post| {
-        post.method == "tools/call" && post.lane.as_deref() == Some(lane)
-    }).collect()
+    snapshot
+        .posts
+        .iter()
+        .filter(|post| post.method == "tools/call" && post.lane.as_deref() == Some(lane))
+        .collect()
 }
 
 fn gets<'a>(snapshot: &'a Snapshot, lane: &str) -> Vec<&'a crate::auth::sse_fixture::GetRecord> {
-    snapshot.gets.iter().filter(|get| {
-        get.kind == GetKind::Response && get.lane.as_deref() == Some(lane)
-    }).collect()
+    snapshot
+        .gets
+        .iter()
+        .filter(|get| get.kind == GetKind::Response && get.lane.as_deref() == Some(lane))
+        .collect()
 }
 
 fn echo_posts(snapshot: &Snapshot, lane: &str, expected: usize) {
     let records = posts(snapshot, lane);
     assert_eq!(records.len(), expected, "original echo POST count");
-    assert!(records.iter().all(|record| record.body["params"]["name"] == "echo"));
+    assert!(
+        records
+            .iter()
+            .all(|record| record.body["params"]["name"] == "echo")
+    );
     // These runtime cases use rotating access text; same-text cases live at LOCAL-BOUND.
     assert_eq!(records[0].authorization.as_deref(), Some("Bearer initial"));
     for replay in records.iter().skip(1) {
         assert_eq!(replay.authorization.as_deref(), Some("Bearer access-1"));
         assert_eq!(replay.id, records[0].id, "SDK request id changed on replay");
-        assert_eq!(replay.body, records[0].body, "wire request changed on replay");
+        assert_eq!(
+            replay.body, records[0].body,
+            "wire request changed on replay"
+        );
         assert_eq!(replay.session, records[0].session);
     }
 }
 
 fn unexpected_get(snapshot: &Snapshot) -> bool {
     snapshot.gets.iter().any(|get| {
-        !matches!(get.kind, GetKind::Response | GetKind::CommonInitial | GetKind::CommonReopen)
+        !matches!(
+            get.kind,
+            GetKind::Response | GetKind::CommonInitial | GetKind::CommonReopen
+        )
     })
 }
 
 fn assert_complete_wire(snapshot: &Snapshot) {
-    assert!(!unexpected_get(snapshot), "unclassified/wrong-session GET reached the server");
-    assert_eq!(snapshot.gets.iter().filter(|get| get.kind == GetKind::CommonReopen).count(), 0);
-    assert_eq!(snapshot.gets.iter().filter(|get| get.kind == GetKind::CommonInitial).count(), snapshot.initializations);
+    assert!(
+        !unexpected_get(snapshot),
+        "unclassified/wrong-session GET reached the server"
+    );
+    assert_eq!(
+        snapshot
+            .gets
+            .iter()
+            .filter(|get| get.kind == GetKind::CommonReopen)
+            .count(),
+        0
+    );
+    assert_eq!(
+        snapshot
+            .gets
+            .iter()
+            .filter(|get| get.kind == GetKind::CommonInitial)
+            .count(),
+        snapshot.initializations
+    );
 }
 
 fn response_attempts(snapshot: &Snapshot, lane: &str, token_generations: &[usize]) {
@@ -169,15 +236,27 @@ fn response_attempts(snapshot: &Snapshot, lane: &str, token_generations: &[usize
     let original_session = &original_posts[0].session;
     for (record, generation) in records.iter().zip(token_generations) {
         assert_eq!(&record.session, original_session);
-        assert_eq!(record.cursor, records[0].cursor, "resumption changed its server cursor");
-        assert_eq!(record.authorization.as_deref(), Some(format!("Bearer access-{generation}").as_str()));
+        assert_eq!(
+            record.cursor, records[0].cursor,
+            "resumption changed its server cursor"
+        );
+        let bearer = if *generation == 0 {
+            "Bearer initial".to_owned()
+        } else {
+            format!("Bearer access-{generation}")
+        };
+        assert_eq!(record.authorization.as_deref(), Some(bearer.as_str()));
     }
 }
 
 fn success(result: Result<ToolResult, ToolError>, text: &str) {
     let result = result.unwrap();
     assert!(!result.is_error, "server rejected the actual bearer");
-    assert!(serde_json::to_string(&result.content).unwrap().contains(text));
+    assert!(
+        serde_json::to_string(&result.content)
+            .unwrap()
+            .contains(text)
+    );
 }
 
 /// Positive fence: a probe waits for local refresh, sends the saved bearer, and stays pending
@@ -198,22 +277,38 @@ async fn probe_common(
     let record = posts(&snapshot, lane).into_iter().next().unwrap();
     assert!(record.authorized);
     assert_eq!(record.session.as_deref(), Some(session));
-    let expected_access = snapshot.exchanges.last()
-        .and_then(|exchange| exchange.issued_access.as_deref()).unwrap_or("initial");
-    assert_eq!(record.authorization.as_deref(), Some(format!("Bearer {expected_access}").as_str()));
+    let expected_access = snapshot
+        .exchanges
+        .last()
+        .and_then(|exchange| exchange.issued_access.as_deref())
+        .unwrap_or("initial");
+    assert_eq!(
+        record.authorization.as_deref(),
+        Some(format!("Bearer {expected_access}").as_str())
+    );
     let saved = fixture.saved_tokens().await.unwrap();
     assert_eq!(saved.access, expected_access);
-    let expected_refresh = snapshot.exchanges.last()
-        .and_then(|exchange| exchange.issued_refresh.as_deref()).unwrap_or("refresh-0");
+    let expected_refresh = snapshot
+        .exchanges
+        .last()
+        .and_then(|exchange| exchange.issued_refresh.as_deref())
+        .unwrap_or("refresh-0");
     assert_eq!(saved.refresh.as_deref(), Some(expected_refresh));
-    let common = snapshot.gets.iter().find(|get| {
-        get.kind == GetKind::CommonInitial && get.session.as_deref() == Some(session)
-            && get.planned_status == 200
-    }).unwrap();
+    let common = snapshot
+        .gets
+        .iter()
+        .find(|get| {
+            get.kind == GetKind::CommonInitial
+                && get.session.as_deref() == Some(session)
+                && get.planned_status == 200
+        })
+        .unwrap();
     assert!(!snapshot.events.iter().any(|event| {
         matches!(event, Event::ServerBodyDropped { stream: ServerStream::Common { ordinal, .. }, .. } if *ordinal == common.ordinal)
     }));
-    fixture.emit_common_progress(common.ordinal, record.progress_token.clone().unwrap(), 777).await;
+    fixture
+        .emit_common_progress(common.ordinal, record.progress_token.clone().unwrap(), 777)
+        .await;
     probe.progress(777).await;
     gate.release();
     success(probe.finish().await, &format!("probe:{lane}"));
@@ -228,7 +323,8 @@ async fn rust_ownership_original_auth_abort_preserves_rotation_and_common_stream
     let fixture = OAuthSseFixture::start(SseOptions {
         resume_reply: ResumeReply::Success,
         ..Default::default()
-    }).await;
+    })
+    .await;
     let exchange = fixture.hold_exchange(1);
     let runtime = prepare(&fixture).await;
     let original = call(&runtime.pool, "echo", "original");
@@ -255,7 +351,14 @@ async fn rust_ownership_resumed_auth_abort_keeps_shared_refresh_and_common_strea
     original.abort.abort();
     assert!(matches!(original.finish().await, Err(ToolError::Aborted)));
     exchange.release();
-    let snapshot = probe_common(&fixture, &runtime.pool, "session-1", "after-resume-abort", 2).await;
+    let snapshot = probe_common(
+        &fixture,
+        &runtime.pool,
+        "session-1",
+        "after-resume-abort",
+        2,
+    )
+    .await;
     echo_posts(&snapshot, "resumed", 2);
     response_attempts(&snapshot, "resumed", &[1]); // No late GET auth replay after cancellation.
     assert_eq!(snapshot.executions, ["resumed"]);
@@ -270,7 +373,8 @@ async fn rust_ownership_two_rejected_calls_cancel_one_keep_single_exchange_sibli
         // Do not accidentally add a second, resume-phase OAuth challenge to this case.
         resume_reply: ResumeReply::Success,
         ..Default::default()
-    }).await;
+    })
+    .await;
     let left_401 = fixture.hold(GatePoint::FirstPost401("left".into()));
     let right_401 = fixture.hold(GatePoint::FirstPost401("right".into()));
     let exchange = fixture.hold_exchange(1);
@@ -303,19 +407,26 @@ async fn rust_ownership_close_after_consumed_priming_with_eof_in_flight() {
         resume_reply: ResumeReply::Success,
         retry_ms: 30_000,
         ..Default::default()
-    }).await;
+    })
+    .await;
     let priming = fixture.hold(GatePoint::PrimingEof("closing".into()));
     let runtime = prepare(&fixture).await;
     let mut original = call(&runtime.pool, "echo", "closing");
     original.progress(1).await;
     entered(&priming).await;
     priming.release();
-    observe(&fixture, |snapshot| snapshot.events.iter().any(|event| {
+    observe(&fixture, |snapshot| {
+        snapshot.events.iter().any(|event| {
         matches!(event, Event::ServerEof(ServerStream::Priming { lane, .. }) if lane == "closing")
-    })).await;
+    })
+    })
+    .await;
     // This is NOT an internal backoff-entered fence. It proves shutdown after consumed
     // priming and server EOF, while a long retry hint makes resumption eligible later.
-    tokio::time::timeout(WAIT, runtime.owner.close()).await.unwrap().unwrap();
+    tokio::time::timeout(WAIT, runtime.owner.close())
+        .await
+        .unwrap()
+        .unwrap();
     assert!(original.finish().await.is_err());
     let snapshot = observe(&fixture, |snapshot| snapshot.events.iter().any(|event| {
         matches!(event, Event::ServerBodyDropped { stream: ServerStream::Common { session, .. }, .. } if session == "session-1")
@@ -323,10 +434,19 @@ async fn rust_ownership_close_after_consumed_priming_with_eof_in_flight() {
     assert_complete_wire(&snapshot);
     echo_posts(&snapshot, "closing", 1);
     assert!(gets(&snapshot, "closing").is_empty());
-    assert_eq!(snapshot.gets.len(), 1, "shutdown must not open any response/common/invalid GET");
+    assert_eq!(
+        snapshot.gets.len(),
+        1,
+        "shutdown must not open any response/common/invalid GET"
+    );
     assert_eq!(snapshot.gets[0].kind, GetKind::CommonInitial);
     assert!(snapshot.exchanges.is_empty());
-    assert!(snapshot.deletes.iter().any(|session| session.as_deref() == Some("session-1")));
+    assert!(
+        snapshot
+            .deletes
+            .iter()
+            .any(|session| session.as_deref() == Some("session-1"))
+    );
 }
 
 #[tokio::test]
@@ -341,23 +461,40 @@ async fn rust_ownership_exact_slot_retirement_cannot_rebind_resumed_request() {
     let (_new_source, new_pool) = publish(&fixture, &runtime.owner).await;
     observe(&fixture, |snapshot| common_started(snapshot, "session-2")).await;
     let before = fixture.snapshot();
-    let error = call(&runtime.pool, "probe", "old-pool").finish().await.unwrap_err();
+    let error = call(&runtime.pool, "probe", "old-pool")
+        .finish()
+        .await
+        .unwrap_err();
     assert!(error.to_string().contains("retired"));
     let after = fixture.snapshot();
-    assert_eq!(after.posts.len(), before.posts.len(), "old view dispatched onto a new slot");
-    assert_eq!(after.gets.len(), before.gets.len(), "old view emitted a GET after slot retirement");
+    assert_eq!(
+        after.posts.len(),
+        before.posts.len(),
+        "old view dispatched onto a new slot"
+    );
+    assert_eq!(
+        after.gets.len(),
+        before.gets.len(),
+        "old view emitted a GET after slot retirement"
+    );
     assert_complete_wire(&after);
     exchange.release();
     // The old manager is no longer reachable through a live connection. Wait on actual
     // saved state, not the AS response-prepared event; yield rather than sleep blindly.
     tokio::time::timeout(WAIT, async {
         loop {
-            if fixture.saved_tokens().await.is_some_and(|tokens| tokens.refresh.as_deref() == Some("refresh-2")) {
+            if fixture
+                .saved_tokens()
+                .await
+                .is_some_and(|tokens| tokens.refresh.as_deref() == Some("refresh-2"))
+            {
                 break;
             }
             tokio::task::yield_now().await;
         }
-    }).await.expect("detached rotation did not reach the credential store");
+    })
+    .await
+    .expect("detached rotation did not reach the credential store");
     observe(&fixture, |snapshot| snapshot.events.iter().any(|event| {
         matches!(event, Event::ServerBodyDropped { stream: ServerStream::Common { session, .. }, .. } if session == "session-1")
     })).await;
@@ -368,7 +505,14 @@ async fn rust_ownership_exact_slot_retirement_cannot_rebind_resumed_request() {
     assert!(snapshot.events.iter().any(|event| {
         matches!(event, Event::ServerBodyDropped { stream: ServerStream::Common { session, .. }, .. } if session == "session-1")
     }));
-    assert_eq!(snapshot.gets.iter().filter(|get| get.kind == GetKind::CommonInitial && get.planned_status == 200).count(), 2);
+    assert_eq!(
+        snapshot
+            .gets
+            .iter()
+            .filter(|get| get.kind == GetKind::CommonInitial && get.planned_status == 200)
+            .count(),
+        2
+    );
     runtime.owner.close().await.unwrap();
 }
 
@@ -404,7 +548,11 @@ fn terminal_poll_task_once(original: &mut Call) -> TerminalTaskEvidence {
         Some(Ok(Err(_))) => ("tool-error", None),
         Some(Err(error)) => (terminal_join_error_kind(&error), None),
     };
-    TerminalTaskEvidence { source: "diagnostic-poll", state, tool_is_error }
+    TerminalTaskEvidence {
+        source: "diagnostic-poll",
+        state,
+        tool_is_error,
+    }
 }
 
 fn terminal_diagnostic_failure(
@@ -490,61 +638,79 @@ fn terminal_diagnostic_failure(
 }
 
 async fn terminal_resume_case(reply: ResumeReply, expected_gets: usize, expected_exchanges: usize) {
-        let fixture = OAuthSseFixture::start(SseOptions { resume_reply: reply, ..Default::default() }).await;
-        let runtime = prepare(&fixture).await;
-        let mut original = call(&runtime.pool, "echo", "terminal");
-        let diagnostic = TerminalDiagnostic {
-            scenario: match reply {
-                ResumeReply::Unauthorized => "unauthorized-401",
-                ResumeReply::InsufficientScope => "scope-403",
-                ResumeReply::Forbidden => "plain-403",
-                _ => "other-terminal-scenario",
-            },
-            expected_gets,
-            expected_exchanges,
-            started: tokio::time::Instant::now(),
-        };
-        // Keep unbiased selection and both existing bounds. Diagnostic readiness never
-        // turns a timeout into a pass or proves when a simultaneously ready result completed.
-        let result = tokio::select! {
-            result = tokio::time::timeout(WAIT, &mut original.task) => match result {
-                Ok(Ok(result)) => result,
-                Ok(Err(error)) => {
-                    let snapshot = fixture.snapshot();
-                    // The join result was consumed: do not poll this handle a second time.
-                    let task = TerminalTaskEvidence {
-                        source: "selected-result",
-                        state: terminal_join_error_kind(&error),
-                        tool_is_error: None,
-                    };
-                    terminal_diagnostic_failure(&diagnostic, "result-join-error", snapshot, task)
-                }
-                Err(_) => {
-                    let snapshot = fixture.snapshot();
-                    let task = terminal_poll_task_once(&mut original);
-                    terminal_diagnostic_failure(&diagnostic, "result-deadline-selected", snapshot, task)
-                }
-            },
-            observation = fixture.wait_for_with_timeout(WAIT, |snapshot| {
-                unexpected_get(snapshot) || gets(snapshot, "terminal").len() > expected_gets
-            }) => match observation {
-                Ok(snapshot) => {
-                    let task = terminal_poll_task_once(&mut original);
-                    terminal_diagnostic_failure(&diagnostic, "forbidden-wire-observed", snapshot, task)
-                }
-                Err(_) => {
-                    let snapshot = fixture.snapshot();
-                    let task = terminal_poll_task_once(&mut original);
-                    terminal_diagnostic_failure(&diagnostic, "observation-deadline-selected", snapshot, task)
-                }
-            },
-        };
-        assert!(result.is_err(), "terminal HTTP rejection became a successful tool result");
-        let snapshot = probe_common(&fixture, &runtime.pool, "session-1", "after-terminal", expected_exchanges).await;
-        echo_posts(&snapshot, "terminal", 2);
-        response_attempts(&snapshot, "terminal", if expected_gets == 2 { &[1, 2] } else { &[1] });
-        assert_eq!(snapshot.executions, ["terminal"]);
-        runtime.owner.close().await.unwrap();
+    let fixture = OAuthSseFixture::start(SseOptions {
+        resume_reply: reply,
+        ..Default::default()
+    })
+    .await;
+    let runtime = prepare(&fixture).await;
+    let mut original = call(&runtime.pool, "echo", "terminal");
+    let diagnostic = TerminalDiagnostic {
+        scenario: match reply {
+            ResumeReply::Unauthorized => "unauthorized-401",
+            ResumeReply::InsufficientScope => "scope-403",
+            ResumeReply::Forbidden => "plain-403",
+            _ => "other-terminal-scenario",
+        },
+        expected_gets,
+        expected_exchanges,
+        started: tokio::time::Instant::now(),
+    };
+    // Keep unbiased selection and both existing bounds. Diagnostic readiness never
+    // turns a timeout into a pass or proves when a simultaneously ready result completed.
+    let result = tokio::select! {
+        result = tokio::time::timeout(WAIT, &mut original.task) => match result {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => {
+                let snapshot = fixture.snapshot();
+                // The join result was consumed: do not poll this handle a second time.
+                let task = TerminalTaskEvidence {
+                    source: "selected-result",
+                    state: terminal_join_error_kind(&error),
+                    tool_is_error: None,
+                };
+                terminal_diagnostic_failure(&diagnostic, "result-join-error", snapshot, task)
+            }
+            Err(_) => {
+                let snapshot = fixture.snapshot();
+                let task = terminal_poll_task_once(&mut original);
+                terminal_diagnostic_failure(&diagnostic, "result-deadline-selected", snapshot, task)
+            }
+        },
+        observation = fixture.wait_for_with_timeout(WAIT, |snapshot| {
+            unexpected_get(snapshot) || gets(snapshot, "terminal").len() > expected_gets
+        }) => match observation {
+            Ok(snapshot) => {
+                let task = terminal_poll_task_once(&mut original);
+                terminal_diagnostic_failure(&diagnostic, "forbidden-wire-observed", snapshot, task)
+            }
+            Err(_) => {
+                let snapshot = fixture.snapshot();
+                let task = terminal_poll_task_once(&mut original);
+                terminal_diagnostic_failure(&diagnostic, "observation-deadline-selected", snapshot, task)
+            }
+        },
+    };
+    assert!(
+        result.is_err(),
+        "terminal HTTP rejection became a successful tool result"
+    );
+    let snapshot = probe_common(
+        &fixture,
+        &runtime.pool,
+        "session-1",
+        "after-terminal",
+        expected_exchanges,
+    )
+    .await;
+    echo_posts(&snapshot, "terminal", 2);
+    response_attempts(
+        &snapshot,
+        "terminal",
+        if expected_gets == 2 { &[1, 2] } else { &[1] },
+    );
+    assert_eq!(snapshot.executions, ["terminal"]);
+    runtime.owner.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -563,13 +729,54 @@ async fn oracle_desired_resumed_plain_403_is_terminal_without_resume_refresh() {
 }
 
 #[tokio::test]
+async fn oracle_desired_resume_expiry_does_not_reexecute_or_expire_the_application_session() {
+    let fixture = OAuthSseFixture::start(SseOptions {
+        post_unauthorized_once: false,
+        resume_reply: ResumeReply::SessionExpired,
+        ..Default::default()
+    })
+    .await;
+    let runtime = prepare(&fixture).await;
+    assert!(
+        call(&runtime.pool, "echo", "resume-expiry")
+            .finish()
+            .await
+            .is_err()
+    );
+    let snapshot = fixture.snapshot();
+    echo_posts(&snapshot, "resume-expiry", 1);
+    assert_eq!(
+        snapshot.initializations, 1,
+        "a rejected GET cannot invalidate the POST session"
+    );
+    assert_eq!(snapshot.executions, ["resume-expiry"]);
+    // No prior POST challenge: the application allowance and original bearer are unused.
+    response_attempts(&snapshot, "resume-expiry", &[0]);
+    let snapshot = probe_common(
+        &fixture,
+        &runtime.pool,
+        "session-1",
+        "after-resume-expiry",
+        0,
+    )
+    .await;
+    assert_eq!(snapshot.initializations, 1);
+    echo_posts(&snapshot, "resume-expiry", 1);
+    runtime.owner.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn oracle_desired_transient_resume_reopens_without_reexecuting_echo() {
     let fixture = OAuthSseFixture::start(SseOptions {
         resume_reply: ResumeReply::TransientThenSuccess,
         ..Default::default()
-    }).await;
+    })
+    .await;
     let runtime = prepare(&fixture).await;
-    success(call(&runtime.pool, "echo", "transient").finish().await, "echo:transient");
+    success(
+        call(&runtime.pool, "echo", "transient").finish().await,
+        "echo:transient",
+    );
     let snapshot = probe_common(&fixture, &runtime.pool, "session-1", "after-transient", 1).await;
     echo_posts(&snapshot, "transient", 2);
     response_attempts(&snapshot, "transient", &[1, 1]);
@@ -589,19 +796,31 @@ async fn oracle_desired_final_response_eof_retry_zero_has_no_extra_get_in_observ
         final_body: FinalBody::Eof,
         retry_ms: 0,
         ..Default::default()
-    }).await;
+    })
+    .await;
     let runtime = prepare(&fixture).await;
-    success(call(&runtime.pool, "echo", "final").finish().await, "echo:final");
-    observe(&fixture, |snapshot| snapshot.events.iter().any(|event| {
+    success(
+        call(&runtime.pool, "echo", "final").finish().await,
+        "echo:final",
+    );
+    observe(&fixture, |snapshot| {
+        snapshot.events.iter().any(|event| {
         matches!(event, Event::ServerEof(ServerStream::Response { lane, .. }) if lane == "final")
-    })).await;
+    })
+    })
+    .await;
     // Keep transport/common alive: closing at result delivery would mask the stock drain gap.
     // An extra GET is conclusive failure. Timeout here means only bounded absence, unlike
     // the logical-result timeout above; it is NOT an SDK quiescence/full-parity assertion.
-    let extra = fixture.wait_for_with_timeout(EXTRA_GET_WINDOW, |snapshot| {
-        unexpected_get(snapshot) || gets(snapshot, "final").len() > 1
-    }).await;
-    assert!(extra.is_err(), "matching final response+EOF initiated an extra GET during drain");
+    let extra = fixture
+        .wait_for_with_timeout(EXTRA_GET_WINDOW, |snapshot| {
+            unexpected_get(snapshot) || gets(snapshot, "final").len() > 1
+        })
+        .await;
+    assert!(
+        extra.is_err(),
+        "matching final response+EOF initiated an extra GET during drain"
+    );
     let snapshot = probe_common(&fixture, &runtime.pool, "session-1", "after-final", 1).await;
     echo_posts(&snapshot, "final", 2);
     response_attempts(&snapshot, "final", &[1]);

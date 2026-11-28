@@ -108,9 +108,21 @@ pub(crate) struct Cli {
     #[arg(short = 'e', long = "extension", value_name = "SOURCE")]
     pub(crate) extensions: Vec<String>,
 
-    /// Disable automatic JavaScript/TypeScript extension discovery.
+    /// Disable automatic JavaScript/TypeScript extension discovery and built-in extensions.
     #[arg(long)]
     pub(crate) no_extensions: bool,
+
+    /// Disable configured MCP servers for this run.
+    #[arg(long)]
+    pub(crate) no_mcp: bool,
+
+    /// Disable every tool for this run.
+    #[arg(long)]
+    pub(crate) no_tools: bool,
+
+    /// Disable startup network operations.
+    #[arg(long)]
+    pub(crate) offline: bool,
 
     /// Load skills from a Markdown file or directory. May be repeated.
     #[arg(long = "skill", value_name = "PATH")]
@@ -424,6 +436,14 @@ pub(crate) fn resolve_app_config(cli: &Cli) -> Result<AppConfig, String> {
     config.native_plugins.clone_from(&cli.native_plugins);
     config.extensions.clone_from(&cli.extensions);
     config.discover_extensions = !cli.no_extensions;
+    // MCP is a built-in extension in the Pi product. Explicit -e sources remain
+    // independent when automatic/built-in extensions are disabled.
+    config.load_mcp_config = !cli.no_mcp && !cli.no_extensions;
+    config.disable_tools = cli.no_tools;
+    config.offline = cli.offline
+        || std::env::var("PI_OFFLINE").is_ok_and(|value| {
+            value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+        });
     config.set_skill_paths(cli.skills.iter().cloned());
     Ok(config)
 }
@@ -462,6 +482,8 @@ fn normalize_pi_arg(argument: OsString) -> OsString {
         OsString::from("--no-approve")
     } else if argument == "-ne" {
         OsString::from("--no-extensions")
+    } else if argument == "-nt" {
+        OsString::from("--no-tools")
     } else {
         argument
     }
@@ -734,6 +756,9 @@ mod tests {
             native_plugins: Vec::new(),
             extensions: Vec::new(),
             no_extensions: false,
+            no_mcp: false,
+            no_tools: false,
+            offline: false,
             skills: Vec::new(),
             approve: false,
             no_approve: false,
@@ -894,6 +919,22 @@ mod tests {
         );
         assert!(cli.no_extensions);
         assert_eq!(normalize_pi_arg(OsString::from("-ne")), "--no-extensions");
+    }
+
+    #[test]
+    fn mcp_disable_flags_preserve_explicit_javascript_extensions() {
+        let no_mcp = Cli::try_parse_from(["pi", "--no-mcp", "-e", "explicit.ts"]).unwrap();
+        let config = resolve_app_config(&no_mcp).unwrap();
+        assert!(!config.load_mcp_config);
+        assert!(config.discover_extensions);
+        assert_eq!(config.extensions, ["explicit.ts"]);
+
+        let no_extensions =
+            Cli::try_parse_from(["pi", "--no-extensions", "-e", "explicit.ts"]).unwrap();
+        let config = resolve_app_config(&no_extensions).unwrap();
+        assert!(!config.load_mcp_config);
+        assert!(!config.discover_extensions);
+        assert_eq!(config.extensions, ["explicit.ts"]);
     }
 
     #[test]

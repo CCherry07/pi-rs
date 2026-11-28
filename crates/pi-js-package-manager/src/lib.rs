@@ -32,6 +32,7 @@ pub struct ResolveRequest {
     pub project_trusted: bool,
     pub explicit_sources: Vec<String>,
     pub discover_extensions: bool,
+    pub offline: bool,
 }
 
 /// A fully resolved, ordered JavaScript extension load list.
@@ -151,6 +152,7 @@ pub struct PackageManager {
     project_trusted: bool,
     explicit_sources: Vec<String>,
     discover_extensions: bool,
+    offline: bool,
     settings_manager: SettingsManager,
     settings_context: SettingsContext,
     user_settings: SettingsValues,
@@ -176,6 +178,7 @@ impl PackageManager {
             project_trusted: request.project_trusted,
             explicit_sources: request.explicit_sources,
             discover_extensions: request.discover_extensions,
+            offline: request.offline || offline_from_environment(),
             settings_manager,
             settings_context,
             user_settings: settings.global().clone(),
@@ -347,7 +350,7 @@ impl PackageManager {
                     let installed = root.join("node_modules").join(&npm.name);
                     if installed_npm_matches(&npm, &installed) {
                         collect_package_extensions(&installed, &mut extensions, filter, metadata);
-                    } else if !offline() {
+                    } else if !self.offline {
                         unresolved_package = true;
                     }
                 }
@@ -355,7 +358,7 @@ impl PackageManager {
                     Ok(installed) if installed.exists() => {
                         collect_package_extensions(&installed, &mut extensions, filter, metadata);
                     }
-                    Ok(_) if !offline() => unresolved_package = true,
+                    Ok(_) if !self.offline => unresolved_package = true,
                     Ok(_) => {}
                     Err(_) => unresolved_package = true,
                 },
@@ -590,7 +593,7 @@ impl PackageManager {
                 self.no_matching_package_source(source),
             ));
         }
-        if offline() {
+        if self.offline {
             return Ok(matched.into_iter().map(|(source, _)| source).collect());
         }
 
@@ -956,7 +959,7 @@ impl PackageManager {
                 ParsedSource::Npm(npm) => {
                     let mut installed = self.npm_install_path(&npm, resolved_scope);
                     if !installed_npm_matches(&npm, &installed) {
-                        if offline() {
+                        if self.offline {
                             continue;
                         }
                         self.install_npm(&npm, resolved_scope).await?;
@@ -967,11 +970,13 @@ impl PackageManager {
                 ParsedSource::Git(git) => {
                     let installed = self.git_install_path(&git, resolved_scope)?;
                     if !installed.exists() {
-                        if offline() {
+                        if self.offline {
                             continue;
                         }
                         self.install_git(&git, resolved_scope).await?;
-                    } else if resolved_scope == SourceScope::Temporary && !git.pinned && !offline()
+                    } else if resolved_scope == SourceScope::Temporary
+                        && !git.pinned
+                        && !self.offline
                     {
                         self.refresh_temporary_git(&installed).await;
                     }
@@ -2745,7 +2750,7 @@ fn posix_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-fn offline() -> bool {
+fn offline_from_environment() -> bool {
     std::env::var("PI_OFFLINE").is_ok_and(|value| {
         value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
     })
@@ -2786,6 +2791,7 @@ mod path_tests {
             project_trusted: false,
             explicit_sources: Vec::new(),
             discover_extensions: false,
+            offline: false,
         });
         assert!(!manager.installed_skill_paths().is_empty());
         assert!(!agent.join("npm").exists());

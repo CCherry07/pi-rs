@@ -229,7 +229,10 @@ mod tests {
 
         copy_fixture(fixture.path(), copied.path(), &ignored).unwrap();
         for directory in [".eval", "nested/.eval"] {
-            assert!(!copied.path().join(directory).exists(), "copied {directory}");
+            assert!(
+                !copied.path().join(directory).exists(),
+                "copied {directory}"
+            );
         }
         for (relative, contents) in sources {
             assert_eq!(

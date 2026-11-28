@@ -1,9 +1,14 @@
-//! Supervised logical operations over frozen callable views and SDK request handles.
+//! Logical operations over frozen callable views and exact connection owners.
 use super::*;
 use crate::http_client::HttpError;
-use crate::supervisor::{ConnectionAdmission, WeakConnectionSlot, WeakMcpGenerationReadiness};
+use crate::supervisor::{
+    ConnectionAdmission, OwnedConnectionSlot, WeakConnectionSlot, WeakMcpGenerationReadiness,
+};
 use operation::{LogicalOperation, OperationError, OperationGuard, RequestControl};
 use rmcp::service::{RequestHandle, ServiceError};
+
+#[cfg(test)]
+mod tests;
 
 pub(super) struct CallableGrant {
     remote: McpToolSpec,
@@ -11,10 +16,87 @@ pub(super) struct CallableGrant {
     policy: McpServerPolicy,
 }
 
-pub(super) struct SupervisedConnection {
-    authority: WeakMcpGenerationReadiness,
-    slot: WeakConnectionSlot,
+pub(super) struct ConnectionBinding {
+    ownership: ConnectionOwnership,
     grants: BTreeMap<String, CallableGrant>,
+}
+
+enum ConnectionOwnership {
+    Supervised {
+        authority: WeakMcpGenerationReadiness,
+        slot: WeakConnectionSlot,
+    },
+    Explicit(OwnedConnectionSlot),
+}
+
+impl ConnectionBinding {
+    fn authority(&self) -> Option<WeakMcpGenerationReadiness> {
+        match &self.ownership {
+            ConnectionOwnership::Supervised { authority, .. } => Some(authority.clone()),
+            ConnectionOwnership::Explicit(_) => None,
+        }
+    }
+
+    async fn acquire(&self) -> Result<ConnectionAdmission, McpRequestError> {
+        match &self.ownership {
+            ConnectionOwnership::Supervised { slot, .. } => {
+                slot.acquire().await.map_err(McpRequestError::Control)
+            }
+            ConnectionOwnership::Explicit(owner) => match owner.acquire().await {
+                Ok(admission) => Ok(admission),
+                Err(crate::supervisor::AdmissionError::Control(error)) => {
+                    Err(McpRequestError::Control(error))
+                }
+                Err(crate::supervisor::AdmissionError::Closed(connection)) => {
+                    connection.handler.stderr.finish().await;
+                    Err(McpRequestError::Disconnected(
+                        connection.handler.stderr.message("Connection closed"),
+                    ))
+                }
+            },
+        }
+    }
+
+    fn supervised_slot(&self) -> Option<&WeakConnectionSlot> {
+        match &self.ownership {
+            ConnectionOwnership::Supervised { slot, .. } => Some(slot),
+            ConnectionOwnership::Explicit(_) => None,
+        }
+    }
+
+    fn slot(&self) -> WeakConnectionSlot {
+        match &self.ownership {
+            ConnectionOwnership::Supervised { slot, .. } => slot.clone(),
+            ConnectionOwnership::Explicit(owner) => owner.downgrade(),
+        }
+    }
+
+    pub(super) fn owned(&self) -> Option<&OwnedConnectionSlot> {
+        match &self.ownership {
+            ConnectionOwnership::Explicit(owner) => Some(owner),
+            _ => None,
+        }
+    }
+
+    pub(super) fn diagnostic(&self) -> Option<String> {
+        use crate::supervisor::ConnectionReadiness;
+        match self.slot().readiness() {
+            ConnectionReadiness::Ready(_) | ConnectionReadiness::Connecting => None,
+            ConnectionReadiness::Disconnected(inventory) => {
+                // Observe the exact current slot, not the frozen view's original transport.
+                // Its existing capture already enforces redaction and diagnostic bounds.
+                Some(
+                    inventory
+                        .connection
+                        .handler
+                        .stderr
+                        .message("Connection closed"),
+                )
+            }
+            ConnectionReadiness::Failed(error) => Some(error.to_string()),
+            ConnectionReadiness::Retired => Some("Connection closed".into()),
+        }
+    }
 }
 
 impl McpToolSet {
@@ -24,6 +106,35 @@ impl McpToolSet {
         &self,
         authority: WeakMcpGenerationReadiness,
     ) -> Result<Self, OperationError> {
+        self.bind_connections(|old| {
+            Ok(ConnectionOwnership::Supervised {
+                slot: authority
+                    .connection_slot(&old.name)
+                    .ok_or(OperationError::AuthorityRetired)?,
+                authority: authority.clone(),
+            })
+        })
+    }
+
+    pub(super) fn with_explicit_connections(
+        &self,
+        mut owners: BTreeMap<String, OwnedConnectionSlot>,
+    ) -> Result<Self, McpError> {
+        self.bind_connections(|old| {
+            owners
+                .remove(&old.name)
+                .map(ConnectionOwnership::Explicit)
+                .ok_or_else(|| McpError::Initialize {
+                    server: old.name.clone(),
+                    message: "connection owner is unavailable".into(),
+                })
+        })
+    }
+
+    fn bind_connections<E>(
+        &self,
+        mut ownership: impl FnMut(&ConnectedServer) -> Result<ConnectionOwnership, E>,
+    ) -> Result<Self, E> {
         let mut servers = Vec::new();
         let mut tools = Vec::new();
         for old in &self.inner.servers {
@@ -47,11 +158,8 @@ impl McpToolSet {
                 name: old.name.clone(),
                 policy: old.policy.clone(),
                 connection: old.connection.clone(),
-                supervision: Some(SupervisedConnection {
-                    slot: authority
-                        .connection_slot(&old.name)
-                        .ok_or(OperationError::AuthorityRetired)?,
-                    authority: authority.clone(),
+                binding: Some(ConnectionBinding {
+                    ownership: ownership(old)?,
                     grants,
                 }),
             });
@@ -104,7 +212,7 @@ impl ConnectedServer {
             context,
             guard: OperationGuard::new(
                 context.signal().clone(),
-                self.supervision.as_ref().map(|view| view.authority.clone()),
+                self.binding.as_ref().and_then(ConnectionBinding::authority),
             ),
             admission: None,
             deadline: tokio::time::Instant::now() + self.policy.timeout,
@@ -147,11 +255,15 @@ impl RequestOperation<'_> {
         if self.context.run_id().is_none() {
             return Ok(None);
         }
-        self.context
-            .session
-            .tools()
-            .map(Some)
-            .map_err(|_| McpRequestError::Control(OperationError::AuthorityRetired))
+        match self.context.session.tools() {
+            Ok(specs) => Ok(Some(specs)),
+            // Ephemeral Agents deliberately have no parent-session capabilities. Their
+            // ScopedTool has already admitted this exact callable; missing optional host
+            // inventory is not retirement and cannot substitute for that dispatch grant.
+            // The generation lease, transport gate and run cancellation still apply.
+            Err(pi_plugin::PluginContextError::Unbound) => Ok(None),
+            Err(_) => Err(McpRequestError::Control(OperationError::AuthorityRetired)),
+        }
     }
 
     async fn connection(
@@ -160,7 +272,7 @@ impl RequestOperation<'_> {
     ) -> Result<Arc<McpConnection>, McpRequestError> {
         let control = self.control();
         control.check().map_err(McpRequestError::Control)?;
-        let Some(view) = &self.server.supervision else {
+        let Some(view) = &self.server.binding else {
             return Ok(self.server.connection.clone());
         };
         // A retired host context cannot start shared setup, even for a resource helper.
@@ -171,7 +283,7 @@ impl RequestOperation<'_> {
                 () = self.context.signal().wait() => return Err(McpRequestError::Aborted),
                 () = control.wait_retired() => return Err(McpRequestError::Control(OperationError::AuthorityRetired)),
                 () = tokio::time::sleep_until(self.deadline) => return Err(McpRequestError::Timeout(self.server.policy.timeout)),
-                result = view.slot.acquire() => result.map_err(McpRequestError::Control)?,
+                result = view.acquire() => result?,
             });
         }
         control.check().map_err(McpRequestError::Control)?;
@@ -218,6 +330,50 @@ impl RequestOperation<'_> {
     /// transport admission, and handles recovery OUTSIDE the complete page loop.
     pub(crate) async fn request(
         &mut self,
+        request: ClientRequest,
+        tool: &str,
+        updates: &ToolUpdateSink,
+    ) -> Result<ServerResult, McpRequestError> {
+        let error = match self.request_once(request, tool, updates).await {
+            Ok(result) => return Ok(result),
+            Err(error) => error,
+        };
+        let Some(challenge) = error.http().and_then(auth_challenge) else {
+            return Err(error);
+        };
+        self.control().check().map_err(McpRequestError::Control)?;
+        drop(self.host_tools()?);
+        let connection = self
+            .admission
+            .as_ref()
+            .map_or(&self.server.connection, |admission| {
+                &admission.inventory.connection
+            });
+        let required = McpAuthorizationRequired {
+            server: self.server.name.clone(),
+            provider: connection.provider_auth.clone(),
+            static_authorization: false,
+            challenge: challenge.map(str::to_owned),
+        };
+        // Terminal auth guidance applies to both APIs, but the needs-auth lifecycle
+        // belongs to supervised Coding connections, not standalone explicit pools.
+        if let Some(slot) = self
+            .server
+            .binding
+            .as_ref()
+            .and_then(ConnectionBinding::supervised_slot)
+        {
+            slot.require_authorization(connection, required.clone())
+                .map_err(McpRequestError::Control)?;
+        }
+        Err(McpRequestError::AuthorizationRequired {
+            required,
+            source: Box::new(error),
+        })
+    }
+
+    async fn request_once(
+        &mut self,
         mut request: ClientRequest,
         tool: &str,
         updates: &ToolUpdateSink,
@@ -226,7 +382,7 @@ impl RequestOperation<'_> {
         let control = self.control();
         let usage = match connection.admit() {
             Ok(usage) => usage,
-            Err(_) if self.server.supervision.is_none() => {
+            Err(_) if self.server.binding.is_none() => {
                 connection.handler.stderr.finish().await;
                 return Err(McpRequestError::Disconnected(
                     connection.handler.stderr.message("Connection closed"),
@@ -234,7 +390,7 @@ impl RequestOperation<'_> {
             }
             Err(error) => return Err(McpRequestError::Control(error)),
         };
-        if self.server.supervision.is_some() {
+        if self.server.binding.is_some() {
             RequestControl::new(self.control(), &connection.dispatch).attach(&mut request);
         }
         let mut progress = connection.handler.progress.subscribe();
@@ -243,7 +399,10 @@ impl RequestOperation<'_> {
             () = self.context.signal().wait() => return Err(McpRequestError::Aborted),
             () = control.wait_retired() => return Err(McpRequestError::Control(OperationError::AuthorityRetired)),
             () = tokio::time::sleep_until(self.deadline) => return Err(McpRequestError::Timeout(self.server.policy.timeout)),
-            result = connection.peer.send_cancellable_request(request, Default::default()) => result.map_err(McpRequestError::from_service)?,
+            result = connection.peer.send_cancellable_request(request, Default::default()) => match result {
+                Ok(handle) => handle,
+                Err(error) => return Err(connection.request_error(error).await),
+            },
         };
         let mut active = ActiveRequest {
             handle: Some(handle),
@@ -266,14 +425,15 @@ impl RequestOperation<'_> {
                 }
                 result = &mut active.handle.as_mut().expect("active SDK handle").rx => {
                     active.handle.take();
-                    let result = result.map_err(|_| McpRequestError::Service(ServiceError::TransportClosed))?
-                        .map_err(McpRequestError::from_service);
-                    if result.is_ok() { self.deadline = tokio::time::Instant::now() + self.server.policy.timeout; }
-                    if matches!(result, Err(McpRequestError::Service(_))) && connection.is_closed() {
-                        connection.handler.stderr.finish().await;
-                        return Err(McpRequestError::Disconnected(connection.handler.stderr.message("Connection closed")));
-                    }
-                    return result;
+                    // A dropped SDK response sender is itself a closed-transport result.
+                    // Do not let `?` bypass stderr settlement and disconnect diagnostics.
+                    return match result.unwrap_or(Err(ServiceError::TransportClosed)) {
+                        Ok(result) => {
+                            self.deadline = tokio::time::Instant::now() + self.server.policy.timeout;
+                            Ok(result)
+                        }
+                        Err(error) => Err(connection.request_error(error).await),
+                    };
                 }
                 notification = progress.recv() => {
                     if let Ok(notification) = notification
@@ -296,11 +456,14 @@ impl RequestOperation<'_> {
         error: &McpRequestError,
         resource: bool,
     ) -> Result<bool, McpRequestError> {
-        let Some(view) = &self.server.supervision else {
+        let Some(view) = &self.server.binding else {
             return Ok(false);
         };
         let expired = matches!(error.http(), Some(HttpError::SessionExpired));
+        // Standalone pools share exact replacement ownership, not Coding's resource
+        // retry policy. Session expiry still uses the common one-attempt allowance.
         let transient = resource
+            && view.supervised_slot().is_some()
             && matches!(error.http(), Some(HttpError::Client(error))
                 if error.status().is_some_and(retry::transient_status));
         if !expired && !transient {
@@ -309,7 +472,7 @@ impl RequestOperation<'_> {
         let control = self.control();
         control.check().map_err(McpRequestError::Control)?;
         if expired && let Some(admission) = &self.admission {
-            view.slot
+            view.slot()
                 .expire(&admission.inventory.connection)
                 .map_err(McpRequestError::Control)?;
         }
@@ -330,10 +493,36 @@ impl RequestOperation<'_> {
     }
 }
 
+impl McpConnection {
+    async fn request_error(&self, error: ServiceError) -> McpRequestError {
+        let error = McpRequestError::from_service(error);
+        // The response channel can close before the peer publishes its closed flag.
+        // Typed transport closure is sufficient; auth/HTTP/control failures stay typed.
+        if matches!(&error, McpRequestError::Service(cause)
+            if matches!(cause, ServiceError::TransportClosed)
+                || (self.is_closed() && error.http().is_none()))
+        {
+            self.handler.stderr.finish().await;
+            return McpRequestError::Disconnected(self.handler.stderr.message("Connection closed"));
+        }
+        error
+    }
+}
+
 impl McpRequestError {
     pub(super) fn from_service(error: ServiceError) -> Self {
-        if let ServiceError::TransportSend(transport) = &error
-            && let Some(HttpError::Io(io)) = transport.error.downcast_ref::<HttpError>()
+        let http = match &error {
+            ServiceError::TransportSend(transport) => {
+                crate::http_client::transport_error(transport.error.as_ref())
+            }
+            _ => None,
+        };
+        // Stream provenance prevents application replay/auth handoff, not cancellation.
+        let control_cause = http.map(|error| match error {
+            HttpError::Client(client) => client.response_stream_cause().unwrap_or(error),
+            _ => error,
+        });
+        if let Some(HttpError::Io(io)) = control_cause
             && let Some(cause) = io
                 .get_ref()
                 .and_then(|cause| cause.downcast_ref::<OperationError>())
@@ -344,10 +533,13 @@ impl McpRequestError {
     }
 
     fn http(&self) -> Option<&HttpError> {
-        let Self::Service(ServiceError::TransportSend(error)) = self else {
-            return None;
-        };
-        error.error.downcast_ref()
+        match self {
+            Self::AuthorizationRequired { source, .. } => source.http(),
+            Self::Service(ServiceError::TransportSend(error)) => {
+                crate::http_client::transport_error(error.error.as_ref())
+            }
+            _ => None,
+        }
     }
 }
 

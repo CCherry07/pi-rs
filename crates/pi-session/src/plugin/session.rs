@@ -1,4 +1,6 @@
-use super::context::{PiPluginContext, context_failed, require_command, value, values};
+use super::context::{
+    PiPluginContext, PluginMcpMutation, context_failed, require_command, value, values,
+};
 use crate::{MAIN_LANE, QueueKind, SessionDocument, SessionEntryType, SessionRecord};
 use async_trait::async_trait;
 use pi_core::{AbortSignal, AssistantMessage, CustomMessageContent, CustomMessageInput, Usage};
@@ -242,6 +244,30 @@ impl SessionContextAccess for PiPluginContext {
 
     fn active_tools(&self) -> Result<Vec<String>, PluginContextError> {
         Ok(self.session()?.runtime().active_tools())
+    }
+
+    fn register_mcp_server(
+        &self,
+        extension_path: String,
+        name: String,
+        config: Value,
+    ) -> Result<(), PluginContextError> {
+        self.stage_mcp_mutation(PluginMcpMutation::Register {
+            extension_path,
+            name,
+            config,
+        })
+    }
+
+    fn unregister_mcp_server(
+        &self,
+        extension_path: String,
+        name: String,
+    ) -> Result<(), PluginContextError> {
+        self.stage_mcp_mutation(PluginMcpMutation::Unregister {
+            extension_path,
+            name,
+        })
     }
 
     fn tool_reaches_tools(&self, name: &str) -> Result<bool, PluginContextError> {

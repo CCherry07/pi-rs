@@ -29,6 +29,7 @@ use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
 use serde_json::{Value, json};
 use tokio::sync::{Semaphore, watch};
 
+mod authorization;
 mod selection;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -39,6 +40,7 @@ struct Trace {
     initialized: Vec<String>,
     deleted: Vec<String>,
     calls: Vec<String>,
+    rejected_sessions: Vec<String>,
     provider_requests: usize,
     provider_tools: Vec<Vec<String>>,
     remote_tools: Option<Vec<Value>>,
@@ -243,6 +245,16 @@ fn protocol_response(
                 "call on deleted connection"
             );
             trace.send_modify(|trace| trace.calls.push(connection.clone()));
+            if trace.borrow().rejected_sessions.contains(&connection) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    [(
+                        "www-authenticate",
+                        "Bearer error=\"insufficient_scope\", scope=\"private-scope-marker\"",
+                    )],
+                )
+                    .into_response();
+            }
             json!({"content":[{"type":"text","text":connection}]})
         }
         method => panic!("unexpected MCP method {method}"),

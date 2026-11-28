@@ -24,6 +24,7 @@ pub(crate) async fn run(
             project_trusted: trust.trusted(),
             explicit_sources: Vec::new(),
             discover_extensions: true,
+            offline: config.offline,
         },
         settings.clone(),
     );

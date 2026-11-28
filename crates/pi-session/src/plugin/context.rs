@@ -23,6 +23,49 @@ pub trait PluginProviderMutationAccess: Send + Sync {
     fn has_pending(&self) -> bool;
 }
 
+#[derive(Clone, PartialEq)]
+pub enum PluginMcpMutation {
+    Register {
+        extension_path: String,
+        name: String,
+        config: Value,
+    },
+    Unregister {
+        extension_path: String,
+        name: String,
+    },
+}
+
+impl std::fmt::Debug for PluginMcpMutation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Register {
+                extension_path,
+                name,
+                ..
+            } => formatter
+                .debug_struct("Register")
+                .field("extension_path", extension_path)
+                .field("name", name)
+                .field("config", &"<redacted>")
+                .finish(),
+            Self::Unregister {
+                extension_path,
+                name,
+            } => formatter
+                .debug_struct("Unregister")
+                .field("extension_path", extension_path)
+                .field("name", name)
+                .finish(),
+        }
+    }
+}
+
+pub trait PluginMcpMutationAccess: Send + Sync {
+    fn stage(&self, mutation: PluginMcpMutation) -> Result<(), String>;
+    fn has_pending(&self) -> bool;
+}
+
 /// Presentation bridge supplied by the product frontend.
 ///
 /// `pi-session` owns the plugin-context adapter, while concrete terminal or
@@ -190,10 +233,11 @@ pub struct PiPluginContext {
     pub(super) binding: PluginContextBinding,
     pub(super) runtime: tokio::runtime::Handle,
     provider_mutations: Option<Arc<dyn PluginProviderMutationAccess>>,
+    mcp_mutations: Option<Arc<dyn PluginMcpMutationAccess>>,
     pub(super) ui_bridge: Option<Arc<dyn PluginUiBridge>>,
     pub(super) ui_owners: Mutex<std::collections::HashSet<String>>,
     pub(super) ui_retired: watch::Sender<bool>,
-    pub(super) provider_reload_gate: Arc<tokio::sync::Mutex<()>>,
+    pub(super) generation_reload_gate: Arc<tokio::sync::Mutex<()>>,
     pub(super) model_scope_patterns: Vec<String>,
 }
 
@@ -210,10 +254,11 @@ impl PiPluginContext {
             binding,
             runtime: tokio::runtime::Handle::current(),
             provider_mutations: None,
+            mcp_mutations: None,
             ui_bridge: None,
             ui_owners: Mutex::default(),
             ui_retired: watch::channel(false).0,
-            provider_reload_gate: Arc::new(tokio::sync::Mutex::new(())),
+            generation_reload_gate: Arc::new(tokio::sync::Mutex::new(())),
             model_scope_patterns: Vec::new(),
         }
     }
@@ -223,6 +268,11 @@ impl PiPluginContext {
         access: Arc<dyn PluginProviderMutationAccess>,
     ) -> Self {
         self.provider_mutations = Some(access);
+        self
+    }
+
+    pub fn with_mcp_mutations(mut self, access: Arc<dyn PluginMcpMutationAccess>) -> Self {
+        self.mcp_mutations = Some(access);
         self
     }
 
@@ -323,7 +373,7 @@ impl PiPluginContext {
             .map_err(PluginContextError::Invalid)?;
         let session = self.pi_session()?;
         let access = Arc::clone(access);
-        let gate = Arc::clone(&self.provider_reload_gate);
+        let gate = Arc::clone(&self.generation_reload_gate);
         self.runtime.spawn(async move {
             let _reload = gate.lock().await;
             if !access.has_pending() {
@@ -332,6 +382,36 @@ impl PiPluginContext {
             if let Err(error) = session.reload().await {
                 session.current().notify_plugin(
                     format!("plugin provider update failed: {error}"),
+                    NoticeLevel::Error,
+                );
+            }
+        });
+        Ok(())
+    }
+
+    pub(super) fn stage_mcp_mutation(
+        &self,
+        mutation: PluginMcpMutation,
+    ) -> Result<(), PluginContextError> {
+        let access = self.mcp_mutations.as_ref().ok_or_else(|| {
+            PluginContextError::Unavailable(
+                "dynamic MCP server registration is not configured".to_string(),
+            )
+        })?;
+        access
+            .stage(mutation)
+            .map_err(PluginContextError::Invalid)?;
+        let session = self.pi_session()?;
+        let access = Arc::clone(access);
+        let gate = Arc::clone(&self.generation_reload_gate);
+        self.runtime.spawn(async move {
+            let _reload = gate.lock().await;
+            if !access.has_pending() {
+                return;
+            }
+            if let Err(error) = session.reload().await {
+                session.current().notify_plugin(
+                    format!("plugin MCP server update failed: {error}"),
                     NoticeLevel::Error,
                 );
             }

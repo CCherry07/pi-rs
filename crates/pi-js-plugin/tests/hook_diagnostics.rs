@@ -82,6 +82,7 @@ fn driver(hook: &'static str, invalid: Option<Value>) -> (PluginDriver, Arc<Disp
             }],
             provider_plugins: vec![],
             provider_registrations: vec![],
+            mcp_server_registrations: vec![],
             session_plugins: vec![],
             diagnostics: vec![],
         },

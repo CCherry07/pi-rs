@@ -114,13 +114,20 @@ async fn mcp_list_needs_auth_includes_provider_and_redacted_guidance() {
 async fn mcp_list_opts_in_to_local_command_values_without_a_session() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let authenticated = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = authenticated.clone();
     let app = axum::Router::new().route(
         "/mcp",
-        axum::routing::post(|| async {
-            (
-                axum::http::StatusCode::UNAUTHORIZED,
-                [("www-authenticate", "Bearer realm=fixture")],
-            )
+        axum::routing::post(move |headers: axum::http::HeaderMap| {
+            let observed = observed.clone();
+            async move {
+                assert_eq!(headers["authorization"], "Bearer fixture-command-token");
+                observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    [("www-authenticate", "Bearer realm=fixture")],
+                )
+            }
         }),
     );
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -134,7 +141,14 @@ async fn mcp_list_opts_in_to_local_command_values_without_a_session() {
     let output = run(root.path(), &["list", "--json"]);
     assert_eq!(output.status.code(), Some(1));
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["servers"][0]["state"], "needs-auth");
+    // A command-produced Authorization header is still caller-owned static auth:
+    // frozen Pi does not attach OAuth or offer MCP login for its rejected credentials.
+    assert_eq!(report["servers"][0]["state"], "failed");
+    let diagnostic = report["servers"][0]["error"].as_str().unwrap();
+    assert!(diagnostic.contains("handshake failed"));
+    assert!(!diagnostic.contains("pi mcp login"));
+    assert_eq!(authenticated.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(!agent.join("mcp-auth.json").exists());
     assert_eq!(fs::read(root.path().join("count")).unwrap(), b"x");
     for bytes in [&output.stdout, &output.stderr] {
         assert!(!String::from_utf8_lossy(bytes).contains("fixture-command"));

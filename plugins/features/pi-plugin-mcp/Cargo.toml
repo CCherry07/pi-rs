@@ -34,3 +34,5 @@ tokio = { workspace = true, features = ["io-util", "process"] }
 [dev-dependencies]
 rmcp = { version = "=3.3.0", default-features = false, features = ["client", "macros", "server", "transport-child-process", "transport-streamable-http-server"] }
 axum = "0.8"
+# Scoped all-events cleanup observations; rmcp already enables tracing/std.
+tracing = { version = "=0.1.44", default-features = false, features = ["std"] }

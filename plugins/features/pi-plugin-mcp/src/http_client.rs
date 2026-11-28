@@ -1,19 +1,23 @@
-//! Pi's HTTP boundary over the unmodified rmcp worker and public response types.
+//! Pi's HTTP boundary with private response envelopes and a stock SDK adapter.
 //!
 //! HTTP status precedes RPC decoding. This backend never refreshes, replays, negotiates,
-//! or schedules. JSON arrays, repeated response-session capture, and exact legacy SSE
-//! syntax/fatal-overflow handling remain separately tracked conformance follow-ups.
+//! or schedules. Ordered JSON member dispatch belongs to the sole private worker.
+//! Remaining session-rotation races stay tracked separately from the implemented response capture.
 mod error;
+mod post;
 mod sse;
+mod stream;
 
 pub(crate) use error::{AuthRejection, NetworkErrorFlags, PiHttpClientError};
+pub(crate) use post::{JsonMessageIter, JsonMessages, PostRequest, PostResponse};
+pub(crate) use stream::{HttpClient, HttpStream, StreamRequest, StreamResponse};
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::stream::BoxStream;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
-use rmcp::model::{ClientJsonRpcMessage, ClientRequest, ServerJsonRpcMessage};
+use rmcp::model::{ClientJsonRpcMessage, ClientRequest, ProtocolVersion};
 use rmcp::transport::streamable_http_client::{
     StreamableHttpClient, StreamableHttpClientTransportConfig, StreamableHttpError,
     StreamableHttpPostResponse,
@@ -22,8 +26,27 @@ use rmcp::transport::streamable_http_client::{
 use crate::client::operation::RequestControl;
 
 pub(crate) type HttpError = StreamableHttpError<PiHttpClientError>;
+
+/// The sole HTTP worker shares the original typed failure among recovery waiters.
+/// Accept direct backend errors too; never reconstruct status from formatted text.
+pub(crate) fn transport_error<'a>(
+    error: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a HttpError> {
+    error
+        .downcast_ref::<HttpError>()
+        .or_else(|| error.downcast_ref::<Arc<HttpError>>().map(AsRef::as_ref))
+}
 const MAX_JSON_BYTES: usize = 16 * 1024 * 1024;
 const SESSION_HEADER: &str = "mcp-session-id";
+
+pub(crate) type DispatchProvider = Arc<dyn Fn() -> HttpDispatch + Send + Sync>;
+pub(crate) type SessionObserver = Arc<dyn Fn(&str, Option<&ProtocolVersion>) + Send + Sync>;
+
+pub(crate) struct HttpDispatch {
+    pub(crate) session: Option<Arc<str>>,
+    pub(crate) version: Option<ProtocolVersion>,
+    pub(crate) headers: HashMap<HeaderName, HeaderValue>,
+}
 
 #[derive(Clone, Copy)]
 enum RequestOrigin {
@@ -52,10 +75,19 @@ impl PiHttpClient {
         // This map is already normalized and may contain caller session/protocol headers.
         let mut headers: HeaderMap = custom.into_iter().collect();
         if method == Method::POST {
-            headers.insert(header::ACCEPT, HeaderValue::from_static("application/json, text/event-stream"));
-            headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            headers.insert(
+                header::ACCEPT,
+                HeaderValue::from_static("application/json, text/event-stream"),
+            );
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
         } else if method == Method::GET {
-            headers.insert(header::ACCEPT, HeaderValue::from_static("text/event-stream"));
+            headers.insert(
+                header::ACCEPT,
+                HeaderValue::from_static("text/event-stream"),
+            );
         }
         if let Some(session) = session.filter(|session| !session.is_empty()) {
             insert_header(&mut headers, SESSION_HEADER, session)?;
@@ -72,7 +104,11 @@ impl PiHttpClient {
     }
 }
 
-fn insert_header(headers: &mut HeaderMap, name: &'static str, value: &str) -> Result<(), HttpError> {
+fn insert_header(
+    headers: &mut HeaderMap,
+    name: &'static str,
+    value: &str,
+) -> Result<(), HttpError> {
     let mut value = HeaderValue::from_str(value)
         .map_err(|_| client_error(PiHttpClientError::protocol("Invalid MCP HTTP header")))?;
     value.set_sensitive(true);
@@ -93,8 +129,10 @@ fn network_error(error: reqwest::Error) -> HttpError {
 fn scope_challenge(header: &str) -> bool {
     let lower = header.to_ascii_lowercase();
     lower.match_indices("error=").any(|(offset, _)| {
-        let boundary = offset == 0 || lower[..offset].ends_with(|c: char| c.is_whitespace() || c == ',');
-        let value = lower[offset + "error=".len()..].strip_prefix('"')
+        let boundary =
+            offset == 0 || lower[..offset].ends_with(|c: char| c.is_whitespace() || c == ',');
+        let value = lower[offset + "error=".len()..]
+            .strip_prefix('"')
             .unwrap_or(&lower[offset + "error=".len()..]);
         boundary && value.starts_with("insufficient_scope")
     })
@@ -118,7 +156,9 @@ fn observed_insufficient_scope(header: &str) -> bool {
         {
             return &quoted[..end] == "insufficient_scope";
         }
-        let end = value.find(|c: char| c.is_whitespace() || c == ',').unwrap_or(value.len());
+        let end = value
+            .find(|c: char| c.is_whitespace() || c == ',')
+            .unwrap_or(value.len());
         if end > 0 {
             return &value[..end] == "insufficient_scope";
         }
@@ -135,13 +175,21 @@ fn check_status(
     if status.is_success() {
         return Ok(());
     }
-    let challenge = response.headers().get(header::WWW_AUTHENTICATE)
+    let challenge = response
+        .headers()
+        .get(header::WWW_AUTHENTICATE)
         .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned());
     if status == StatusCode::UNAUTHORIZED
         || (status == StatusCode::FORBIDDEN && challenge.as_deref().is_some_and(scope_challenge))
     {
-        let insufficient_scope = challenge.as_deref().is_some_and(observed_insufficient_scope);
-        return Err(client_error(PiHttpClientError::auth(status, challenge, insufficient_scope)));
+        let insufficient_scope = challenge
+            .as_deref()
+            .is_some_and(observed_insufficient_scope);
+        return Err(client_error(PiHttpClientError::auth(
+            status,
+            challenge,
+            insufficient_scope,
+        )));
     }
     if status == StatusCode::NOT_FOUND && sdk_session {
         return Err(StreamableHttpError::SessionExpired);
@@ -152,16 +200,28 @@ fn check_status(
 }
 
 fn content_type(response: &reqwest::Response) -> Option<String> {
-    response.headers().get(header::CONTENT_TYPE)
+    response
+        .headers()
+        .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        .map(|value| value.split(';').next().unwrap_or_default().trim().to_ascii_lowercase())
+        .map(|value| {
+            value
+                .split(';')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+        })
 }
 
-async fn json_body(mut response: reqwest::Response) -> Result<ServerJsonRpcMessage, HttpError> {
+async fn json_body(mut response: reqwest::Response) -> Result<serde_json::Value, HttpError> {
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(network_error)? {
         if chunk.len() > MAX_JSON_BYTES.saturating_sub(bytes.len()) {
-            return Err(client_error(PiHttpClientError::limit("JSON response", MAX_JSON_BYTES)));
+            return Err(client_error(PiHttpClientError::limit(
+                "JSON response",
+                MAX_JSON_BYTES,
+            )));
         }
         bytes.extend_from_slice(&chunk);
     }
@@ -184,9 +244,14 @@ impl StreamableHttpClient for PiHttpClient {
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<StreamableHttpPostResponse, HttpError> {
         self.post_message_with_max_sse_event_size(
-            uri, message, session_id, auth_token, custom_headers,
+            uri,
+            message,
+            session_id,
+            auth_token,
+            custom_headers,
             StreamableHttpClientTransportConfig::default().max_sse_event_size,
-        ).await
+        )
+        .await
     }
 
     async fn post_message_with_max_sse_event_size(
@@ -198,39 +263,19 @@ impl StreamableHttpClient for PiHttpClient {
         custom_headers: HashMap<HeaderName, HeaderValue>,
         max_sse_event_size: usize,
     ) -> Result<StreamableHttpPostResponse, HttpError> {
-        let control = RequestControl::from_message(&message);
-        let wants_reply = matches!(&message, ClientJsonRpcMessage::Request(_));
-        let discover = matches!(&message, ClientJsonRpcMessage::Request(request)
-            if matches!(&request.request, ClientRequest::DiscoverRequest(_)));
-        let (request, wire_session) = self.request(
-            Method::POST, &uri, session_id.as_deref(), None,
-            auth_token.as_deref(), custom_headers,
-        )?;
-        let origin = if discover && session_id.is_none() && !wire_session {
-            RequestOrigin::DiscoverUnattached
-        } else {
-            RequestOrigin::Other
-        };
-        let request = request.json(&message);
-        if let Some(control) = control {
-            control.check_dispatch().map_err(|error| error.into_http())?;
+        PostRequest {
+            uri,
+            message,
+            session: session_id,
+            token: auth_token.clone(),
+            headers: custom_headers,
+            max_event_bytes: max_sse_event_size,
+            dispatch: None,
+            session_observer: None,
         }
-        let response = request.send().await.map_err(network_error)?;
-        check_status(&response, session_id.as_deref().is_some_and(|session| !session.is_empty()), origin)?;
-        if !wants_reply {
-            return Ok(StreamableHttpPostResponse::Accepted);
-        }
-        if matches!(response.status(), StatusCode::ACCEPTED | StatusCode::NO_CONTENT) {
-            return Err(client_error(PiHttpClientError::missing_reply()));
-        }
-        let session = response.headers().get(SESSION_HEADER)
-            .and_then(|value| value.to_str().ok())
-            .filter(|value| !value.is_empty()).map(str::to_owned);
-        match content_type(&response).as_deref() {
-            Some("application/json") => Ok(StreamableHttpPostResponse::Json(json_body(response).await?, session)),
-            Some("text/event-stream") => Ok(StreamableHttpPostResponse::Sse(sse::bounded(response, max_sse_event_size), session)),
-            _ => Err(client_error(PiHttpClientError::protocol("Unsupported MCP response content type"))),
-        }
+        .execute(self, auth_token)
+        .await?
+        .into_sdk()
     }
 
     async fn get_stream(
@@ -242,9 +287,14 @@ impl StreamableHttpClient for PiHttpClient {
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<BoxStream<'static, Result<sse_stream::Sse, sse_stream::Error>>, HttpError> {
         self.get_stream_with_max_sse_event_size(
-            uri, session_id, last_event_id, auth_token, custom_headers,
+            uri,
+            session_id,
+            last_event_id,
+            auth_token,
+            custom_headers,
             StreamableHttpClientTransportConfig::default().max_sse_event_size,
-        ).await
+        )
+        .await
     }
 
     async fn get_stream_with_max_sse_event_size(
@@ -256,19 +306,21 @@ impl StreamableHttpClient for PiHttpClient {
         custom_headers: HashMap<HeaderName, HeaderValue>,
         max_sse_event_size: usize,
     ) -> Result<BoxStream<'static, Result<sse_stream::Sse, sse_stream::Error>>, HttpError> {
-        let (request, _) = self.request(
-            Method::GET, &uri, session_id.as_deref(), last_event_id.as_deref(),
-            auth_token.as_deref(), custom_headers,
-        )?;
-        let response = request.send().await.map_err(network_error)?;
-        if response.status() == StatusCode::METHOD_NOT_ALLOWED {
-            return Err(StreamableHttpError::ServerDoesNotSupportSse);
+        // Keep the public SDK stream-only contract; the product worker retains metadata.
+        StreamRequest {
+            uri,
+            session: session_id,
+            cursor: last_event_id,
+            token: auth_token.clone(),
+            headers: custom_headers,
+            max_event_bytes: max_sse_event_size,
+            control: None,
+            dispatch: None,
+            session_observer: None,
         }
-        check_status(&response, session_id.as_deref().is_some_and(|session| !session.is_empty()), RequestOrigin::Other)?;
-        if content_type(&response).as_deref() != Some("text/event-stream") {
-            return Err(client_error(PiHttpClientError::protocol("Unsupported MCP GET response content type")));
-        }
-        Ok(sse::bounded(response, max_sse_event_size))
+        .execute(self, auth_token)
+        .await
+        .map(|response| response.body)
     }
 
     async fn delete_session(
@@ -281,12 +333,20 @@ impl StreamableHttpClient for PiHttpClient {
         // Terminal cleanup is deliberately not an application response: no classification,
         // body read, authentication reaction, or error propagation into SDK cleanup logging.
         let Ok((request, _)) = self.request(
-            Method::DELETE, &uri, Some(&session_id), None, auth_token.as_deref(), custom_headers,
+            Method::DELETE,
+            &uri,
+            Some(&session_id),
+            None,
+            auth_token.as_deref(),
+            custom_headers,
         ) else {
             return Ok(());
         };
         // Dropping either outcome discards the body/error; never wait for its contents.
-        let _ = request.timeout(std::time::Duration::from_secs(1)).send().await;
+        let _ = request
+            .timeout(std::time::Duration::from_secs(1))
+            .send()
+            .await;
         Ok(())
     }
 }

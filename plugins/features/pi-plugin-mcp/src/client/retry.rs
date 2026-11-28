@@ -43,7 +43,7 @@ fn rejected_unattached_discover(error: &ClientInitializeError) -> bool {
     let ClientInitializeError::TransportError { error, .. } = error else {
         return false;
     };
-    matches!(error.error.downcast_ref::<HttpError>(), Some(HttpError::Client(error))
+    matches!(crate::http_client::transport_error(error.error.as_ref()), Some(HttpError::Client(error))
         if error.discover_rejection().is_some())
 }
 
@@ -69,14 +69,14 @@ fn transient_service(error: &ServiceError) -> bool {
 fn transient_transport(error: &(dyn std::error::Error + 'static)) -> bool {
     // Finite private getters preserve evidence without exposing bodies/URLs or walking strings.
     // All product HTTP adapters use this backend; stdio and JSON-RPC errors never qualify.
-    let Some(HttpError::Client(error)) = error.downcast_ref::<HttpError>() else {
+    let Some(HttpError::Client(error)) = crate::http_client::transport_error(error) else {
         return false;
     };
     match error.status() {
         Some(status) => transient_status(status),
-        None => error.network_flags().is_some_and(|flags| {
-            flags.connect || flags.timeout || flags.request || flags.body
-        }),
+        None => error
+            .network_flags()
+            .is_some_and(|flags| flags.connect || flags.timeout || flags.request || flags.body),
     }
 }
 
@@ -164,11 +164,9 @@ mod tests {
             .await
             .unwrap_err();
         assert!(transient_transport(&HttpError::Client(error.into())));
-        assert!(!transient_transport(
-            &HttpError::UnexpectedServerResponse(
-                "HTTP 503: network".into()
-            )
-        ));
+        assert!(!transient_transport(&HttpError::UnexpectedServerResponse(
+            "HTTP 503: network".into()
+        )));
     }
 
     #[test]
@@ -187,13 +185,9 @@ mod tests {
             rmcp::ErrorData::internal_error("HTTP 503", None)
         )));
         assert!(!transient_service(&ServiceError::TransportClosed));
-        assert!(!transient_transport(
-            &HttpError::SessionExpired
-        ));
-        assert!(!transient_transport(
-            &HttpError::Auth(
-                rmcp::transport::auth::AuthError::AuthorizationRequired
-            )
-        ));
+        assert!(!transient_transport(&HttpError::SessionExpired));
+        assert!(!transient_transport(&HttpError::Auth(
+            rmcp::transport::auth::AuthError::AuthorizationRequired
+        )));
     }
 }

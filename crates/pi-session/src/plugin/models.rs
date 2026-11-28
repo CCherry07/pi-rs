@@ -128,7 +128,7 @@ impl ModelsContextAccess for PiPluginContext {
         model_id: ModelId,
     ) -> Result<bool, PluginContextError> {
         let _provider_reload = if scope == PluginContextScope::Command {
-            Some(self.provider_reload_gate.lock().await)
+            Some(self.generation_reload_gate.lock().await)
         } else {
             None
         };

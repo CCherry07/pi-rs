@@ -80,7 +80,11 @@ impl LocalOAuthClient {
         )
     }
 
-    pub(super) fn prepared(manager: AuthorizationManager, store: ServerStore, mode: ConnectionMode) -> Self {
+    pub(super) fn prepared(
+        manager: AuthorizationManager,
+        store: ServerStore,
+        mode: ConnectionMode,
+    ) -> Self {
         Self::with_settings(manager, store, RefreshSettings::Prepared, mode)
     }
 
@@ -110,9 +114,7 @@ impl LocalOAuthClient {
             .flatten()
     }
 
-    fn check_dispatch(
-        control: Option<&RequestControl>,
-    ) -> Result<(), HttpError> {
+    fn check_dispatch(control: Option<&RequestControl>) -> Result<(), HttpError> {
         control.map_or(Ok(()), |control| {
             control.check_dispatch().map_err(|error| error.into_http())
         })
@@ -120,7 +122,9 @@ impl LocalOAuthClient {
 
     fn check_completion(control: Option<&RequestControl>) -> Result<(), HttpError> {
         control.map_or(Ok(()), |control| {
-            control.check_completion().map_err(|error| error.into_http())
+            control
+                .check_completion()
+                .map_err(|error| error.into_http())
         })
     }
 
@@ -151,6 +155,21 @@ impl LocalOAuthClient {
         F: Fn(Option<String>) -> Fut,
         Fut: Future<Output = Result<T, HttpError>>,
     {
+        self.authorized_request(control, true, auth_token, call)
+            .await
+    }
+
+    async fn authorized_request<T, F, Fut>(
+        &self,
+        control: Option<RequestControl>,
+        shared_recovery_budget: bool,
+        auth_token: Option<String>,
+        call: F,
+    ) -> Result<T, HttpError>
+    where
+        F: Fn(Option<String>) -> Fut,
+        Fut: Future<Output = Result<T, HttpError>>,
+    {
         Self::check_dispatch(control.as_ref())?;
         let acquire = async {
             match auth_token {
@@ -165,7 +184,10 @@ impl LocalOAuthClient {
             Err(StreamableHttpError::Client(error)) if error.auth_rejection().is_some() => error,
             result => return result,
         };
-        if error.auth_rejection().is_some_and(|rejection| rejection.is_insufficient_scope()) {
+        if error
+            .auth_rejection()
+            .is_some_and(|rejection| rejection.is_insufficient_scope())
+        {
             // Scope changes require explicit sign-in; refresh cannot enlarge the grant.
             return Err(StreamableHttpError::Client(error.require_sign_in()));
         }
@@ -180,7 +202,8 @@ impl LocalOAuthClient {
         // reaction/replay, independent of the originating POST/resource allowance. This never
         // reexecutes the RPC. Outer reconnect eligibility, completion and cancellation/epoch
         // guarantees remain separate SSE-RESUME-CONTROL questions, not this local auth bound.
-        if let Some(control) = &control
+        if shared_recovery_budget
+            && let Some(control) = &control
             && !control.try_recover().map_err(|error| error.into_http())?
         {
             return Err(StreamableHttpError::Client(error));
@@ -214,40 +237,62 @@ impl RefreshState {
     }
 
     fn remember_token(&self, token: Option<String>) -> Result<(), RefreshFailure> {
-        *self.last_token.lock().map_err(|_| RefreshFailure::Failed("MCP token state is unavailable".into()))? = token;
+        *self
+            .last_token
+            .lock()
+            .map_err(|_| RefreshFailure::Failed("MCP token state is unavailable".into()))? = token;
         Ok(())
     }
 
     async fn current_token(&self) -> Result<Option<String>, RefreshFailure> {
-        Ok(self.credentials().await?.and_then(|stored| stored.token_response)
+        Ok(self
+            .credentials()
+            .await?
+            .and_then(|stored| stored.token_response)
             .map(|token| token.access_token().secret().to_owned()))
     }
 
     async fn can_recover(&self, stale: Option<&str>) -> Result<bool, RefreshFailure> {
         let current = self.credentials().await?;
-        Ok(current.as_ref().and_then(|stored| stored.token_response.as_ref()).is_some_and(|token| {
-            Some(token.access_token().secret().as_str()) != stale || token.refresh_token().is_some()
-        }))
+        Ok(current
+            .as_ref()
+            .and_then(|stored| stored.token_response.as_ref())
+            .is_some_and(|token| {
+                Some(token.access_token().secret().as_str()) != stale
+                    || token.refresh_token().is_some()
+            }))
     }
 
     async fn token(self: &Arc<Self>) -> Result<(Option<String>, u64), RefreshFailure> {
         // Pi waits for an already-running exchange before reading its current stored token.
-        let active = self.flight.lock().await.as_ref()
-            .filter(|flight| flight.result.borrow().is_none()).map(|flight| flight.result.clone());
+        let active = self
+            .flight
+            .lock()
+            .await
+            .as_ref()
+            .filter(|flight| flight.result.borrow().is_none())
+            .map(|flight| flight.result.clone());
         if let Some(active) = active {
             let _ = wait_refresh(active).await;
         }
         let observed = self.completed.load(Ordering::Acquire);
         let stored = self.credentials().await?;
-        let Some((credentials, token)) = stored.as_ref()
+        let Some((credentials, token)) = stored
+            .as_ref()
             .and_then(|stored| stored.token_response.as_ref().map(|token| (stored, token)))
         else {
             return Ok((None, observed));
         };
         let expired = match (token.expires_in(), credentials.token_received_at) {
             (Some(expires), Some(received)) => {
-                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-                expires.as_secs().saturating_sub(now.saturating_sub(received)) <= 30
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                expires
+                    .as_secs()
+                    .saturating_sub(now.saturating_sub(received))
+                    <= 30
             }
             _ => false,
         };
@@ -255,7 +300,10 @@ impl RefreshState {
         if expired && token.refresh_token().is_some() {
             // Proactive failure is not terminal: use CURRENT storage, including logout/new login.
             let _ = self.refresh(Some(current), observed).await;
-            return Ok((self.current_token().await?, self.completed.load(Ordering::Acquire)));
+            return Ok((
+                self.current_token().await?,
+                self.completed.load(Ordering::Acquire),
+            ));
         }
         Ok((Some(current), observed))
     }
@@ -346,7 +394,9 @@ async fn wait_refresh(mut result: watch::Receiver<Option<RefreshResult>>) -> Ref
         if let Some(value) = result.borrow_and_update().clone() {
             return value;
         }
-        result.changed().await
+        result
+            .changed()
+            .await
             .map_err(|_| RefreshFailure::Failed("MCP OAuth refresh task stopped".into()))?;
     }
 }
@@ -413,6 +463,36 @@ impl CredentialStore for RefreshStore {
     }
 }
 
+impl crate::http_client::HttpClient for LocalOAuthClient {
+    async fn post(
+        &self,
+        request: crate::http_client::PostRequest,
+    ) -> Result<crate::http_client::PostResponse, HttpError> {
+        self.request(
+            &request.uri,
+            self.control(&request.message),
+            request.token.clone(),
+            |token| request.execute(&self.http, token),
+        )
+        .await
+    }
+
+    async fn open_stream(
+        &self,
+        request: crate::http_client::StreamRequest,
+    ) -> Result<crate::http_client::StreamResponse, HttpError> {
+        // Stream fences survive every token/refresh await, but auth reaction remains
+        // local to this GET: an already-spent application allowance is irrelevant.
+        self.authorized_request(
+            request.control.clone(),
+            false,
+            request.token.clone(),
+            |token| request.execute(&self.http, token),
+        )
+        .await
+    }
+}
+
 impl StreamableHttpClient for LocalOAuthClient {
     type Error = PiHttpClientError;
     async fn post_message(
@@ -468,7 +548,10 @@ impl StreamableHttpClient for LocalOAuthClient {
             Ok(token) => token.clone(),
             Err(_) => return Ok(()),
         };
-        let _ = self.http.delete_session(uri, session_id, token, custom_headers).await;
+        let _ = self
+            .http
+            .delete_session(uri, session_id, token, custom_headers)
+            .await;
         Ok(())
     }
     async fn get_stream(
@@ -514,11 +597,13 @@ impl StreamableHttpClient for LocalOAuthClient {
 }
 
 #[cfg(test)]
+mod sse_common_tests;
+#[cfg(test)]
 pub(crate) mod sse_fixture;
 #[cfg(test)]
 mod sse_tests;
 #[cfg(test)]
-mod sse_common_tests;
+mod stream_control_tests;
 #[cfg(test)]
 mod supervised_tests;
 #[cfg(all(test, unix))]

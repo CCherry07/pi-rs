@@ -44,7 +44,7 @@ impl McpLibrary {
     /// Failed identities are still diagnosed by `prepare_supervised_generation`.
     pub fn supervised_credential_watch(&self) -> Result<crate::McpCredentialWatch, String> {
         let configs = self
-            .entries()?
+            .generation_entries()?
             .into_iter()
             .filter(|entry| entry.config.enabled())
             .filter_map(|entry| self.resolve_identity(entry).ok())
@@ -78,7 +78,8 @@ impl McpLibrary {
         budget: Duration,
     ) -> Result<PreparedMcpGeneration, String> {
         let candidate = supervisor.begin_candidate();
-        let (entries, auto_enable_codemode) = self.configuration_replacing(None)?;
+        let (entries, auto_enable_codemode) = self.generation_configuration()?;
+        let extension_override_notices = self.extension_override_notices(&entries);
         // Check all identities, including entries whose later resolution will fail.
         crate::validate_configs(
             &entries
@@ -176,6 +177,7 @@ impl McpLibrary {
         let mut library = self.clone();
         library.generation = Some(watch.downgrade());
         library.server_readiness = server_readiness.clone();
+        library.extension_override_notices = extension_override_notices;
         library.server_directory =
             render_supervised_directory(&policies, &server_readiness, &instructions);
         library.pending_direct = direct
@@ -226,7 +228,7 @@ impl McpLibrary {
             server: name.clone(),
             message,
         };
-        let source = self.path(entry.scope).map_err(&failed)?;
+        let source = self.source_path(&entry).map_err(&failed)?;
         let auth_revision = match entry.config.transport() {
             Some(McpTransport::Http { headers, .. })
                 if !headers

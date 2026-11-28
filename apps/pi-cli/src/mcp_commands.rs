@@ -589,6 +589,7 @@ fn scope_name(scope: McpScope) -> &'static str {
     match scope {
         McpScope::Global => "global",
         McpScope::Project => "project",
+        McpScope::Extension => "extension",
     }
 }
 
@@ -596,6 +597,9 @@ fn scoped_path(context: &McpCommandContext, scope: McpScope) -> PathBuf {
     match scope {
         McpScope::Global => context.agent_dir.join("mcp.json"),
         McpScope::Project => context.cwd.join(".pi/mcp.json"),
+        McpScope::Extension => {
+            unreachable!("CLI configuration commands never target generation-local extensions")
+        }
     }
 }
 

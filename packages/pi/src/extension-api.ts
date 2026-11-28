@@ -1,5 +1,6 @@
 import type { ExtensionUI } from "./extension-ui.js";
 import type { HostMode, ToolExecutionMode } from "./extension-protocol.js";
+import type { McpServerConfig, McpServersChangeEvent, RegisteredMcpServer } from "./mcp-servers.js";
 
 export interface PiContextUsage {
   tokens: number | null;
@@ -189,10 +190,20 @@ export interface PiExtensionApi {
   setThinkingLevel(level: string): void;
   registerProvider(nameOrProvider: string | Record<string, unknown>, config?: unknown): void;
   unregisterProvider(name: string): void;
+  registerMcpServer(name: string, config: McpServerConfig): void;
+  unregisterMcpServer(name: string): void;
+  getMcpServers(): RegisteredMcpServer[];
   readonly events: {
     emit(channel: string, data: unknown): void;
     on(channel: string, handler: (data: unknown) => unknown): () => void;
   };
+  on<TResult = unknown>(
+    event: 'mcp_servers_change',
+    handler: (
+      event: McpServersChangeEvent,
+      context: PiExtensionContext,
+    ) => TResult | Promise<TResult>,
+  ): () => void;
   on<TEvent extends Record<string, unknown>, TResult = unknown>(
     event: string,
     handler: (

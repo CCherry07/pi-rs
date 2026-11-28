@@ -174,6 +174,38 @@ preserves lower-layer models, and unregistering restores the built-in/`models.js
 next safe generation. The full `Provider` object overload and the `streamSimple`, `refreshModels`,
 and OAuth callbacks are recognized and inactive.
 
+`pi.registerMcpServer(name, config)`, `pi.unregisterMcpServer(name)`, and `pi.getMcpServers()` are
+active while an extension loads. Registrations are generation-local and are never written to
+`mcp.json` or session history. The same extension path may replace its registration; another
+extension cannot replace or remove it, and names whose `-`/`_` forms share a tool namespace are
+rejected. `getMcpServers()` returns detached copies. Stdio (`command`, optional `args`, `env`, `cwd`)
+and Streamable HTTP (`url`, optional `headers`, `oauth`, `auth.provider`) configs support the same
+`enabled`, `description`, `timeout`, `exposure`, and `toolExposure` policy fields as configured MCP.
+A global or trusted-project `mcp.json` server with the same normalized namespace takes precedence.
+Registering or unregistering after loading stages an owner-scoped mutation and requests a complete
+session-generation reload. The active generation stays immutable until the replacement has loaded the
+extensions, replayed mutations whose source extension still exists, and passed native MCP validation.
+Accepted mutations survive later reloads in that live session, do not affect sibling sessions, and
+are not written to configuration or history. Failed candidates leave the current connections in
+place. After an accepted change activates, `mcp_servers_change` handlers run in the replacement
+generation with `{ type: "mcp_servers_change", servers }`, where `servers` is the complete detached
+snapshot of extension registrations. Unlike legacy Pi, the callback follows the whole-generation
+boundary instead of running immediately in the retiring generation; ordinary reloads do not emit it.
+The native MCP component consumes these registrations even when no extension installs this optional
+observer. Legacy's connector-less warning is not emitted because, unlike its replaceable JavaScript
+MCP connector, the native component is always part of a JavaScript-hosted product generation.
+
+```ts
+import type { PiExtensionApi } from '@pi-rs/cli'
+
+export default function (pi: PiExtensionApi) {
+  pi.registerMcpServer('jira', {
+    url: 'https://mcp.example.com/jira',
+    exposure: 'codemode',
+  })
+}
+```
+
 Message/Markdown/entry renderer registrations, tool call/result renderers and global tool renderer
 registration are active in interactive mode. Extension flags are active; boolean flags use `--name` and string
 flags accept both `--name value` and `--name=value`; first registration wins for duplicate names,
